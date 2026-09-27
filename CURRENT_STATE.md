@@ -34,9 +34,11 @@ Normal checkout: `H:/000ProjectCode/AI_Project_Controller`.
 Stable master remains Phase 04; no Phase 05 PASS tag or Phase 06 branch.
 
 ## Last Commit
-Verified pre-attempt HEAD: `fddb51f59b7358e8b3bd88ad72f6cc6f25b633ec`.
-This implementation/state is prepared for `AIPC Phase 05 attempt 01 - prompt engine`.
-Its actual resulting hash will be recorded in the subsequent documentation handoff.
+Implementation attempt: `2475041eeeb9d53eded6984175a99633dcd0cf1f`.
+`AIPC Phase 05 attempt 01 - prompt engine`.
+This documentation handoff records the exact implementation hash for external review;
+its own resulting HEAD is reported separately after commit.
+See docs/PHASE_05_EVIDENCE.md for acceptance and command evidence.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -82,6 +84,7 @@ Windows / Python 3.13.0; local pytest 9.1.1, Ruff 0.16.9, Pydantic 2.13.5.
   test writes UTF-8 bytes directly, confirming deterministic strings across hash seeds.
 - No type checker configured. Python 3.11/non-Windows and wheel install unverified.
 - No global installs or new dependency declarations. Git diff checks pass.
+- Secret-pattern audit: 110 tracked/staged files scanned, no matches or tracked .env.
 
 ## Remaining Work
 External reviewer decision: PASS / REVISE / BLOCKED. No implementation work remains known.
