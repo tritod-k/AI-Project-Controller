@@ -10,18 +10,21 @@ AI Project Controller
 Phase 01 — Canonical Domain Models
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING
+PASS
 
 ## Last Stable Checkpoint
-`aipc-phase-00-pass` on stable development branch `master`.
-Stable commit: `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
-This checkpoint contains the approved Phase 00 implementation and PASS-state update.
+`aipc-phase-01-pass` on stable development branch `master`.
+This checkpoint includes the approved Phase 01 implementation, documentation/handoff
+and this external-review PASS-state update. Its exact target hash is recorded in
+the finalization report; the commit cannot embed its own hash without changing it.
+Previous stable checkpoint: `aipc-phase-00-pass` at
+`ae0e476d1586bdcfea6b0a46005d675dc618f12f` (preserved unchanged).
 
 ## Approved Phase 00 Implementation Commit
 `16869718f6e23f2d517ceec0fcb8aad491b926f9`
@@ -34,25 +37,35 @@ External reviewer approved PASS; no hash discrepancy.
 
 ## Current Branch / Worktree
 Stable branch: `master`.
-Current attempt branch: `codex/phase-01-attempt-01`.
+Current checkout branch after finalization: `master`.
+Retained approved attempt branch: `codex/phase-01-attempt-01`.
 Retained prior attempt branch: `codex/phase-00-attempt-01`.
 Checkout: `H:\000ProjectCode\AI_Project_Controller` (normal checkout).
-Phase 00 stable branch/tag remain unchanged. No Phase 01 PASS tag exists.
+Approved history integrated into master by fast-forward; no history rewritten.
+Phase 00 stable tag remains unchanged. No Phase 02 branch was created.
 
 ## Last Commit
-Implementation attempt: `8a44d7ea2cc0a85488850eb9ed37127ad433f861`.
+Actual HEAD verified before finalization: `7b7e8783335c80bdd7fa449a69ba9e8223dbb1a7`.
+`AIPC Phase 01 attempt 01 - record review handoff`
+Approved implementation attempt: `8a44d7ea2cc0a85488850eb9ed37127ad433f861`.
 `AIPC Phase 01 attempt 01 - canonical domain models`
-The subsequent documentation-only handoff records this exact implementation hash;
-its HEAD hash is supplied separately in the final report. No implementation changed.
+Finalization commit message: `AIPC Phase 01 PASS - canonical domain models`.
+The PASS-state commit contains this file and is identified by `aipc-phase-01-pass`;
+its exact hash is supplied in the finalization report. Implementation is unchanged.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
+- Phase 01 — Canonical Domain Models: PASS (external reviewer approved).
 
-## Authorized Current Phase
-Phase 01 — Canonical Domain Models
-Implementation complete; awaiting external review. No later phase is authorized.
+## Next Authorized Phase
+Phase 02 — Project Definition + State Machine
+
+## Phase 02 Status
+NOT_STARTED. Authorized as the next phase; no Phase 02 implementation or branch
+was started during this finalization session.
 
 ## Current Work
+- Phase 01 external PASS recorded and stable checkpoint finalized on master.
 - Four provider-independent Pydantic 2 root contracts: TaskRequest, AgentResult,
   ReviewResult and ApprovalRequest; supporting typed records and five enums.
 - Required schema version 1.0; strict structures, JSON round trips, nullable unknown
@@ -86,9 +99,16 @@ All tools/dependencies are project-local.
 - Type checking: no type checker configured.
 
 See `docs/PHASE_01_EVIDENCE.md` for commands, acceptance evidence and exact commit.
+That evidence describes the original attempt before external approval.
+
+Finalization verification on 2026-09-27: 216/216 tests passed; Ruff lint and format
+checks passed (16 files); four-schema consistency check passed. All exited 0.
+Only CURRENT_STATE.md changed during finalization; implementation/tests/schemas
+remain identical to the approved documentation/handoff HEAD.
 
 ## Remaining Work
-External Phase 01 review only. No remaining authorized implementation work.
+No remaining Phase 01 implementation or review work. Stop after finalization.
+Phase 02 is authorized as the next phase and remains NOT_STARTED.
 
 ## Known Issues
 No known implementation defects. Python 3.11 and non-Windows execution remain
@@ -97,31 +117,47 @@ Python canonical validation remains required. Strict Python integer semantics
 also exceed JSON Schema's integral-number semantics. These limits are documented.
 
 ## Last Reviewer Result
-Phase 01 external Phase Gate: PENDING. Phase 00 external Phase Gate: PASS.
-Supplemental read-only code review found one timezone serialization issue, fixed
-with regression tests. This code review does not grant Phase Gate approval.
+PASS
+External reviewer approval supplied by the human owner on 2026-09-27:
+
+- Canonical models are provider-neutral and required validation is implemented.
+- JSON serialization/round trips, generated schemas and drift checks accepted.
+- Existing Phase 00 behavior intact; 216/216 tests pass; no Phase 02+ implementation.
+- Mutable collections do not block Phase 01. Future external/provider boundary
+  code must revalidate canonical objects before downstream use, including after
+  mutation. Mutation safety may be revisited later if required.
+- Later phase-numbering discrepancy remains a future documentation issue;
+  it does not block Phase 01.
+
+Phase 00 external Phase Gate remains PASS.
 
 ## Required Fixes
-None outstanding from supplemental code review. Await external Phase 01 decision.
+None for Phase 01.
 Resolve later-phase numbering discrepancy before authorizing affected phases.
 
 ## Recovery Notes
 - Read instructions/state and inspect Git status/log/branch before resuming.
 - Preserve valid work and unknown human edits; do not reset or clean the checkout.
-- Stable master/tag remain at `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
+- Stable master and `aipc-phase-01-pass` contain the finalized Phase 01 state.
+- Approved attempt/handoff commits and both attempt branches remain recoverable.
+- Phase 00 tag remains at `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
 - Install `.venv` dependencies with `pip install -e '.[dev]'`; ignored local build
   output and wheel verification environments may be recreated.
 - Python models are the schema source; use the generator and `--check` after edits.
 - No structured controller state/checkpoint system exists; no persisted-state conflict.
-- Resume Phase 01 only if review requests revisions. Do not mark PASS or advance.
+- Phase 01 is approved. Phase 02 is next authorized but remains NOT_STARTED here.
 
 ## Future Considerations
 AGENTS.md and MASTER_PLAN.md differ in numbering after Phase 06. Resolve before
 affected later phases are authorized. Original blueprint files remain intact.
 AgentCapabilities and all runtime orchestration belong to later phases.
+Revalidate canonical objects at external/provider boundaries before downstream use;
+revisit collection mutation safety later if runtime requirements warrant it.
 
 ## Next Action
-Submit Phase 01 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
+Phase 01 finalization complete. Stop this session.
+Phase 02 — Project Definition + State Machine is authorized as the next phase
+and remains NOT_STARTED.
 
 ## Files to Read on Resume
 - `AGENTS.md`
@@ -134,4 +170,4 @@ Submit Phase 01 results to the external ChatGPT reviewer and wait for PASS / REV
 - relevant Phase 01 source/tests
 
 ## Updated
-2026-09-27T08:53:45+07:00
+2026-09-27T09:00:26+07:00
