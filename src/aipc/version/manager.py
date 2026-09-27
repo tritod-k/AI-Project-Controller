@@ -28,10 +28,12 @@ from aipc.version.models import (
     StableCheckpointAuthorization,
     checkpoint_identity,
 )
+from aipc.version.operations import current_owner, finish_intent, publish_intent
+from aipc.version.reconciliation import ReconciliationOperations
 from aipc.version.worktrees import WorktreeOperations
 
 
-class VersionManager(WorktreeOperations):
+class VersionManager(WorktreeOperations, ReconciliationOperations):
     def __init__(
         self,
         repository: Path | str,
@@ -107,6 +109,11 @@ class VersionManager(WorktreeOperations):
             raise VersionManagerError(
                 "metadata unavailable or mutation lock held; inspect, do not auto-remove"
             ) from exc
+        self._operation_owner = current_owner(self.repository, self.clock)
+        # An interrupted owner publication leaves a legacy/unknown lock, never auto-cleaned.
+        from aipc.version.operations import write_json_atomic as write_owner
+
+        write_owner(lock / "owner.json", self._operation_owner.model_dump(mode="json"))
         try:
             identity = self.metadata_root / "identity.json"
             if identity.exists():
@@ -125,6 +132,9 @@ class VersionManager(WorktreeOperations):
                 "operation publication failed; inspect preserved partial state"
             ) from exc
         finally:
+            if self._load(lock / "owner.json") != self._operation_owner.model_dump(mode="json"):
+                raise VersionManagerError("operation lock ownership changed; preserve lock")
+            (lock / "owner.json").unlink()
             lock.rmdir()
 
     def _checkpoint_path(self, identifier):
@@ -260,8 +270,10 @@ class VersionManager(WorktreeOperations):
             or self.git.ref(ref.replace("refs/tags/", "refs/heads/", 1)) is not None
         ):
             raise CheckpointConflictError("existing unmanaged Git ref must not be overwritten")
+        intent_path, intent = publish_intent(self, record)
         self.git.create_ref(ref, oid)
         write_json_atomic(path, record.model_dump(mode="json"))
+        finish_intent(intent_path, intent)
         return self.inspect_checkpoint(identifier)
 
     def create_pre_phase_checkpoint(self, phase_id: str, parent_checkpoint: str | None = None):

@@ -76,3 +76,12 @@ relative, hashed artifact indexes and atomically publish an attempt manifest. De
 commands/tests remain distinct from observed Git changes and parsed logs. Missing or
 failed evidence remains explicit, never a phase decision. No execution authority or
 state advancement is introduced. See [EVIDENCE_COLLECTOR.md](EVIDENCE_COLLECTOR.md).
+
+# Phase 08 operational recovery
+
+RecoveryManager consumes persistent ProjectState and VersionManager facts through private
+typed observations, decisions and atomic journals. Read-only inspection precedes explicit
+planning/execution and precondition revalidation. VersionManager retains Git safety authority;
+recovery adds write-ahead publication intent, owner-aware lock inspection, continuation data
+and isolated restore preparation. It never consumes raw provider responses or judges code.
+Public canonical/project schemas remain unchanged. See [recovery design](RECOVERY_MANAGER.md).

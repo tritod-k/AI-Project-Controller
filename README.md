@@ -137,4 +137,13 @@ approved stable checkpoints. It validates Git/metadata identity and ancestry, re
 unknown edits, and creates isolated attempt/restore worktrees without resetting the
 active checkout. Metadata survives reload using existing atomic JSON storage.
 See [version and checkpoint contracts](docs/VERSION_MANAGER.md). The CLI remains
-help-only; automatic recovery and later orchestration are deferred.
+help-only; Phase 08 adds explicit recovery preparation below. Later orchestration is deferred.
+
+## Phase 08 Recovery Manager
+
+RecoveryManager separates read-only diagnosis from explicitly journaled recovery execution.
+It validates persistent project/attempt/checkpoint/worktree facts, preserves known partial
+work, reports provider waits, refuses ambiguous edits/ownership, and prepares isolated
+restores through VersionManager. Durable publication intents permit narrowly proven
+metadata reconciliation; stale locks require dead-owner evidence and remain audited.
+No provider, Reviewer or Phase Gate is executed. See [recovery contracts](docs/RECOVERY_MANAGER.md).

@@ -2493,6 +2493,10 @@ Protect every phase with Git-backed checkpoints and enable safe rollback/resume.
 
 # Phase 08 — Recovery Manager
 
+Phase 08 implementation contract: [Recovery Manager](docs/RECOVERY_MANAGER.md).
+Under the authorized Phase 08 scope, provider retry/reconnect are structured continuation
+hints only; no provider dispatch, fallback routing or orchestration loop is implemented.
+
 ## Goal
 
 Recover safely from interrupted execution.

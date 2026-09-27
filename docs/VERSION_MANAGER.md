@@ -1,9 +1,15 @@
 # Version & Checkpoint Manager (Phase 07)
 
+Phase 08 adds [guarded recovery integration](RECOVERY_MANAGER.md): new operations publish
+checkpoint intent before ref creation and owner information in the mutation lock. Existing
+checkpoint/worktree contracts remain compatible. Recovery policy stays outside VersionManager;
+explicit reconciliation primitives never move refs or infer review authority. Earlier
+Phase 07 evidence retains its historical description of deferred recovery functionality.
+
 `aipc.version.VersionManager` supplies Git-backed checkpoint mechanics and explicit
 isolated restore/worktree primitives. It neither decides review verdicts nor executes
-workers. Phase 08 will consume these primitives for recovery; no recovery workflow,
-heartbeat, quota handling, fallback, reviewer or Phase Gate is implemented here.
+workers. Phase 08 consumes these primitives through the separate RecoveryManager;
+heartbeat and quota policy remain outside this module, as do fallback, reviewer and Phase Gate.
 
 ## Lifecycle and authority
 
