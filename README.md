@@ -147,3 +147,12 @@ work, reports provider waits, refuses ambiguous edits/ownership, and prepares is
 restores through VersionManager. Durable publication intents permit narrowly proven
 metadata reconciliation; stale locks require dead-owner evidence and remain audited.
 No provider, Reviewer or Phase Gate is executed. See [recovery contracts](docs/RECOVERY_MANAGER.md).
+
+## Phase 09 Reviewer + Phase Gate
+
+The provider-neutral reference Reviewer evaluates explicit objective criteria against
+validated canonical results and Phase 06 evidence. A separate read-only Phase Gate
+binds structured reviews to the exact Phase 07 attempt and returns logical PASS,
+repair or resolution actions. It does not execute those actions. Arbitrary semantic
+criteria remain UNVERIFIED; no LLM reviewer, provider call or Controller loop is
+included. See [review and gate contracts](docs/REVIEW_GATE.md).

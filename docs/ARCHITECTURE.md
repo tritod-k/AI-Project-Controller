@@ -1,5 +1,13 @@
 # Current architecture
 
+Phase 09 adds provider-neutral review under `aipc.review`. Revalidated canonical
+task/result and Phase 06 evidence feed explicit objective criterion evaluators and
+canonical ReviewResult; a separate read-only PhaseGate checks review, state and exact
+Phase 07 attempt binding before returning logical actions and existing stable
+authorization. It never performs VersionManager or StateManager mutations. See
+[review and gate contracts](REVIEW_GATE.md). A semantic LLM reviewer (Phase 13)
+and the Controller orchestration loop (Phase 10) remain absent.
+
 Phase 07 adds `aipc.version`: strict private checkpoint/authorization/worktree records,
 VersionManager, centralized GitBackend and worktree operations. PRE_PHASE captures a
 clean base; ATTEMPT records caller-created committed work; STABLE requires explicit
