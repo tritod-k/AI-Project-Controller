@@ -7,125 +7,125 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 00 — Repository Bootstrap
+Phase 01 — Canonical Domain Models
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 1 (Git attempt 01)
+Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-00-pass` on the stable development branch `master`.
-This checkpoint includes the approved implementation and this external-review
-PASS-state update. The exact tag target is recorded in the finalization report.
-Original blueprint baseline remains recoverable at `4a20add1b0d14f0047d3f793fa08824c27ebb2bd`.
+`aipc-phase-00-pass` on stable development branch `master`.
+Stable commit: `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
+This checkpoint contains the approved Phase 00 implementation and PASS-state update.
 
 ## Approved Phase 00 Implementation Commit
 `16869718f6e23f2d517ceec0fcb8aad491b926f9`
 `AIPC Phase 00 attempt 01 - repository bootstrap`
-Verified against the repository; no discrepancy with the external review reference.
+External reviewer approved PASS; no hash discrepancy.
 
 ## Initial Baseline Commit
 `4a20add1b0d14f0047d3f793fa08824c27ebb2bd`
 `AIPC Blueprint v1.2 - initial project baseline`
-All five original blueprint files were committed before implementation.
 
 ## Current Branch / Worktree
 Stable branch: `master`.
-Retained attempt branch: `codex/phase-00-attempt-01`.
-Checkout: `H:\000ProjectCode\AI_Project_Controller` (normal checkout, not a linked worktree).
+Current attempt branch: `codex/phase-01-attempt-01`.
+Retained prior attempt branch: `codex/phase-00-attempt-01`.
+Checkout: `H:\000ProjectCode\AI_Project_Controller` (normal checkout).
+Phase 00 stable branch/tag remain unchanged. No Phase 01 PASS tag exists.
 
 ## Last Commit
-Last implementation commit: `16869718f6e23f2d517ceec0fcb8aad491b926f9`.
-Finalization commit message: `AIPC Phase 00 PASS - repository bootstrap`.
-The finalization commit contains this state update and is identified by the stable
-tag `aipc-phase-00-pass`; its exact hash is supplied in the finalization report.
-A commit cannot embed its own hash without changing that hash.
+Pre-attempt stable commit: `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
+`AIPC Phase 00 PASS - repository bootstrap`
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
 
-## Next Authorized Phase
+## Authorized Current Phase
 Phase 01 — Canonical Domain Models
-
-## Phase 01 Status
-NOT_STARTED. Authorized as the next phase; no implementation was started in this finalization session.
+Implementation complete; awaiting external review. No later phase is authorized.
 
 ## Current Work
-- Phase 00 external-review approval recorded; stable checkpoint finalized on `master`.
-- Installable Python 3.11+ setuptools package, module/console help-only CLI.
-- Standard-library JSON logging skeleton with UTC timestamp and optional correlation fields.
-- Pytest and Ruff configuration, 12 bootstrap tests, required directory foundations.
-- Setup/architecture documentation, names-only environment example and generated-file exclusions.
-- No canonical models, provider integration, schemas, controller state or later-phase logic.
+- Four provider-independent Pydantic 2 root contracts: TaskRequest, AgentResult,
+  ReviewResult and ApprovalRequest; supporting typed records and five enums.
+- Required schema version 1.0; strict structures, JSON round trips, nullable unknown
+  evidence, timestamp/count consistency checks and JSON-only metadata extensions.
+- Four generated Draft 2020-12 schemas, deterministic generation and read-only drift checks.
+- Contract documentation, independent schema validation and malformed-input coverage.
+- Bootstrap CLI/logging preserved; no provider adapter, normalization, reviewer,
+  routing, project state machine, Version Manager or Recovery Manager implemented.
 
 ## Tests
-Validated on Windows with project-local Python 3.13.0, pytest 9.1.1 and Ruff 0.16.9.
+Executed on Windows, Python 3.13.0, pytest 9.1.1, Ruff 0.16.9,
+Pydantic 2.13.5, jsonschema 4.26.0 and rfc3339-validator 0.1.4.
+All tools/dependencies are project-local.
 
-- `python -m aipc --help`: exit 0 (project-local Python on PATH).
-- `.venv\Scripts\aipc.exe --help`: exit 0.
-- `pytest`: 12 passed, 0 failed, 0 skipped; exit 0.
+- `python -m aipc --help`: exit 0; existing help-only CLI preserved.
+- `pytest`: 216 passed, 0 failed, 0 skipped (4.42 seconds), exit 0.
+  Includes 12 bootstrap, 171 model and 33 independent schema/tooling cases.
 - `python -m ruff check .`: all checks passed; exit 0.
-- `python -m ruff format --check .`: 9 files already formatted; exit 0.
+- `python -m ruff format --check .`: 16 files already formatted; exit 0.
 - `python -m pip check`: no broken requirements; exit 0.
-- Wheel build and non-editable installation: exit 0; isolated imports, both CLI entry points and JSON logging verified.
-- `git diff --check`: exit 0; full diff inspected before committing.
-- `AGENTS.md`, `SKILL.md`, `MASTER_PLAN.md` preserved; README original content retained with an appended setup section.
-- No secret-pattern matches; real `.env`, virtual environments, caches and build artifacts are ignored.
-- Schema validation: not applicable; schemas deliberately deferred to authorized phases.
+- `python -m aipc.domain.schemas --check`: four artifacts consistent; exit 0.
+- Draft 2020-12 schema meta-validation, positive/negative fixtures and date-time
+  format checks are included in the 33 schema tests.
+- Timestamp precision regression: three cases failed before the fix; all five
+  rejection/round-trip tests pass after rejecting offsets containing seconds/fractions.
+- Wheel build/install: exit 0. Isolated non-editable installation passed four model
+  JSON round trips, schema generation, both CLI entry points and dependency checks;
+  development-only JSON Schema validator was absent.
+- `git diff --check`: exit 0; source/test/docs/schema changes reviewed.
 - Type checking: no type checker configured.
 
-See `docs/PHASE_00_EVIDENCE.md` for reproducible commands and acceptance evidence.
-
 ## Remaining Work
-- No remaining Phase 00 implementation or review work.
-- Phase 01 is authorized as the next phase but remains unstarted; stop after finalization.
+External Phase 01 review only. No remaining authorized implementation work.
 
 ## Known Issues
-No known Phase 00 defects. Python 3.11 and non-Windows platforms have not been executed;
-the external reviewer accepted this limitation as non-blocking for Phase 00.
+No known implementation defects. Python 3.11 and non-Windows execution remain
+unverified. JSON Schema cannot express count sums or timestamp comparisons;
+Python canonical validation remains required. Strict Python integer semantics
+also exceed JSON Schema's integral-number semantics. These limits are documented.
 
 ## Last Reviewer Result
-PASS
-External reviewer approval supplied by the human owner on 2026-09-27:
-- All Phase 00 acceptance criteria satisfied; 12/12 tests pass.
-- CLI, Ruff, wheel build/install, Git hygiene, scope control and secret checks accepted.
-- Python 3.11/non-Windows verification and later-phase numbering discrepancy do not block Phase 00.
-- Evidence must record exact implementation hashes consistently; corrected in this finalization.
+Phase 01 external Phase Gate: PENDING. Phase 00 external Phase Gate: PASS.
+Supplemental read-only code review found one timezone serialization issue, fixed
+with regression tests. This code review does not grant Phase Gate approval.
 
 ## Required Fixes
-None for Phase 00. Resolve later-phase numbering before authorizing affected phases.
+None outstanding from supplemental code review. Await external Phase 01 decision.
+Resolve later-phase numbering discrepancy before authorizing affected phases.
 
 ## Recovery Notes
-- Inspect this file, all blueprint instructions, Git status/log/branch and the attempt diff before editing.
+- Read instructions/state and inspect Git status/log/branch before resuming.
 - Preserve valid work and unknown human edits; do not reset or clean the checkout.
-- Stable `master` and `aipc-phase-00-pass` contain the finalized Phase 00 state.
-- Attempt branch and original blueprint commit are retained; integration preserves history.
-- `.venv` and build output are ignored local artifacts and may be recreated using `docs/OPERATIONS.md`.
-- No structured controller state/checkpoint system exists yet; there is no conflicting persisted state.
-- Phase 00 is approved; Phase 01 is the next authorized phase but was not started here.
+- Stable master/tag remain at `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
+- Install `.venv` dependencies with `pip install -e '.[dev]'`; ignored local build
+  output and wheel verification environments may be recreated.
+- Python models are the schema source; use the generator and `--check` after edits.
+- No structured controller state/checkpoint system exists; no persisted-state conflict.
+- Resume Phase 01 only if review requests revisions. Do not mark PASS or advance.
 
 ## Future Considerations
-The original AGENTS.md first-implementation sequence and MASTER_PLAN.md roadmap
-use different numbering after Phase 06. Resolve that discrepancy before later-phase
-authorization. It does not affect Phase 00, and the blueprint has not been rewritten.
+AGENTS.md and MASTER_PLAN.md differ in numbering after Phase 06. Resolve before
+affected later phases are authorized. Original blueprint files remain intact.
+AgentCapabilities and all runtime orchestration belong to later phases.
 
 ## Next Action
-Phase 00 finalization complete. Stop this session. Phase 01 — Canonical Domain Models
-is authorized as the next phase and remains NOT_STARTED.
+Submit Phase 01 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
 
 ## Files to Read on Resume
 - `AGENTS.md`
 - `SKILL.md`
 - `MASTER_PLAN.md`
 - `CURRENT_STATE.md`
-- `README.md`
-- `docs/PHASE_00_EVIDENCE.md`
-- relevant structured state/evidence files when they exist
+- `docs/CANONICAL_MODELS.md`
+- `docs/PROVIDER_ADAPTER_GUIDE.md`
+- current Phase 01 evidence and relevant source/tests
 
 ## Updated
-2026-09-27T08:28:00+07:00
+2026-09-27T08:50:00+07:00

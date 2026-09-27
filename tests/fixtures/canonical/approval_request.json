@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "approval_id": "approval_example_01",
+  "task_id": "phase_01_attempt_01",
+  "agent_id": "worker-example",
+  "action_type": "shell_command",
+  "description": "Run project tests.",
+  "command": "python -m pytest",
+  "risk_level": "MEDIUM",
+  "scope": "workspace",
+  "requested_at": "2026-09-27T01:00:00Z",
+  "expires_at": null,
+  "metadata": {}
+}

@@ -1,4 +1,4 @@
-# Bootstrap architecture
+# Current architecture
 
 Phase 00 implements an installable `src/aipc` package, a help-only CLI and an
 application logging skeleton. The runtime uses the Python standard library.
@@ -13,10 +13,19 @@ include a UTC timestamp and nullable correlation identifiers supplied through
 standard logging `extra`. It does not configure root logging or create log files.
 Imports have no logging configuration side effects.
 
-The `config`, `projects` and `schemas` directories are reserved, not executable
-contracts. The complete target structure and canonical data flow remain defined
-by `MASTER_PLAN.md`. Provider integrations and all later-phase behavior are absent.
+The `config` and `projects` directories remain reserved. Phase 01 adds canonical
+contracts under `aipc.domain` and generated validation schemas in `schemas`.
+The complete target structure and canonical data flow remain defined by
+`MASTER_PLAN.md`. Provider integrations and later-phase runtime behavior are absent.
 
 No structured controller state exists in Phase 00. Manual Git commits and
 `CURRENT_STATE.md` provide recovery and external-review handoff until the relevant
 state, evidence, versioning and recovery phases are authorized.
+
+Phase 01 introduces four Pydantic 2 root contracts: TaskRequest, AgentResult,
+ReviewResult and ApprovalRequest, plus supporting records and enums. Pydantic is
+the package's first runtime dependency; CLI and logging still use the standard library.
+The Python models are the schema source and perform structural validation only.
+They do not normalize raw provider data or execute state/review/gate decisions.
+See [canonical contracts](CANONICAL_MODELS.md) for version 1.0 validation and
+compatibility choices, and [future adapter boundaries](PROVIDER_ADAPTER_GUIDE.md).

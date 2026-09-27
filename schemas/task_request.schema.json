@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "allowed_tools": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "title": "Allowed Tools",
+      "type": "array"
+    },
+    "attempt": {
+      "exclusiveMinimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "forbidden_actions": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "title": "Forbidden Actions",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    },
+    "phase_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Phase Id",
+      "type": "string"
+    },
+    "project_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "prompt": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Prompt",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "task_type": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Task Type",
+      "type": "string"
+    },
+    "timeout_seconds": {
+      "exclusiveMinimum": 0,
+      "title": "Timeout Seconds",
+      "type": "integer"
+    },
+    "workspace": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Workspace",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "task_id",
+    "project_id",
+    "phase_id",
+    "attempt",
+    "task_type",
+    "prompt",
+    "workspace",
+    "allowed_tools",
+    "forbidden_actions",
+    "timeout_seconds"
+  ],
+  "title": "TaskRequest",
+  "type": "object"
+}

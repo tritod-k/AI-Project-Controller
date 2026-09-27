@@ -1,0 +1,117 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "RiskLevel": {
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ],
+      "title": "RiskLevel",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action_type": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Action Type",
+      "type": "string"
+    },
+    "agent_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "approval_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Approval Id",
+      "type": "string"
+    },
+    "command": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Command"
+    },
+    "description": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Description",
+      "type": "string"
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Expires At"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    },
+    "requested_at": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+      "title": "Requested At",
+      "type": "string"
+    },
+    "risk_level": {
+      "$ref": "#/$defs/RiskLevel"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scope": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Scope",
+      "type": "string"
+    },
+    "task_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "approval_id",
+    "task_id",
+    "agent_id",
+    "action_type",
+    "description",
+    "command",
+    "risk_level",
+    "scope",
+    "requested_at",
+    "expires_at"
+  ],
+  "title": "ApprovalRequest",
+  "type": "object"
+}

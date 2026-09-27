@@ -70,7 +70,18 @@ py -3.13 -m venv .venv
 ```
 
 The installed `aipc` command also displays help. Operational commands, canonical
-models and provider integrations await their authorized phases.
+models and provider integrations were deferred by the bootstrap.
 
 See [operations](docs/OPERATIONS.md), [bootstrap architecture](docs/ARCHITECTURE.md)
 and [current state](CURRENT_STATE.md) for setup and review handoff.
+
+## Phase 01 Canonical Contracts
+
+Phase 01 adds provider-independent TaskRequest, AgentResult, ReviewResult and
+ApprovalRequest models with explicit schema version 1.0, validation and JSON round trips.
+Install/update the same project environment with `pip install -e '.[dev]'`.
+Check generated schemas with `python -m aipc.domain.schemas --check`.
+
+See [canonical contracts](docs/CANONICAL_MODELS.md) and
+[future adapter boundaries](docs/PROVIDER_ADAPTER_GUIDE.md). Provider integrations,
+normalization, reviewers, state machines and orchestration remain deferred.

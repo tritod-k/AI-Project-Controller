@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "task_id": "phase_01_attempt_01",
+  "project_id": "example_project",
+  "phase_id": "01",
+  "attempt": 1,
+  "task_type": "implementation",
+  "prompt": "Implement the current authorized phase only.",
+  "workspace": "./workspace",
+  "allowed_tools": ["filesystem", "shell"],
+  "forbidden_actions": ["start_next_phase"],
+  "timeout_seconds": 3600,
+  "metadata": {}
+}

@@ -21,7 +21,8 @@ The explicit executable paths above work without activation.
 
 Ruff performs lint and formatting checks. No type checker is configured yet.
 Setuptools builds the distribution; pytest and Ruff are development-only tools.
-There are no runtime dependencies or provider credentials required.
+Pydantic 2 is required for Phase 01 contracts. JSON Schema and RFC3339 validators
+are development-only dependencies. No provider credentials are required.
 
 Logging usage:
 
@@ -39,4 +40,17 @@ configuration. `.env.example` contains a reserved variable name with an empty va
 Before resuming, read the five blueprint files, inspect `git status`, recent
 commits and the current branch, and verify `CURRENT_STATE.md` against any future
 structured state. Preserve unknown edits. Wait for external review before any
-PASS tag or Phase 01 authorization.
+PASS tag or subsequent phase authorization.
+
+Phase 01 schema maintenance:
+
+```powershell
+.venv\Scripts\python.exe -m aipc.domain.schemas
+.venv\Scripts\python.exe -m aipc.domain.schemas --check
+```
+
+The default destination is `schemas` relative to the current directory; run from
+the checkout root. `--output DIRECTORY` supports a separate generated-artifact
+directory. Check mode validates artifact consistency without writing files.
+The regular CLI remains help-only. Contract usage and validation choices are
+documented in [CANONICAL_MODELS.md](CANONICAL_MODELS.md).

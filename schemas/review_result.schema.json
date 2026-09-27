@@ -1,0 +1,142 @@
+{
+  "$defs": {
+    "CriterionResult": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "notes": {
+          "title": "Notes",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/CriterionStatus"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "status",
+        "evidence",
+        "notes"
+      ],
+      "title": "CriterionResult",
+      "type": "object"
+    },
+    "CriterionStatus": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "UNVERIFIED"
+      ],
+      "title": "CriterionStatus",
+      "type": "string"
+    },
+    "JsonValue": {},
+    "ReviewVerdict": {
+      "enum": [
+        "PASS",
+        "REVISE",
+        "BLOCKED",
+        "ERROR"
+      ],
+      "title": "ReviewVerdict",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "criteria": {
+      "items": {
+        "$ref": "#/$defs/CriterionResult"
+      },
+      "title": "Criteria",
+      "type": "array"
+    },
+    "failed_criteria": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "title": "Failed Criteria",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    },
+    "next_phase_allowed": {
+      "title": "Next Phase Allowed",
+      "type": "boolean"
+    },
+    "required_fixes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Fixes",
+      "type": "array"
+    },
+    "review_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Review Id",
+      "type": "string"
+    },
+    "risks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Risks",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "verdict": {
+      "$ref": "#/$defs/ReviewVerdict"
+    }
+  },
+  "required": [
+    "schema_version",
+    "review_id",
+    "task_id",
+    "verdict",
+    "confidence",
+    "criteria",
+    "failed_criteria",
+    "required_fixes",
+    "risks",
+    "next_phase_allowed"
+  ],
+  "title": "ReviewResult",
+  "type": "object"
+}

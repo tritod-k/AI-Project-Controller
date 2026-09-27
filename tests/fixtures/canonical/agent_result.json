@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "task_id": "phase_01_attempt_01",
+  "agent_id": "worker-example",
+  "provider": "provider-example",
+  "status": "COMPLETED",
+  "started_at": "2026-09-27T01:00:00Z",
+  "completed_at": "2026-09-27T01:01:00Z",
+  "summary": "Implemented the requested phase.",
+  "files_changed": [{"path": "src/example.py", "change_type": "modified"}],
+  "commands": [{"command": "pytest -q", "exit_code": 0}],
+  "tests": {"total": 42, "passed": 42, "failed": 0, "skipped": 0},
+  "artifacts": [{"path": "reports/example.txt", "kind": "report"}],
+  "warnings": [],
+  "errors": [],
+  "approval_requests": [],
+  "worker_claimed_complete": true,
+  "evidence": {
+    "git_diff_path": null,
+    "test_log_path": null,
+    "terminal_log_path": null,
+    "screenshots": []
+  },
+  "raw_output_ref": "diagnostics/example.json",
+  "metadata": {}
+}

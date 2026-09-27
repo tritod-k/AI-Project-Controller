@@ -1,0 +1,444 @@
+{
+  "$defs": {
+    "AgentStatus": {
+      "enum": [
+        "QUEUED",
+        "RUNNING",
+        "WAITING_APPROVAL",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMED_OUT"
+      ],
+      "title": "AgentStatus",
+      "type": "string"
+    },
+    "ApprovalRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "action_type": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Action Type",
+          "type": "string"
+        },
+        "agent_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "approval_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Approval Id",
+          "type": "string"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Command"
+        },
+        "description": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Description",
+          "type": "string"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expires At"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "requested_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Requested At",
+          "type": "string"
+        },
+        "risk_level": {
+          "$ref": "#/$defs/RiskLevel"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scope": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Scope",
+          "type": "string"
+        },
+        "task_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "approval_id",
+        "task_id",
+        "agent_id",
+        "action_type",
+        "description",
+        "command",
+        "risk_level",
+        "scope",
+        "requested_at",
+        "expires_at"
+      ],
+      "title": "ApprovalRequest",
+      "type": "object"
+    },
+    "ChangeType": {
+      "enum": [
+        "added",
+        "modified",
+        "deleted",
+        "renamed"
+      ],
+      "title": "ChangeType",
+      "type": "string"
+    },
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Command",
+          "type": "string"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exit Code"
+        }
+      },
+      "required": [
+        "command",
+        "exit_code"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    },
+    "EvidenceReferences": {
+      "additionalProperties": false,
+      "properties": {
+        "git_diff_path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Git Diff Path"
+        },
+        "screenshots": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Screenshots",
+          "type": "array"
+        },
+        "terminal_log_path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Terminal Log Path"
+        },
+        "test_log_path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Test Log Path"
+        }
+      },
+      "required": [
+        "git_diff_path",
+        "test_log_path",
+        "terminal_log_path",
+        "screenshots"
+      ],
+      "title": "EvidenceReferences",
+      "type": "object"
+    },
+    "FileChange": {
+      "additionalProperties": false,
+      "properties": {
+        "change_type": {
+          "$ref": "#/$defs/ChangeType"
+        },
+        "path": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change_type"
+      ],
+      "title": "FileChange",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "RiskLevel": {
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ],
+      "title": "RiskLevel",
+      "type": "string"
+    },
+    "TestSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "failed": {
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "passed": {
+          "minimum": 0,
+          "title": "Passed",
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "total": {
+          "minimum": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "passed",
+        "failed",
+        "skipped"
+      ],
+      "title": "TestSummary",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "approval_requests": {
+      "items": {
+        "$ref": "#/$defs/ApprovalRequest"
+      },
+      "title": "Approval Requests",
+      "type": "array"
+    },
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "commands": {
+      "items": {
+        "$ref": "#/$defs/CommandResult"
+      },
+      "title": "Commands",
+      "type": "array"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Completed At"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "evidence": {
+      "$ref": "#/$defs/EvidenceReferences"
+    },
+    "files_changed": {
+      "items": {
+        "$ref": "#/$defs/FileChange"
+      },
+      "title": "Files Changed",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    },
+    "provider": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Provider",
+      "type": "string"
+    },
+    "raw_output_ref": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Raw Output Ref"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Started At"
+    },
+    "status": {
+      "$ref": "#/$defs/AgentStatus"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "task_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "tests": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "worker_claimed_complete": {
+      "title": "Worker Claimed Complete",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "task_id",
+    "agent_id",
+    "provider",
+    "status",
+    "started_at",
+    "completed_at",
+    "summary",
+    "files_changed",
+    "commands",
+    "tests",
+    "artifacts",
+    "warnings",
+    "errors",
+    "approval_requests",
+    "worker_claimed_complete",
+    "evidence",
+    "raw_output_ref"
+  ],
+  "title": "AgentResult",
+  "type": "object"
+}
