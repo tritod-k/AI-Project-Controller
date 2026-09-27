@@ -10,33 +10,33 @@ AI Project Controller
 Phase 07 — Version & Checkpoint Manager
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING
+PASS
 
 ## Last Stable Checkpoint
-`aipc-phase-06-pass`: `8a553c3aba55222a1e0dfcfd47fc0ad0c508f074`.
+`aipc-phase-07-pass` — manual external-review checkpoint at the PASS-state commit containing this update. Its exact target is recorded in the finalization report.
 
 ## Last Stable Implementation Checkpoint
-`aipc-phase-06-pass`: `8a553c3aba55222a1e0dfcfd47fc0ad0c508f074`.
-The manual implementation PASS tag is unchanged; Phase 07 is not promoted to stable.
+`aipc-phase-07-pass` — approved Phase 07 implementation and finalized state.
+Previous checkpoint `aipc-phase-06-pass` remains at `8a553c3aba55222a1e0dfcfd47fc0ad0c508f074`.
 
 ## Phase 07 Base Commit
 `59a5121458cd1f1dcc4f72425fd925a53531756a` — aligned master.
 
 ## Current Branch / Worktree
-`codex/phase-07-attempt-01`, normal checkout `H:/000ProjectCode/AI_Project_Controller`.
-Stable master remains at aligned base `59a5121458cd1f1dcc4f72425fd925a53531756a`.
-Only fixture repositories exercise VersionManager mutations; no real manager refs created.
+`master`, normal checkout `H:/000ProjectCode/AI_Project_Controller`, after history-preserving integration of `codex/phase-07-attempt-01`.
+Manual external-review finalization creates the PASS tag; VersionManager is not used to authorize or promote its own implementation. Only fixture repositories exercise VersionManager mutations; no real manager refs created.
 
 ## Last Commit
 Phase 07 implementation attempt: `9cd4e1e0f69d042f19131bab2983388d5ec4495b`.
 `AIPC Phase 07 attempt 01 - version and checkpoint manager`.
-This documentation-only handoff records the actual implementation hash; its own HEAD is reported in the Phase Completion Report.
+Approved documentation/handoff HEAD before finalization: `cd98efbea29e4b1567d348b8ae4f473e57113d5e`.
+PASS-state commit: `AIPC Phase 07 PASS - version and checkpoint manager`, identified by `aipc-phase-07-pass`; exact hash is recorded in the finalization report.
 
 ## Completed Phases
 
@@ -47,6 +47,7 @@ This documentation-only handoff records the actual implementation hash; its own 
 - Phase 04 — Normalization Layer: PASS (external approval).
 - Phase 05 — Prompt Engine: PASS (external approval).
 - Phase 06 — Evidence Collector: PASS (external approval).
+- Phase 07 — Version & Checkpoint Manager: PASS (external approval).
 
 ## Documentation Alignment
 COMPLETED
@@ -54,16 +55,17 @@ External administrative PASS; alignment commit `59a5121458cd1f1dcc4f72425fd925a5
 was integrated into master. MASTER_PLAN.md/AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 07 — Version & Checkpoint Manager, implementation attempt only.
+Phase 07 — Version & Checkpoint Manager, external PASS finalization only in this session.
 
 ## Next Authorized Phase
-None. Submit Phase 07 for external review; do not implement Phase 08.
+Phase 08 — Recovery Manager
 
 ## Phase 07 Status
-AWAITING_REVIEW
+PASS
 
 ## Phase 08 Status
-NOT_STARTED — not authorized. No recovery workflow or Phase 08 branch exists.
+NOT_STARTED
+No recovery workflow or Phase 08 branch exists. Phase 08 implementation is reserved for a separate authorized session.
 
 ## Current Work
 
@@ -109,15 +111,16 @@ checkout. Dirty/hidden edits refuse removal; clean removal preserves the branch.
 paths, reserved names, link/junction escapes and branch/tag collisions are refused.
 
 ## Last Reviewer Result
-Phase 06: PASS; Documentation Alignment: PASS (external approvals).
-Phase 07 external review: PENDING. Await external PASS / REVISE / BLOCKED.
+PASS
+Phase 07 external reviewer approved all acceptance criteria and 855/855 tests.
+Phase 06: PASS; Documentation Alignment: COMPLETED / PASS (external approvals).
 Independent implementation safety review found hidden-index deletion and index-refresh
 mutation; both fixed with failing regressions first. A late filter-config finding and
 dangling symbolic-ref edge case were also reproduced and fixed with regressions.
 The internal review is not a Phase Gate or external PASS.
 
 ## Required Fixes / Remaining Work
-None outstanding for the implementation attempt. External review and phase decision remain pending.
+None outstanding for Phase 07. External PASS accepted; finalization verification results are recorded in the finalization report. No Phase 08 implementation is included.
 
 ## Warnings / Known Issues
 
@@ -143,6 +146,7 @@ streaming/retention/redaction and power-loss durability belong to later hardenin
 ## Recovery Notes / Phase 08 Boundary
 Read instructions/state/Git and preserve unknown edits before resuming. Checkpoint metadata
 and Git must agree; never auto-repair partial operations or remove stale locks without inspection.
+Git ref and checkpoint metadata publication are not a single transaction; interrupted operations must remain inspectable and recoverable. Stable authorization records caller authority without authenticating it. Automatic rollback must not use destructive workspace reset. Restore should continue to favor isolated worktrees/checkouts. Unsupported repository modes must fail explicitly.
 VersionManager provides explicit restore/worktree primitives only. Failure classification,
 heartbeat, auto-resume, quota handling, fallback and automatic rollback remain Phase 08 scope.
 No provider/reviewer/gate/controller execution or future phase functionality is implemented.
@@ -152,11 +156,11 @@ Authenticated caller authority, cross-process transaction/durability, controlled
 submodule/sparse-worktree policy and stronger path-race protection require later authorization.
 
 ## Next Action
-Submit Phase 07 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
+Begin Phase 08 — Recovery Manager in a separately authorized implementation session from finalized master. Stop after Phase 07 finalization in this session.
 
 ## Files to Read on Resume
 AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/VERSION_MANAGER.md,
 docs/PHASE_07_EVIDENCE.md, src/aipc/version and the three Phase 07 test files.
 
 ## Updated
-2026-09-27T19:41:45.0402953+07:00
+2026-09-27T20:36:10.7110110+07:00
