@@ -40,8 +40,10 @@ Checkout: `H:\000ProjectCode\AI_Project_Controller` (normal checkout).
 Phase 00 stable branch/tag remain unchanged. No Phase 01 PASS tag exists.
 
 ## Last Commit
-Pre-attempt stable commit: `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
-`AIPC Phase 00 PASS - repository bootstrap`
+Implementation attempt: `8a44d7ea2cc0a85488850eb9ed37127ad433f861`.
+`AIPC Phase 01 attempt 01 - canonical domain models`
+The subsequent documentation-only handoff records this exact implementation hash;
+its HEAD hash is supplied separately in the final report. No implementation changed.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -80,7 +82,10 @@ All tools/dependencies are project-local.
   JSON round trips, schema generation, both CLI entry points and dependency checks;
   development-only JSON Schema validator was absent.
 - `git diff --check`: exit 0; source/test/docs/schema changes reviewed.
+- Secret-pattern scan: 45 tracked files checked, 0 matches; real `.env` not tracked.
 - Type checking: no type checker configured.
+
+See `docs/PHASE_01_EVIDENCE.md` for commands, acceptance evidence and exact commit.
 
 ## Remaining Work
 External Phase 01 review only. No remaining authorized implementation work.
@@ -125,7 +130,8 @@ Submit Phase 01 results to the external ChatGPT reviewer and wait for PASS / REV
 - `CURRENT_STATE.md`
 - `docs/CANONICAL_MODELS.md`
 - `docs/PROVIDER_ADAPTER_GUIDE.md`
-- current Phase 01 evidence and relevant source/tests
+- `docs/PHASE_01_EVIDENCE.md`
+- relevant Phase 01 source/tests
 
 ## Updated
-2026-09-27T08:50:00+07:00
+2026-09-27T08:53:45+07:00
