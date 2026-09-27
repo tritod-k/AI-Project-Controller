@@ -19,3 +19,27 @@ class StateError(Exception):
 
 class InvalidStateTransitionError(StateError):
     """A requested status transition is forbidden."""
+
+
+class AgentError(Exception):
+    """An adapter contract or lifecycle operation is invalid."""
+
+
+class AgentNotFoundError(AgentError):
+    """The registry does not contain the requested agent."""
+
+
+class DuplicateAgentError(AgentError):
+    """An agent identifier is already registered."""
+
+
+class UnknownRunError(AgentError):
+    """A handle does not identify a run owned by this adapter."""
+
+
+class InvalidApprovalDecisionError(AgentError):
+    """A decision is invalid or no approval is pending."""
+
+
+class AgentTimeoutError(AgentError):
+    """Adapter execution timed out, distinct from a raw task-failure result."""

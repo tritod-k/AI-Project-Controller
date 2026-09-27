@@ -95,3 +95,12 @@ contracts with `python -m aipc.project.schemas --check`.
 
 See [project/state contracts](docs/PROJECT_STATE.md). The CLI stays help-only;
 no agent integration or controller loop is implemented.
+
+## Phase 03 Agent Adapter and Mock
+
+The provider-neutral adapter interface, capabilities, run/raw envelopes and registry
+are implemented with a deterministic mock. The mock simulates success, task failure,
+timeout, approval and malformed output without real tools or provider communication.
+Raw results await Phase 04 normalization; the CLI remains help-only. See
+[adapter contracts](docs/AGENT_ADAPTERS.md). Run shared checks with
+`pytest tests/contract/test_agent_adapters.py`.

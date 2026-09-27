@@ -1,10 +1,12 @@
-# Future Adapter Contract Boundary
+# Adapter Contract Boundary
 
-Phase 01 defines canonical data contracts only. No adapter or normalization
-implementation exists yet; those layers must be added in their authorized phases.
+Phase 01 defines canonical data contracts. Phase 03 adds the adapter Protocol,
+capabilities, run/raw envelopes, exact registry and a deterministic mock. The
+normalization layer remains deferred to Phase 04. See [AGENT_ADAPTERS.md](AGENT_ADAPTERS.md).
 
-Future adapters must emit provider-neutral payloads validated through the models
-documented in [CANONICAL_MODELS.md](CANONICAL_MODELS.md). The intended flow remains:
+Adapters return RawAgentResult with provider-specific content. Future normalizers
+must produce provider-neutral payloads validated through the models documented in
+[CANONICAL_MODELS.md](CANONICAL_MODELS.md). The intended flow remains:
 
 ```text
 raw provider output -> adapter/normalizer -> canonical AgentResult -> downstream consumers
@@ -20,5 +22,6 @@ Require schema version 1.0 and validate with `model_validate` or `model_validate
 JSON Schema alone does not check cross-field totals/time ordering. Avoid unchecked
 construction/copies at boundaries and revalidate mutable payloads before consuming them.
 
-Provider-specific capability negotiation, lifecycle, events, retry, routing, approval
-handling and shared adapter contract suites remain later-phase implementation work.
+Phase 03 includes shared adapter contract tests and mock lifecycle/approval responses.
+Real provider integration, capability negotiation, retry/routing, normalization and
+approval policy remain later-phase implementation work.

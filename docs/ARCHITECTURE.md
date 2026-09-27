@@ -38,3 +38,9 @@ runtime dependency. The example project declares harmless phases but no live sta
 State transitions and bookkeeping are explicit caller operations; there is no
 automatic phase advancement or agent/reviewer/recovery execution. See
 [project/state contracts](PROJECT_STATE.md) for the policy and persistence limits.
+
+Phase 03 adds the provider-neutral AgentAdapter Protocol, capability/handle/raw
+envelopes and exact-ID registry under `aipc.agents`, plus a deterministic mock under
+`aipc.adapters.mock`. Raw results remain separate from canonical AgentResult.
+Project/state modules are unchanged and do not consume raw adapter results. No
+controller loop, normalization or real provider exists. See [AGENT_ADAPTERS.md](AGENT_ADAPTERS.md).
