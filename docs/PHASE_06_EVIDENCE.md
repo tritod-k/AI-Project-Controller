@@ -7,6 +7,10 @@
 - Attempt branch: `codex/phase-06-attempt-01`, created from that stable tag.
 - Phase 06 only: no reviewer, phase gate, controller, provider, execution or later phase.
 - Gate remains PENDING; worker requests external review, not PASS promotion.
+- Implementation commit: `9912eb5d14826e9cad33368711caa6a79e49e496`.
+  `AIPC Phase 06 attempt 01 - evidence collector`.
+  A subsequent documentation-only handoff records this exact hash; its actual HEAD
+  is supplied in the final report. No symbolic command is substituted for a hash.
 
 ## Verification
 
@@ -16,7 +20,7 @@ Windows / Python 3.13.0, local .venv. Commands return exit 0 unless stated other
 | --- | --- |
 | `python -m aipc --help` | existing help-only CLI succeeds |
 | `python -m pytest -q` | 775 passed, 0 failed/skipped, 23.63 seconds |
-| Evidence unit/integration/contract subset | 107 passed; explicit final run recorded in handoff |
+| Evidence unit/integration/contract subset | 107 passed, 11.60 seconds |
 | Adapter contract subset | 7 passed, 0.33 seconds |
 | Normalization subset | 71 passed, 0.69 seconds |
 | Prompt Engine subset | 79 passed, 2.94 seconds |
@@ -27,6 +31,7 @@ Windows / Python 3.13.0, local .venv. Commands return exit 0 unless stated other
 | `python -m aipc.project.schemas --check` | two project/state schemas unchanged |
 | Protected diff against Phase 05 | domain models/project/adapters/agents/normalization/prompts/schemas/dependencies/instructions unchanged |
 | `git diff --check` | no whitespace errors |
+| Secret-pattern audit | 125 tracked/staged files, no matches, no tracked .env |
 
 The full run is 668 existing tests + 107 new tests. Test repositories and logs are
 isolated temporary fixtures. No real provider/API calls or global installs occur.

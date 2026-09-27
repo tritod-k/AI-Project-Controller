@@ -28,9 +28,12 @@ Exact starting HEAD/tag verified, clean tree; prior PASS tags preserved.
 Created from approved Phase 05 checkpoint. No Phase 06 PASS tag or master integration.
 
 ## Last Commit
-Verified approved base before implementation:
-`f5d61ea5e546bc0b6cd0c23aa726fb61ad13b6e6` — AIPC Phase 05 PASS - prompt engine.
-Phase 06 attempt commit is created after validation; exact hash recorded in handoff.
+Phase 06 implementation attempt:
+`9912eb5d14826e9cad33368711caa6a79e49e496`.
+`AIPC Phase 06 attempt 01 - evidence collector`.
+Documentation/handoff commit records this actual implementation hash; its resulting
+HEAD is reported in the Phase Completion Report. Stable base remains
+`f5d61ea5e546bc0b6cd0c23aa726fb61ad13b6e6`.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -75,6 +78,7 @@ Windows / Python 3.13.0, project-local .venv.
 - Four canonical and two project/state schema checks: exit 0, unchanged.
 - Protected source/schema/dependency/instruction diff against Phase 05: unchanged.
 - Git diff whitespace checks pass. No type checker configured.
+- Secret-pattern audit: 125 tracked/staged files, no matches and no tracked .env.
 - Initial 81 missing-module tests red before implementation; then green.
 - Required manifest items, configured Git filter execution, uppercase restricted files,
   index/baseline submodules independently reproduced red then corrected and verified green.
