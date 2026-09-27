@@ -7,8 +7,10 @@ Authorized Phase 09 only, from clean `master` HEAD and `aipc-phase-08-pass`:
 `5df11213c7f25884046fcc3a7bff62b78c01fcad`. Attempt branch:
 `codex/phase-09-attempt-01`. Phase 08 baseline: 927 tests, including 72 Recovery
 and 80 Version tests. No prior PASS tag moved, no master merge or Phase 10 work.
-The actual Phase 09 attempt hash is recorded in the completion report and subsequent
-documentation handoff after the implementation commit is made.
+Phase 09 implementation attempt: `9ecd6bde8c1c249120fa499daabd7c960acd5a6f`.
+Commit message: `AIPC Phase 09 attempt 01 - reviewer and phase gate`.
+The subsequent handoff commit changes only state and evidence documentation;
+the validated implementation remains unchanged.
 
 ## Architecture and authority
 
