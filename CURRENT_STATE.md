@@ -38,8 +38,10 @@ Normal checkout: `H:\000ProjectCode\AI_Project_Controller`.
 Stable development branch: `master`; prior attempt branches retained.
 
 ## Last Commit
-Pre-attempt stable HEAD: `5efcc4cdf50a4dd81713a1f40c52b7f810ac419f`.
-`AIPC Phase 01 PASS - canonical domain models`
+Phase 02 implementation commit: `bebcd1d0b20393cdf5b07fdcd60ec303fc9630ef`.
+`AIPC Phase 02 attempt 01 - project definition and state machine`.
+This exact reference is recorded by a subsequent documentation-only handoff commit;
+inspect Git HEAD for that handoff. Evidence: `docs/PHASE_02_EVIDENCE.md`.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -130,4 +132,4 @@ Submit Phase 02 results to the external ChatGPT reviewer and wait for PASS / REV
 - relevant Phase 02 evidence, project/storage source and tests
 
 ## Updated
-2026-09-27T09:46:06+07:00
+2026-09-27T09:52:40+07:00
