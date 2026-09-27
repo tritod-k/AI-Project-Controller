@@ -19,18 +19,20 @@ Attempt 01
 PASS
 
 ## Last Stable Checkpoint
-`aipc-phase-06-pass` on `master` identifies the finalized Phase 06 PASS-state commit,
-including this approved summary. Its exact resulting target is reported after commit.
+`aipc-phase-06-pass` on `master` identifies the finalized Phase 06 PASS-state commit:
+`8a553c3aba55222a1e0dfcfd47fc0ad0c508f074`.
 Previous stable Phase 05: `aipc-phase-05-pass`,
 `f5d61ea5e546bc0b6cd0c23aa726fb61ad13b6e6`.
 Supplied implementation/handoff/stable references verified exactly, clean starting tree.
 Prior PASS tags and histories are preserved.
 
 ## Current Branch / Worktree
-Stable development branch / finalized checkout: `master`.
+Stable development branch: `master` (unchanged at the Phase 06 checkpoint).
+Documentation alignment checkout: `codex/docs-roadmap-alignment-v1`, created from
+`aipc-phase-06-pass`.
 Approved attempt branch: `codex/phase-06-attempt-01` (retained).
 Normal checkout: `H:/000ProjectCode/AI_Project_Controller`.
-Integration is a history-preserving fast-forward. No Phase 07 branch or implementation.
+No Phase 07 branch or implementation. Documentation alignment is not an implementation phase.
 
 ## Last Commit
 Actual approved documentation/handoff HEAD before finalization:
@@ -39,8 +41,13 @@ Actual approved documentation/handoff HEAD before finalization:
 Phase 06 implementation attempt:
 `9912eb5d14826e9cad33368711caa6a79e49e496`.
 `AIPC Phase 06 attempt 01 - evidence collector`.
-This summary is included in `AIPC Phase 06 PASS - evidence collector`;
-the exact resulting hash is reported after commit and identified by `aipc-phase-06-pass`.
+Phase 06 PASS-state commit: `8a553c3aba55222a1e0dfcfd47fc0ad0c508f074`,
+`AIPC Phase 06 PASS - evidence collector`.
+Alignment commit: the commit containing this state update on
+`codex/docs-roadmap-alignment-v1`, message
+`AIPC docs - align roadmap numbering before Phase 07`.
+Its exact resulting hash is supplied in the Documentation Alignment Report; a commit
+cannot embed its own resulting hash in its committed contents.
 Historical attempt evidence remains in docs/PHASE_06_EVIDENCE.md.
 
 ## Completed Phases
@@ -53,20 +60,31 @@ Historical attempt evidence remains in docs/PHASE_06_EVIDENCE.md.
 - Phase 06 — Evidence Collector: PASS (external reviewer approved).
 
 ## Authorized Current Phase
-Phase 06 approved and finalized. This session performs finalization only.
+Phase 06 approved and finalized. This session performs documentation alignment only.
 
 ## Next Authorized Phase
-None. Phase 07 implementation is not authorized pending dedicated documentation alignment.
+Phase 07 — Version & Checkpoint Manager
 
 ## Phase 07
 Phase 07 — Version & Checkpoint Manager
 
 ## Phase 07 Status
-BLOCKED_PENDING_DOC_ALIGNMENT
-Administrative/documentation gate, not an implementation failure.
-Implementation remains NOT_STARTED; no Phase 07 branch is created.
+NOT_STARTED
+The administrative documentation block is removed after alignment validation.
+No Phase 07 implementation branch is created. Submit alignment results for external
+review and authorization before beginning a separate implementation task.
+
+## Documentation Alignment
+COMPLETED
+AGENTS section 29 matches all 23 phase names and numbers in authoritative MASTER_PLAN.md.
+Current Prompt Engine and Evidence Collector guides no longer describe alignment as pending.
+SKILL.md has no stale numbered roadmap references; README.md has no conflicting mappings.
+MASTER_PLAN.md, SKILL.md, README.md and historical evidence/report documents are unchanged.
+The alignment commit is identified under Last Commit and by its exact hash in the report.
 
 ## Current Work
+Documentation alignment is complete; the approved Phase 06 implementation below is unchanged.
+
 - EvidenceCollector revalidates canonical TaskRequest/AgentResult and explicit context.
 - Immutable typed bundle/index records distinguish collected/unavailable/failed evidence.
 - Exclusive attempt directory, existing atomic JSON writer and manifest-last publication.
@@ -79,9 +97,9 @@ Implementation remains NOT_STARTED; no Phase 07 branch is created.
 - Portable traversal/absolute/drive/UNC/ADS/reserved path rejection; links/junctions rejected.
 - Case-insensitive .env/.git exclusions; missing logs/files/Git remain explicit.
 - No execution/provider/reviewer/gate/controller/recovery/version-manager functionality.
-- Existing canonical/project models, six schemas, dependencies and instructions unchanged.
+- Existing canonical/project models, six schemas and dependencies unchanged.
 
-## Tests
+## Phase 06 Attempt Tests
 Windows / Python 3.13.0, project-local .venv.
 - Full pytest: 775 passed, 0 failed/skipped, 23.63 seconds, exit 0.
 - Evidence subset: 107 passed, 11.60 seconds, exit 0.
@@ -101,14 +119,21 @@ Windows / Python 3.13.0, project-local .venv.
 - Python 3.11/non-Windows and wheel installation not verified this phase.
 
 ## Remaining Work
-None for Phase 06. Record documentation alignment as the next action and stop.
-Do not edit roadmap numbering or authorize/start Phase 07 in this finalization session.
+None for Phase 06 or documentation alignment. Submit the alignment for external review.
+Phase 07 remains NOT_STARTED; no implementation is part of this documentation task.
 
-## Finalization Verification
-Fresh pre-integration full suite: 775 passed, 0 failed/skipped, 31.45 seconds, exit 0.
-Only CURRENT_STATE.md changes in this finalization; approved source/tests remain unchanged.
-Full tests, Ruff, pip, both schema checks and all requested subsets are required on
-integrated master before the final report. Exact PASS-state/tag target is reported there.
+## Documentation Alignment Verification
+Read-only consistency check compares all 23 AGENTS phase entries with MASTER_PLAN.md
+and explicitly checks Phase 07 through Phase 13 and the next-phase state.
+
+- Full pytest: 775 passed in 34.85 seconds, exit 0; test count unchanged.
+- Ruff lint: passed; Ruff format: 64 files already formatted, exit 0.
+- pip check: no broken requirements, exit 0.
+- Schema drift checks: 4 canonical and 2 project/state schemas passed, exit 0.
+- git diff --check: passed. Read-only roadmap/state and protected-file checks passed.
+
+Only current documentation/state changes; source, tests, schemas and historical evidence
+remain unchanged. The stable Phase 06 tag is unchanged.
 
 ## Known Issues
 - Evidence is an observation/declared-data snapshot, not authenticated execution or PASS.
@@ -134,21 +159,26 @@ SHA-256, duplicate/path/link/junction/overwrite safeguards; atomic manifest publ
 availability-only manifests; existing Phase 00–05 behavior and all six schemas unchanged;
 775/775 tests pass. Submodules, stronger concurrency/durability, origin authentication,
 streaming limits and retention/redaction remain accepted later-phase concerns.
-The roadmap mismatch requires a dedicated alignment step before Phase 07 begins.
+The reviewer required a dedicated alignment step before Phase 07 begins; that
+administrative task is now completed without changing the approved implementation.
 
 ## Required Fixes
 None for Phase 06. External review returned PASS.
-Phase 07 requires administrative documentation alignment before implementation authorization.
+No remaining roadmap alignment fixes. Phase 07 implementation requires separate authorization.
 
-## Phase-Numbering Discrepancy
-MASTER_PLAN roadmap: 07 Version & Checkpoint Manager, 08 Recovery Manager,
-09 Reviewer + Phase Gate, 10 Controller Orchestration Loop, 11 Approval Router,
-12 Codex Adapter, 13 Independent LLM Reviewer.
-AGENTS section 29: 07 Reviewer + Phase Gate, 08 Controller Loop, 09 Approval Router,
-10 Codex Adapter, 11 Independent LLM Reviewer; no Version/Recovery in first sequence.
-SKILL.md has no numbered phase roadmap; it defines layer/workflow patterns.
-Documents have not been renumbered. Resolve in a dedicated authorized alignment step
-before affected Phase 07 authorization. Phase 06 numbering is consistent.
+## Roadmap Alignment Results
+MASTER_PLAN.md remains authoritative; AGENTS section 29 matches its full Phase 00–22 roadmap.
+
+- Phase 07 — Version & Checkpoint Manager
+- Phase 08 — Recovery Manager
+- Phase 09 — Reviewer + Phase Gate
+- Phase 10 — Controller Orchestration Loop
+- Phase 11 — Approval Router
+- Phase 12 — First Real Provider: Codex Adapter
+- Phase 13 — Independent LLM Reviewer
+
+SKILL.md defines workflow/layer patterns without a duplicate numbered roadmap.
+Historical records of the previous discrepancy are preserved.
 
 ## Recovery Notes
 - Read instructions/state/Git and preserve unknown human edits before resuming.
@@ -170,7 +200,7 @@ Provider raw diagnostic retention and command/run correlation remain caller resp
 Do not implement the Reviewer, Phase Gate, Controller, or future adapters early.
 
 ## Next Action
-Documentation Alignment — synchronize roadmap numbering in AGENTS.md with MASTER_PLAN.md before Phase 07 authorization.
+Submit documentation-alignment results to the external ChatGPT reviewer for authorization of Phase 07.
 
 ## Files to Read on Resume
 - AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md
@@ -180,4 +210,4 @@ Documentation Alignment — synchronize roadmap numbering in AGENTS.md with MAST
 - tests/contract/test_evidence_contracts.py
 
 ## Updated
-2026-09-27T14:43:05+07:00
+2026-09-27T15:07:00+07:00

@@ -145,13 +145,11 @@ multifile transactional snapshot, total run budget, redaction, signing, retentio
 locking or recovery manager is introduced. Later orchestration retains explicit
 execution/tool authority, identity provenance and canonical boundary revalidation.
 
-## Future phase documentation discrepancy
+## Roadmap alignment
 
-Do not advance based on this documentation. MASTER_PLAN roadmap has 07 Version &
-Checkpoint Manager, 08 Recovery Manager, 09 Reviewer + Phase Gate, 10 Controller
-Orchestration Loop, 11 Approval Router, 12 Codex Adapter and 13 Independent LLM Reviewer.
-AGENTS section 29 has 07 Reviewer + Phase Gate, 08 Controller Loop, 09 Approval Router,
-10 Codex Adapter and 11 Independent LLM Reviewer. SKILL defines workflow and layer
-patterns but **has no numbered roadmap**. CURRENT_STATE previously deferred correction
-until after Phase 06. No instructions or future numbering are changed here; a dedicated
-alignment authorization is required before Phase 07.
+[MASTER_PLAN.md](../MASTER_PLAN.md) is the authoritative roadmap. AGENTS section 29
+now matches its names and numbering, including Phase 07 — Version & Checkpoint Manager
+and Phase 08 — Recovery Manager before Phase 09 — Reviewer + Phase Gate.
+SKILL defines workflow and layer patterns without a duplicate numbered roadmap.
+Historical evidence retains the discrepancy recorded at the time. Documentation
+alignment does not start implementation; follow CURRENT_STATE and explicit phase authorization.

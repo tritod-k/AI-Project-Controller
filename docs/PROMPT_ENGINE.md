@@ -102,5 +102,5 @@ changing generic worker assignments does not change generated text.
 
 No Evidence Collector, reviewer, Phase Gate, controller, router or real provider is
 implemented. Existing state persistence and raw/canonical normalization boundaries
-remain intact. Phase numbering beyond Phase 06 must still be reconciled before the
-affected phases are authorized.
+remain intact. Future phase numbering follows [MASTER_PLAN.md](../MASTER_PLAN.md);
+AGENTS section 29 matches that roadmap. Implementation requires explicit phase authorization.

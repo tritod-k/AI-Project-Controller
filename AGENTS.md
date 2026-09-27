@@ -831,19 +831,32 @@ If it changes project direction materially, stop for review.
 
 Unless the human/controller explicitly changes priority, follow:
 
+`MASTER_PLAN.md` is the authoritative roadmap; this sequence mirrors its names and numbering.
+
 ```text
-Phase 00 Repository Bootstrap
-Phase 01 Canonical Domain Models
-Phase 02 Project Definition + State Machine
-Phase 03 Agent Interface + Mock Agent
-Phase 04 Normalization Layer
-Phase 05 Prompt Engine
-Phase 06 Evidence Collector
-Phase 07 Reviewer + Phase Gate
-Phase 08 Controller Loop
-Phase 09 Approval Router
-Phase 10 Codex Adapter
-Phase 11 Independent LLM Reviewer
+Phase 00 — Repository Bootstrap
+Phase 01 — Canonical Domain Models
+Phase 02 — Project Definition + State Machine
+Phase 03 — Agent Adapter Interface + Mock Agent
+Phase 04 — Normalization Layer
+Phase 05 — Prompt Engine
+Phase 06 — Evidence Collector
+Phase 07 — Version & Checkpoint Manager
+Phase 08 — Recovery Manager
+Phase 09 — Reviewer + Phase Gate
+Phase 10 — Controller Orchestration Loop
+Phase 11 — Approval Router
+Phase 12 — First Real Provider: Codex Adapter
+Phase 13 — Independent LLM Reviewer
+Phase 14 — Claude Adapter
+Phase 15 — Gemini Adapter
+Phase 16 — Agent Router + Fallback
+Phase 17 — Multi-Reviewer / Consensus
+Phase 18 — Cost, Usage, and Performance Tracking
+Phase 19 — Dashboard/API
+Phase 20 — MCP / Shared Tool Layer
+Phase 21 — Production Hardening
+Phase 22 — Plugin / Super-App Extension Model
 ```
 
 Do not skip the Mock Agent and Normalization phases.
