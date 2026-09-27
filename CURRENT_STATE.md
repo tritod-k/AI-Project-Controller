@@ -10,28 +10,33 @@ AI Project Controller
 Phase 08 — Recovery Manager
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING
+PASS
 
 ## Last Stable Checkpoint
-`aipc-phase-07-pass` — `5df11213c7f25884046fcc3a7bff62b78c01fcad`.
+`aipc-phase-08-pass` — manual external-review checkpoint at this finalized PASS-state commit.
+Its exact target is recorded in the finalization report.
+Previous `aipc-phase-07-pass` remains `5df11213c7f25884046fcc3a7bff62b78c01fcad`.
 Previous `aipc-phase-06-pass` remains `8a553c3aba55222a1e0dfcfd47fc0ad0c508f074`.
 
 ## Current Branch / Worktree
-`codex/phase-08-attempt-01`, normal checkout `H:/000ProjectCode/AI_Project_Controller`.
-Created from the verified clean Phase 07 stable checkpoint. Master and PASS tags unchanged.
+`master`, normal checkout `H:/000ProjectCode/AI_Project_Controller`, after history-preserving
+fast-forward integration of `codex/phase-08-attempt-01`. Previous PASS tags remain unchanged.
+The manual external-review workflow authorizes finalization; RecoveryManager is not used
+to approve, promote or recover the real repository.
 No runtime recovery/version operations exercised against this repository; fixture repos only.
 
 ## Last Commit
 Phase 08 implementation attempt: `7a85a5ba9f01dbc0e8fa8e8a612cf01de909fda2`.
 `AIPC Phase 08 attempt 01 - recovery manager`.
-This documentation-only handoff records the verified implementation hash; its resulting
-HEAD is supplied in the final Phase Completion Report. No self-referential hash is inferred.
+Approved documentation/handoff HEAD: `3914e8b72c3236cdc7142a666a41d2709e42293c`.
+PASS-state commit message: `AIPC Phase 08 PASS - recovery manager`.
+The new stable tag identifies this finalized state; its exact target is recorded in the finalization report.
 
 ## Completed Phases
 
@@ -43,6 +48,7 @@ HEAD is supplied in the final Phase Completion Report. No self-referential hash 
 - Phase 05 — Prompt Engine: PASS (external approval).
 - Phase 06 — Evidence Collector: PASS (external approval).
 - Phase 07 — Version & Checkpoint Manager: PASS (external approval).
+- Phase 08 — Recovery Manager: PASS (external approval).
 
 ## Documentation Alignment
 COMPLETED
@@ -50,16 +56,19 @@ External administrative PASS; `59a5121458cd1f1dcc4f72425fd925a53531756a` integra
 MASTER_PLAN.md/AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 08 — Recovery Manager, implementation attempt only.
+Phase 08 — Recovery Manager, external PASS finalization only in this session.
+
+## Next Authorized Phase
+Phase 09 — Reviewer + Phase Gate
 
 ## Phase 07 Status
 PASS
 
 ## Phase 08 Status
-AWAITING_REVIEW
+PASS
 
 ## Phase 09 Status
-NOT_STARTED — no implementation authorization.
+NOT_STARTED — authorized for a separate implementation session; not started during finalization.
 
 ## Current Work
 
@@ -78,6 +87,7 @@ NOT_STARTED — no implementation authorization.
 - Unknown tracked/staged/untracked/ignored edits, conflicts, hidden-index flags and Git locks fail closed.
 
 ## Tests
+Approved implementation verification (before external PASS):
 Windows / Python 3.13.0, project-local .venv.
 Final full pytest: 927 passed in 1740.52s, exit 0 (855 baseline + 72 new).
 Recovery Manager subset: 72 passed in 1455.77s, exit 0.
@@ -85,18 +95,22 @@ Complete fresh-process manager reconstruction/decision comparison: 1 passed in 4
 Version Manager: 80 passed. Prior adapter/normalization/prompt/evidence subsets: 264 passed.
 CLI help, Ruff lint/format (86 files), pip check, four canonical and two project/state schema checks: all exit 0.
 Staged and working-tree git diff --check passed. Historical evidence and canonical/project/schema modules unchanged.
-See docs/PHASE_08_EVIDENCE.md for final verified results and red/green safety regressions.
+See docs/PHASE_08_EVIDENCE.md for approved implementation results and red/green safety regressions.
+Post-integration finalization verification is recorded separately in the finalization report.
 
 ## Last Reviewer Result
-PENDING — external Phase 08 review has not occurred.
+PASS
+External Phase 08 reviewer approved the implementation and documentation/handoff commits,
+927/927 tests, unchanged six schemas and recovery safety behavior. Accepted limitations
+remain documented below; they do not block Phase 08.
 Phase 07: PASS; Phase 06: PASS; Documentation Alignment: COMPLETED / PASS.
 Internal bounded safety review identified workspace binding, unfinished matching intents,
 worker liveness on resume/restore and changes after planning. Regressions were reproduced
 before fixes. Internal review does not constitute a Phase Gate or external approval.
 
 ## Required Fixes / Remaining Work
-No implementation fixes outstanding. Submit the verified attempt and evidence for external
-review. Do not create Phase 08 PASS tag or merge into master without external authorization.
+None outstanding for Phase 08. External PASS accepted; finalize the manual stable tag and
+master integration, verify regression results and stop. No Phase 09 implementation in this session.
 
 ## Warnings / Known Issues
 
@@ -128,18 +142,29 @@ revalidate before explicit mutation. VersionManager remains the Git safety autho
 No Reviewer, Phase Gate, acceptance scoring, PASS/REVISE, provider routing/dispatch, Approval
 Router, retry scheduler or Controller loop is included. Restore prepares continuity only.
 
+## Preserved External Reviewer Notes
+Recovery must prefer resume over rollback where safe. Unknown human edits always require
+preservation/escalation. Partial publication is repaired only with unambiguous evidence.
+Stale locks are never deleted based on age; active/unknown owners remain protected.
+ProjectState, Version Manager facts and recovery journal remain structured authorities;
+CURRENT_STATE.md is a human summary, never destructive recovery authority. Provider waiting
+is operational state, not evidence of code failure. Irreversible external side effects
+must never be blindly replayed. Trusted single-writer operation, separate publications,
+ownership authentication, cross-process arbitration and stronger durability remain later
+Production Hardening concerns.
+
 ## Future Considerations
 Cross-process recovery arbitration, authenticated ownership, stronger transaction/durability,
 explicit operator resolution of interrupted recovery, supported repository-mode expansion and
 runtime reconnect/dispatch require later authorization.
 
 ## Next Action
-Submit Phase 08 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
-Stop; no Phase 09 implementation or self-promotion.
+Begin Phase 09 — Reviewer + Phase Gate only in a separately authorized implementation turn
+from finalized master. Stop after Phase 08 finalization in this session.
 
 ## Files to Read on Resume
 AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/RECOVERY_MANAGER.md,
 docs/PHASE_08_EVIDENCE.md, src/aipc/recovery, src/aipc/version and recovery/version tests.
 
 ## Updated
-2026-09-27T22:11:24.932760+07:00
+2026-09-27T22:16:45.244203+07:00
