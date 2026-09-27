@@ -29,9 +29,10 @@ Stable branches/tags remain unchanged by Phase 03.
 Prior attempt branches retained. No Phase 04 branch or implementation.
 
 ## Last Commit
-Pre-attempt stable HEAD: `fa189a31e8483831f92f9fa86907ff022211cfe8`.
-`AIPC Phase 02 PASS - project definition and state machine`.
-The exact Phase 03 implementation hash will be recorded in a documentation-only handoff.
+Phase 03 implementation: `0e89683765999c5a32b9f1160bd2f08839c75e7a`.
+`AIPC Phase 03 attempt 01 - agent adapter and mock agent`.
+A documentation-only handoff records this exact implementation reference; inspect
+Git HEAD for that handoff. Evidence: `docs/PHASE_03_EVIDENCE.md`.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -120,4 +121,4 @@ Submit Phase 03 results to the external ChatGPT reviewer and wait for PASS / REV
 - agents/mock source, shared contract tests and mock unit tests
 
 ## Updated
-2026-09-27T10:19:27+07:00
+2026-09-27T10:21:03+07:00
