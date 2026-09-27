@@ -1,16 +1,16 @@
 # Phase 00 Attempt 01 Evidence
 
-Implementation is complete; external Phase Gate review remains PENDING.
+Implementation is complete; external reviewer approved Phase 00 PASS on 2026-09-27.
 
 ## Environment and checkpoints
 
 - Checkout: `H:\000ProjectCode\AI_Project_Controller`.
-- Branch: `codex/phase-00-attempt-01`; normal checkout.
+- Stable branch: `master`; attempt branch `codex/phase-00-attempt-01` retained.
 - Initial baseline: `4a20add1b0d14f0047d3f793fa08824c27ebb2bd`.
 - Baseline message: `AIPC Blueprint v1.2 - initial project baseline`.
 - Attempt message: `AIPC Phase 00 attempt 01 - repository bootstrap`.
-- Exact attempt hash: resolve `git log -1 --format="%H %s" -- CURRENT_STATE.md`.
-- No implementation phase is approved and no PASS tag was created.
+- Exact approved implementation hash: `16869718f6e23f2d517ceec0fcb8aad491b926f9`.
+- Phase 00 approved; stable checkpoint `aipc-phase-00-pass` includes the PASS-state update.
 - Windows; Python 3.13.0; pytest 9.1.1; Ruff 0.16.9; setuptools 84.0.0.
 
 ## Executed validation
@@ -70,7 +70,8 @@ MASTER_PLAN.md; they do not introduce canonical model/schema contracts.
 | AC-00-004: no provider integration exists yet | PASS | Full source/diff review: only CLI and logging modules; no adapters, SDKs or runtime dependencies |
 | AC-00-005: no secrets in repository | PASS | Original/new file inspection, empty-value `.env.example`, ignore checks, common token/private-key pattern scan returned zero matches |
 
-These PASS labels describe worker checks only. They do not approve the Phase Gate.
+These labels originally described worker checks. The external reviewer subsequently
+approved all five criteria and returned Phase 00 PASS; the approval is recorded in CURRENT_STATE.md.
 Secret pattern matching is a bounded check, supplemented by file/diff inspection;
 it is not a guarantee that every possible secret format can be recognized.
 
@@ -82,12 +83,28 @@ configuration/project/schema directories contain explanatory READMEs, not fake
 contracts or live state. The complete target tree remains a later-phase roadmap.
 
 README retains its original blueprint text and appends setup instructions.
-CURRENT_STATE records the recoverable baseline, attempt branch, validation,
-review-pending status and external-review next action.
+CURRENT_STATE records the baseline, exact approved implementation commit, stable
+branch, validation, external PASS decision and Phase 01 authorization without starting it.
 
 Supplemental read-only code review found no actionable findings and independently
 ran the 12 tests, Ruff checks and whitespace check. It did not issue a Phase Gate
 decision. Full final staged diff is inspected before the attempt commit.
+
+## External review and finalization
+
+The human owner supplied an external Phase 00 PASS decision on 2026-09-27.
+The reviewer accepted the bootstrap acceptance criteria, 12/12 tests, CLI, Ruff,
+wheel build/install, Git hygiene, scope control and secret checks. Python 3.11
+and non-Windows verification are not required to block this phase. The later-phase
+numbering discrepancy remains documented for resolution before affected phases.
+
+Finalization changes only CURRENT_STATE.md and this evidence record. The approved
+implementation commit matches `16869718f6e23f2d517ceec0fcb8aad491b926f9` exactly.
+The PASS-state commit message is `AIPC Phase 00 PASS - repository bootstrap`.
+Stable tag `aipc-phase-00-pass` identifies that commit; its exact target hash is
+reported after committing, avoiding a self-referential hash inside the commit.
+The approved history is integrated into `master` with a non-destructive fast-forward
+merge. No Phase 01 implementation is included.
 
 ## Limitations and future considerations
 
@@ -100,4 +117,4 @@ decision. Full final staged diff is inspected before the attempt commit.
 
 ## Next action
 
-Submit Phase 00 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
+Phase 00 finalized. Stop this session; Phase 01 is authorized as the next phase and remains unstarted.
