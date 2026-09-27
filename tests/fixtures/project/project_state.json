@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "project_id": "example_project",
+  "run_id": "run-example",
+  "current_phase": "verify",
+  "current_attempt": 2,
+  "status": "WAITING_PROVIDER",
+  "completed_phases": ["prepare"],
+  "blocked_phases": [],
+  "active_task_id": null,
+  "last_review": null,
+  "retries": {"provider_retry": 1, "phase_revision": 1, "review_retry": 0},
+  "updated_at": "2026-09-27T02:00:00Z"
+}

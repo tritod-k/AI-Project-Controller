@@ -57,7 +57,7 @@ Version 1.2 adds:
 
 ## Phase 00 Bootstrap
 
-The repository now contains the Python package foundation only. Use Python 3.11+
+Phase 00 established the Python package foundation. Use Python 3.11+
 and a project-local environment:
 
 ```powershell
@@ -84,4 +84,14 @@ Check generated schemas with `python -m aipc.domain.schemas --check`.
 
 See [canonical contracts](docs/CANONICAL_MODELS.md) and
 [future adapter boundaries](docs/PROVIDER_ADAPTER_GUIDE.md). Provider integrations,
-normalization, reviewers, state machines and orchestration remain deferred.
+normalization, reviewers and orchestration remain deferred.
+
+## Phase 02 Project Definition and State
+
+Phase 02 adds PROJECT.yaml loading, phase dependency validation, explicit project
+state transitions, retry bookkeeping and atomic JSON persistence. A harmless example
+definition lives in `projects/example_project/PROJECT.yaml`. Check its generated
+contracts with `python -m aipc.project.schemas --check`.
+
+See [project/state contracts](docs/PROJECT_STATE.md). The CLI stays help-only;
+no agent integration or controller loop is implemented.

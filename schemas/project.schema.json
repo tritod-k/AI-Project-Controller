@@ -1,0 +1,194 @@
+{
+  "$defs": {
+    "AcceptanceCriterion": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Id",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "statement": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Statement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "statement"
+      ],
+      "title": "AcceptanceCriterion",
+      "type": "object"
+    },
+    "AgentAssignments": {
+      "additionalProperties": false,
+      "properties": {
+        "planner": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Planner",
+          "type": "string"
+        },
+        "reviewer": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Reviewer",
+          "type": "string"
+        },
+        "worker": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Worker",
+          "type": "string"
+        }
+      },
+      "required": [
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "title": "AgentAssignments",
+      "type": "object"
+    },
+    "ControllerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "max_phase_retries": {
+          "default": 3,
+          "minimum": 0,
+          "title": "Max Phase Retries",
+          "type": "integer"
+        },
+        "stop_on_blocked": {
+          "default": true,
+          "title": "Stop On Blocked",
+          "type": "boolean"
+        }
+      },
+      "title": "ControllerConfig",
+      "type": "object"
+    },
+    "PhaseDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterion"
+          },
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "objective": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Objective",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "objective",
+        "acceptance_criteria"
+      ],
+      "title": "PhaseDefinition",
+      "type": "object"
+    },
+    "ProjectIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "workspace": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Workspace",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "workspace"
+      ],
+      "title": "ProjectIdentity",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agents": {
+      "$ref": "#/$defs/AgentAssignments"
+    },
+    "controller": {
+      "$ref": "#/$defs/ControllerConfig"
+    },
+    "phases": {
+      "items": {
+        "$ref": "#/$defs/PhaseDefinition"
+      },
+      "minItems": 1,
+      "title": "Phases",
+      "type": "array"
+    },
+    "project": {
+      "$ref": "#/$defs/ProjectIdentity"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "project",
+    "controller",
+    "agents",
+    "phases"
+  ],
+  "title": "ProjectDefinition",
+  "type": "object"
+}

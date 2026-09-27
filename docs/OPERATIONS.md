@@ -23,6 +23,8 @@ Ruff performs lint and formatting checks. No type checker is configured yet.
 Setuptools builds the distribution; pytest and Ruff are development-only tools.
 Pydantic 2 is required for Phase 01 contracts. JSON Schema and RFC3339 validators
 are development-only dependencies. No provider credentials are required.
+Phase 02 also requires PyYAML for PROJECT.yaml parsing; update the same editable
+environment with `pip install -e '.[dev]'`.
 
 Logging usage:
 
@@ -54,3 +56,17 @@ the checkout root. `--output DIRECTORY` supports a separate generated-artifact
 directory. Check mode validates artifact consistency without writing files.
 The regular CLI remains help-only. Contract usage and validation choices are
 documented in [CANONICAL_MODELS.md](CANONICAL_MODELS.md).
+
+Phase 02 project/state schemas are maintained separately:
+
+```powershell
+.venv\Scripts\python.exe -m aipc.project.schemas
+.venv\Scripts\python.exe -m aipc.project.schemas --check
+```
+
+See [PROJECT_STATE.md](PROJECT_STATE.md) for loading PROJECT.yaml and the Python
+state API. Choose a controlled state-file location and keep real runtime output
+under ignored `runs/` (or another explicitly ignored directory). Load existing
+state on resume; initialize only for a new file. Never automatically replace
+corrupted state. Do not run concurrent writers for the same state file.
+The main CLI remains help-only; no controller execution commands are introduced.

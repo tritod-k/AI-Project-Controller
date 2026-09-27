@@ -1,0 +1,31 @@
+schema_version: "1.0"
+project:
+  id: example_project
+  name: Harmless example project
+  workspace: ./workspace
+controller:
+  max_phase_retries: 2
+  stop_on_blocked: true
+agents:
+  planner: planner-example
+  worker: worker-example
+  reviewer: reviewer-example
+phases:
+  - id: prepare
+    name: Prepare sample
+    objective: Define a harmless sample function.
+    acceptance_criteria:
+      - id: AC-PREPARE-01
+        statement: The sample function specification exists.
+        required: true
+  - id: verify
+    name: Verify sample
+    objective: Verify the harmless sample specification.
+    depends_on: [prepare]
+    acceptance_criteria:
+      - id: AC-VERIFY-01
+        statement: The specification has a matching example.
+        required: true
+      - id: AC-VERIFY-02
+        statement: Optional explanatory notes are available.
+        required: false

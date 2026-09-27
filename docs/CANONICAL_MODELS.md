@@ -130,3 +130,5 @@ The blueprint itself is preserved. Future contract changes require rationale,
 consumer compatibility consideration, schema-version review, tests and regenerated
 schemas. AgentCapabilities, project schema/state, adapters, normalization, reviewer,
 approval policy, Version Manager and Recovery Manager remain deferred to their phases.
+Project/state contracts were deferred by Phase 01 and are now added separately in
+Phase 02; see [PROJECT_STATE.md](PROJECT_STATE.md). Communication models are unchanged.
