@@ -88,4 +88,6 @@ provide success and approval cases. Shared assertions inspect only typed envelop
 identity, lifecycle and errors; provider payload checks belong in provider unit tests.
 Tests use asyncio.run from the standard library, with no async pytest dependency.
 Mock unit tests cover all scenarios, terminal ordering, mutation and run isolation.
-The production CLI stays help-only. No controller loop or normalization is introduced.
+The production CLI stays help-only. Phase 03 introduced no controller loop or
+normalization; Phase 04 supplies [mock normalization](NORMALIZATION.md) without
+changing the approved adapter behavior, including its exception-based timeout.

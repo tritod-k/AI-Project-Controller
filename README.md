@@ -101,6 +101,15 @@ no agent integration or controller loop is implemented.
 The provider-neutral adapter interface, capabilities, run/raw envelopes and registry
 are implemented with a deterministic mock. The mock simulates success, task failure,
 timeout, approval and malformed output without real tools or provider communication.
-Raw results await Phase 04 normalization; the CLI remains help-only. See
+Raw results pass through Phase 04 normalization; the CLI remains help-only. See
 [adapter contracts](docs/AGENT_ADAPTERS.md). Run shared checks with
 `pytest tests/contract/test_agent_adapters.py`.
+
+## Phase 04 Normalization
+
+The shared normalizer Protocol/context and canonical validator support explicit
+mock status mapping. Malformed input and pending approval fail explicitly; terminal
+outputs are validated AgentResult objects. Raw diagnostics remain external references.
+Five different test-only raw formats demonstrate canonical equivalence. See
+[normalization contracts](docs/NORMALIZATION.md). No real providers or controller
+loop are introduced.

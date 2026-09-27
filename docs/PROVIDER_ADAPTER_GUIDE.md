@@ -2,9 +2,11 @@
 
 Phase 01 defines canonical data contracts. Phase 03 adds the adapter Protocol,
 capabilities, run/raw envelopes, exact registry and a deterministic mock. The
-normalization layer remains deferred to Phase 04. See [AGENT_ADAPTERS.md](AGENT_ADAPTERS.md).
+Phase 04 normalization layer now provides a shared Protocol/context/validator and
+mock-specific mapping. See [AGENT_ADAPTERS.md](AGENT_ADAPTERS.md) and
+[NORMALIZATION.md](NORMALIZATION.md).
 
-Adapters return RawAgentResult with provider-specific content. Future normalizers
+Adapters return RawAgentResult with provider-specific content. Normalizers
 must produce provider-neutral payloads validated through the models documented in
 [CANONICAL_MODELS.md](CANONICAL_MODELS.md). The intended flow remains:
 
@@ -23,5 +25,5 @@ JSON Schema alone does not check cross-field totals/time ordering. Avoid uncheck
 construction/copies at boundaries and revalidate mutable payloads before consuming them.
 
 Phase 03 includes shared adapter contract tests and mock lifecycle/approval responses.
-Real provider integration, capability negotiation, retry/routing, normalization and
+Real provider integration, capability negotiation, retry/routing and
 approval policy remain later-phase implementation work.

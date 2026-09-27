@@ -43,4 +43,12 @@ Phase 03 adds the provider-neutral AgentAdapter Protocol, capability/handle/raw
 envelopes and exact-ID registry under `aipc.agents`, plus a deterministic mock under
 `aipc.adapters.mock`. Raw results remain separate from canonical AgentResult.
 Project/state modules are unchanged and do not consume raw adapter results. No
-controller loop, normalization or real provider exists. See [AGENT_ADAPTERS.md](AGENT_ADAPTERS.md).
+controller loop or real provider exists. See [AGENT_ADAPTERS.md](AGENT_ADAPTERS.md).
+
+Phase 04 adds a shared normalizer Protocol, explicit caller context and canonical
+revalidation under `aipc.normalization`. Mock-specific mapping resides in
+`aipc.adapters.mock.normalizer`; raw syntax stops there. Canonical AgentResult is
+the returned downstream contract. Pending approval and malformed data cannot
+produce fake completed results. Raw diagnostics remain external references.
+Project/state modules, schemas and the help-only CLI remain unchanged. See
+[NORMALIZATION.md](NORMALIZATION.md) for mapping, timeout bridging and boundary proof.

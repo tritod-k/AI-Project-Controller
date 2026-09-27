@@ -43,3 +43,19 @@ class InvalidApprovalDecisionError(AgentError):
 
 class AgentTimeoutError(AgentError):
     """Adapter execution timed out, distinct from a raw task-failure result."""
+
+
+class NormalizationError(Exception):
+    """Raw execution data cannot safely become a canonical result."""
+
+
+class MalformedRawResultError(NormalizationError):
+    """Raw structure, identity or normalization context is invalid."""
+
+
+class UnsupportedRawStatusError(NormalizationError):
+    """A provider status is unsupported or is not a terminal result."""
+
+
+class CanonicalValidationError(NormalizationError):
+    """Mapped output fails the canonical AgentResult contract."""
