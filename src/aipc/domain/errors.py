@@ -59,3 +59,7 @@ class UnsupportedRawStatusError(NormalizationError):
 
 class CanonicalValidationError(NormalizationError):
     """Mapped output fails the canonical AgentResult contract."""
+
+
+class PromptError(Exception):
+    """Prompt inputs are invalid or describe conflicting task context."""

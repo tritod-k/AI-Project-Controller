@@ -7,43 +7,36 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 04 — Normalization Layer
+Phase 05 — Prompt Engine
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-04-pass` on `master` identifies the Phase 04 PASS-state commit
-including this finalized summary. Its exact target is reported after commit.
-Previous Phase 03 stable target:
-`f6e58dfafde178a0044ce9e859bff2a9e7055288`.
-Verified actual tag before Phase 04; previous displayed handoff hash was a typo only.
+`aipc-phase-04-pass` / stable `master`:
+`fddb51f59b7358e8b3bd88ad72f6cc6f25b633ec`.
+Verified actual tag/HEAD before creating Phase 05 branch; all references matched.
+Previous Phase 03: `f6e58dfafde178a0044ce9e859bff2a9e7055288`.
 Previous Phase 02: `fa189a31e8483831f92f9fa86907ff022211cfe8`.
 Previous Phase 01: `5efcc4cdf50a4dd81713a1f40c52b7f810ac419f`.
 Previous Phase 00: `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
-All existing tags and approved histories are preserved.
+Prior PASS tags and histories are preserved.
 
 ## Current Branch / Worktree
-Stable development branch / finalized checkout: `master`.
-Approved attempt branch: `codex/phase-04-attempt-01` (retained).
+`codex/phase-05-attempt-01`, created from approved Phase 04 stable checkpoint.
 Normal checkout: `H:/000ProjectCode/AI_Project_Controller`.
-Integration is a history-preserving fast-forward. No Phase 05 branch or implementation.
+Stable master remains Phase 04; no Phase 05 PASS tag or Phase 06 branch.
 
 ## Last Commit
-Actual approved Git HEAD verified before finalization:
-`03f3e1244c21335256a5502e26ef46ef6ce776c2`.
-`AIPC Phase 04 handoff - correct documentation encoding`.
-Approved implementation: `bc10f9aae15656793c3df2663f5c169c9bfaaf8b`.
-`AIPC Phase 04 attempt 01 - normalization layer`.
-This summary is included in `AIPC Phase 04 PASS - normalization layer`;
-its exact resulting hash is reported after commit and identified by `aipc-phase-04-pass`.
-Historical attempt evidence remains in docs/PHASE_04_EVIDENCE.md.
+Verified pre-attempt HEAD: `fddb51f59b7358e8b3bd88ad72f6cc6f25b633ec`.
+This implementation/state is prepared for `AIPC Phase 05 attempt 01 - prompt engine`.
+Its actual resulting hash will be recorded in the subsequent documentation handoff.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -53,90 +46,70 @@ Historical attempt evidence remains in docs/PHASE_04_EVIDENCE.md.
 - Phase 04 — Normalization Layer: PASS (external reviewer approved).
 
 ## Authorized Current Phase
-Phase 04 approved and finalized. This session performs finalization only.
+Phase 05 — Prompt Engine, implementation attempt only.
 
 ## Next Authorized Phase
-Phase 05 — Prompt Engine
+None. Await external Phase 05 decision and separate human/controller authorization.
 
-## Phase 05 Status
+## Phase 06 Status
 NOT_STARTED
 
 ## Current Work
-- Shared AgentResultNormalizer Protocol, explicit required nullable context fields,
-  canonical revalidation and four typed normalization errors.
-- Mock-specific status mapping with identity/lifecycle/terminal-variant validation.
-- Observed AgentTimeoutError bridge preserves Phase 03 adapter behavior.
-- Pending approval rejected; terminal APPROVE and DENY normalized explicitly.
-- Malformed raw data/context and contradictory known fields fail; unknown extras ignored.
-- Raw diagnostics remain external; canonical raw_output_ref is exercised through a file fixture.
-- Five test-only raw formats prove equivalent canonical results and JSON Schema validity.
-- Core AST import boundary and canonical consumer seam reject raw envelopes.
-- No new dependency, schema change, real provider, registry/router, controller or Phase 05 work.
-- Phase 00 through Phase 03 source remains unchanged except appended normalization errors.
+- Pure PromptEngine phase/repair builders from typed existing contracts; text only.
+- Immutable PromptContext sidecar for scope/files/checks/checkpoint/prior task and attempt.
+- Fixed 13-section phase contract, 17 report fields, mandatory stop and preservation rules.
+- Canonical review revalidation, REVISE path and explicit task/attempt/criterion association.
+- Declaration-order rendering and lossless dynamic text fences for supplied content.
+- Full phase/repair golden examples, repeated and fresh-process/hash-seed determinism.
+- No provider execution, file discovery, state mutation, retry/gate/evidence/controller logic.
+- No new dependencies or changes to existing canonical/project models or six schemas.
 
 ## Tests
-Windows / Python 3.13.0; project-local pytest 9.1.1, Ruff 0.16.9,
-Pydantic 2.13.5 / PyYAML 6.0.3. No global installs or new dependency declarations.
+Windows / Python 3.13.0; local pytest 9.1.1, Ruff 0.16.9, Pydantic 2.13.5.
 
-- `python -m aipc --help`: original help-only CLI, exit 0.
-- `pytest -q`: 589 passed, 0 failed, 0 skipped, 8.81 seconds, exit 0.
-  Existing 518 plus 71 new cases: 55 unit, 8 integration, 8 normalization contracts.
-- Explicit normalization subset: 71 passed, 0.60 seconds, exit 0.
-- Adapter contract subset: 7 passed, 0.42 seconds, exit 0.
-- `python -m ruff check .`: all checks passed, exit 0.
-- `python -m ruff format --check .`: 48 files already formatted, exit 0.
-- `python -m pip check`: no broken requirements, exit 0.
-- `python -m aipc.domain.schemas --check`: four consistent canonical schemas, exit 0.
-- `python -m aipc.project.schemas --check`: two consistent project/state schemas, exit 0.
-- Full protected-source/schema/dependency diff against Phase 03: unchanged, exit 0.
-- Git diff checks passed; 97 tracked/staged files scanned for secret patterns: no matches.
-  Raw mock status/detail keys occur in production only under adapters/mock.
-- Read-only reviewer found one contradictory-known-field gap; eight regressions failed
-  before the fix and passed after it. Independent final subset: 71 passed, 0.62 seconds;
-  no remaining actionable findings. External reviewer subsequently approved Phase 04.
-- No type checker configured. Python 3.11/non-Windows and wheel install unverified this phase.
-
-## Finalization Verification
-Before integration: `pytest -q` returned 589 passed, 0 failed/skipped, 9.16 seconds,
-exit 0. Only CURRENT_STATE.md changes during finalization; implementation remains approved.
-Full tests, Ruff, pip, both schema checks, adapter contracts and normalization subset
-are required on integrated master before the final report.
+- Full `pytest -q`: 668 passed, 0 failed/skipped, 12.54 seconds, exit 0.
+  Existing 589 plus 79 new: 71 prompt unit cases and 8 contracts.
+- Explicit Prompt Engine subset: 79 passed, 2.79 seconds, exit 0.
+- Explicit normalization subset: 71 passed, 0.67 seconds, exit 0.
+- Adapter contract subset: 7 passed, 0.32 seconds, exit 0.
+- CLI help, Ruff lint, Ruff format (54 files), pip check: exit 0.
+- Four canonical and two project/state schema drift checks: exit 0, unchanged.
+- Protected source/model/schema/dependency/instruction diff against Phase 04: unchanged.
+- Internal fresh read-only reviewer independently passed 79 tests; no actionable findings.
+- 52 initial phase tests failed before production prompt modules existed; 18 repair tests
+  failed with the repair method absent, then passed after implementation.
+- Subprocess byte comparison initially exposed Windows stdout LF-to-CRLF translation;
+  test writes UTF-8 bytes directly, confirming deterministic strings across hash seeds.
+- No type checker configured. Python 3.11/non-Windows and wheel install unverified.
+- No global installs or new dependency declarations. Git diff checks pass.
 
 ## Remaining Work
-None for Phase 04. Phase 05 is NOT_STARTED; await a separate implementation request.
+External reviewer decision: PASS / REVISE / BLOCKED. No implementation work remains known.
 
 ## Known Issues
-No known implementation defects. Mock run storage remains process-local. Timeout
-exception-to-run association and provider identity are caller responsibilities.
-Raw references are opaque; normalizer does not store, resolve or check their existence.
-Pending approval is deliberately not a terminal AgentResult. Canonical collections
-retain Phase 01 mutation semantics and must be revalidated at downstream boundaries.
-Core import/consumer tests prove the current boundary; future orchestration wiring
-must preserve it. No live structured controller state is configured; persisted test
-state and diagnostics are fixtures.
+No known defects. Rendering is not execution authority, dependency readiness or a gate
+decision. Caller supplies previous-task/attempt provenance; correlation is checked but
+not authenticated. Text fences preserve structure, not semantic LLM injection safety.
+Canonical mutable collections must still be revalidated at external/provider boundaries.
+Raw diagnostics remain external and unresolved approval is not terminal AgentResult.
+Mock process-local storage and Phase 02 single-writer limits remain accepted.
+No configured live controller state exists; persisted state under tests is a fixture.
 
 ## Last Reviewer Result
-PASS
-External reviewer approves Phase 04: raw/canonical separation, validated normalizer
-output, provider-confined mapping, fail-closed malformed/contradictory/incomplete input,
-non-terminal approval rejection, externally referenced diagnostics, five-format
-equivalence and isolated project/state logic. Canonical models/schemas unchanged;
-589/589 tests pass. Independent contradictory-field finding fixed and regression-tested.
-Caller responsibilities for raw retention, provider identity and timeout/run association
-are accepted for current scope. No Phase 05 functionality was introduced.
+Phase 05: PENDING external review. Internal independent review has no actionable findings.
+Phase 04: PASS external review, finalized at the verified stable checkpoint above.
 
 ## Required Fixes
-None. External Phase 04 review returned PASS.
+None known. Await external Phase 05 review; do not self-mark PASS.
 
 ## Recovery Notes
-- Read instructions/state, inspect Git branch/log/status and preserve unknown edits.
-- Stable master / aipc-phase-04-pass identify the approved Phase 04 PASS-state checkpoint.
-- Phase 05 is authorized next but NOT_STARTED. Stop this finalization session.
-- Existing project-local environment: `pip install -e '.[dev]'` if setup is needed.
-- Revalidate canonical objects after mutation or external/provider transfer.
-- Catch the actual mock AgentTimeoutError before calling normalize_timeout for that run.
-- Never pass RawAgentResult into state/reviewer/gate business logic.
-- Preserve Phase 02 single-writer persistence assumption and all stable tags.
+- Inspect instructions/state/Git before resuming; preserve unknown human edits.
+- Resume Phase 05 attempt branch; stable master/aipc-phase-04-pass are unchanged.
+- Project-local environment: `pip install -e '.[dev]'` if setup is needed.
+- Prompt output is text only; future runtime must authorize execution separately.
+- Supply explicit previous_task_id and previous_attempt for REVISE repair prompts.
+- Preserve raw normalization boundary and revalidate canonical objects downstream.
+- Stop for external Phase 05 review; no later phase is authorized.
 
 ## Future Considerations
 Mock persistence and real provider approval blocking remain deferred. Stronger
@@ -150,13 +123,13 @@ AgentResult. Provider/run correlation and reference retention responsibilities r
 explicit until later runtime/evidence phases. No later phase is implemented here.
 
 ## Next Action
-Stop after Phase 04 finalization. Await a separate request to implement Phase 05 — Prompt Engine.
+Submit Phase 05 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
 
 ## Files to Read on Resume
 - AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md
-- docs/NORMALIZATION.md and docs/PHASE_04_EVIDENCE.md
-- src/aipc/normalization and src/aipc/adapters/mock/normalizer.py
-- normalization unit/integration/contract tests and five raw fixture files
+- docs/PROMPT_ENGINE.md and docs/PHASE_05_EVIDENCE.md
+- src/aipc/prompts and prompt unit/contract tests
+- tests/fixtures/prompts/inputs.json, phase.md and repair.md
 
 ## Updated
-2026-09-27T13:32:06+07:00
+2026-09-27T13:52:08+07:00

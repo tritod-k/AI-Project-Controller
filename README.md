@@ -113,3 +113,11 @@ outputs are validated AgentResult objects. Raw diagnostics remain external refer
 Five different test-only raw formats demonstrate canonical equivalence. See
 [normalization contracts](docs/NORMALIZATION.md). No real providers or controller
 loop are introduced.
+
+## Phase 05 Prompt Engine
+
+The deterministic PromptEngine renders phase and repair instructions from typed
+project/state/review contracts. Caller-supplied context adds scope, files, checks and
+checkpoint/attempt information without schema changes. Both paths preserve the
+completion report and mandatory stop condition. No agent or command is executed.
+See [prompt contracts and examples](docs/PROMPT_ENGINE.md).

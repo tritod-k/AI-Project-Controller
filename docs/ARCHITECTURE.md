@@ -52,3 +52,10 @@ the returned downstream contract. Pending approval and malformed data cannot
 produce fake completed results. Raw diagnostics remain external references.
 Project/state modules, schemas and the help-only CLI remain unchanged. See
 [NORMALIZATION.md](NORMALIZATION.md) for mapping, timeout bridging and boundary proof.
+
+Phase 05 adds pure phase/repair prompt composition under `aipc.prompts`. Existing
+ProjectDefinition, PhaseDefinition, ProjectState and canonical ReviewResult remain
+the inputs; a separate PromptContext carries ordered rendering options and explicit
+prior-attempt identity. The output is text for later TaskRequest assembly. No agent
+execution, retry policy, state mutation or evidence collection occurs. All schemas
+and the help-only CLI remain unchanged. See [PROMPT_ENGINE.md](PROMPT_ENGINE.md).

@@ -1,0 +1,141 @@
+{
+  "project": {
+    "schema_version": "1.0",
+    "project": {
+      "id": "sample",
+      "name": "Sample Project",
+      "workspace": "./workspace"
+    },
+    "controller": {
+      "max_phase_retries": 3,
+      "stop_on_blocked": true
+    },
+    "agents": {
+      "planner": "planner",
+      "worker": "worker",
+      "reviewer": "reviewer"
+    },
+    "phases": [
+      {
+        "id": "00",
+        "name": "Prepare",
+        "objective": "Prepare workspace.",
+        "depends_on": [],
+        "acceptance_criteria": [
+          {
+            "id": "AC-00",
+            "statement": "Workspace ready.",
+            "required": true
+          }
+        ]
+      },
+      {
+        "id": "01",
+        "name": "Verify",
+        "objective": "Verify the requested behavior.",
+        "depends_on": [
+          "00"
+        ],
+        "acceptance_criteria": [
+          {
+            "id": "AC-Z",
+            "statement": "Behavior is correct.",
+            "required": true
+          },
+          {
+            "id": "AC-A",
+            "statement": "Example is documented.",
+            "required": false
+          }
+        ]
+      }
+    ]
+  },
+  "phase_id": "01",
+  "state": {
+    "schema_version": "1.0",
+    "project_id": "sample",
+    "run_id": "run-sample",
+    "current_phase": "01",
+    "current_attempt": 1,
+    "status": "RUNNING",
+    "completed_phases": [
+      "00"
+    ],
+    "blocked_phases": [],
+    "active_task_id": "task-original",
+    "last_review": null,
+    "retries": {
+      "provider_retry": 0,
+      "phase_revision": 0,
+      "review_retry": 0
+    },
+    "updated_at": "2026-09-27T00:00:00Z"
+  },
+  "repair_state": {
+    "schema_version": "1.0",
+    "project_id": "sample",
+    "run_id": "run-sample",
+    "current_phase": "01",
+    "current_attempt": 2,
+    "status": "RUNNING",
+    "completed_phases": [
+      "00"
+    ],
+    "blocked_phases": [],
+    "active_task_id": null,
+    "last_review": null,
+    "retries": {
+      "provider_retry": 0,
+      "phase_revision": 1,
+      "review_retry": 0
+    },
+    "updated_at": "2026-09-27T00:00:00Z"
+  },
+  "review": {
+    "schema_version": "1.0",
+    "metadata": {},
+    "review_id": "review-original",
+    "task_id": "task-original",
+    "verdict": "REVISE",
+    "confidence": 0.9,
+    "criteria": [
+      {
+        "criterion_id": "AC-Z",
+        "status": "FAIL",
+        "evidence": [
+          "tests.log: assertion failed"
+        ],
+        "notes": "Boundary case missing."
+      }
+    ],
+    "failed_criteria": [
+      "AC-Z"
+    ],
+    "required_fixes": [
+      "Cover the boundary case."
+    ],
+    "risks": [
+      "Regression risk."
+    ],
+    "next_phase_allowed": false
+  },
+  "context": {
+    "in_scope": [
+      "Verify the boundary case."
+    ],
+    "out_of_scope": [
+      "No UI work."
+    ],
+    "files_to_read": [
+      "src/sample.py",
+      "tests/test_sample.py"
+    ],
+    "validation_commands": [
+      "pytest -q"
+    ],
+    "last_stable_checkpoint": "sample-phase-00-pass",
+    "previous_attempt": 1,
+    "previous_task_id": "task-original"
+  }
+}
