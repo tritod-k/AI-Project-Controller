@@ -54,3 +54,23 @@ Version 1.2 adds:
 - commit hash/message included in Phase Completion Reports
 - stable PASS checkpoint/tag only after external reviewer/controller approval
 - a manual-bootstrap handoff flow for sending phase results to ChatGPT for review
+
+## Phase 00 Bootstrap
+
+The repository now contains the Python package foundation only. Use Python 3.11+
+and a project-local environment:
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.venv\Scripts\python.exe -m aipc --help
+.venv\Scripts\pytest.exe
+.venv\Scripts\python.exe -m ruff check .
+.venv\Scripts\python.exe -m ruff format --check .
+```
+
+The installed `aipc` command also displays help. Operational commands, canonical
+models and provider integrations await their authorized phases.
+
+See [operations](docs/OPERATIONS.md), [bootstrap architecture](docs/ARCHITECTURE.md)
+and [current state](CURRENT_STATE.md) for setup and review handoff.
