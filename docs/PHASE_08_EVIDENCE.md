@@ -110,7 +110,9 @@ No Reviewer, Phase Gate, acceptance scoring, PASS/REVISE, provider dispatch/fall
 Approval Router, scheduler or orchestration loop. Runtime reconnect/dispatch remains
 future integration. No real-repository recovery or self-promotion.
 
-Attempt commit: verified implementation commit created after this report; exact hash recorded
-in the following documentation handoff and final report to avoid self-referential commit hashes.
+Attempt commit: `7a85a5ba9f01dbc0e8fa8e8a612cf01de909fda2`.
+Message: `AIPC Phase 08 attempt 01 - recovery manager`.
+The documentation-only handoff records this actual implementation hash; its own resulting
+HEAD appears in the final report, avoiding a self-referential hash.
 Documentation/handoff HEAD: recorded in final report after the handoff commit.
 Current state must end AWAITING_REVIEW / PENDING; only external reviewer may approve.

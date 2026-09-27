@@ -28,8 +28,10 @@ Created from the verified clean Phase 07 stable checkpoint. Master and PASS tags
 No runtime recovery/version operations exercised against this repository; fixture repos only.
 
 ## Last Commit
-Starting HEAD: `5df11213c7f25884046fcc3a7bff62b78c01fcad`.
-Phase 08 implementation and final validation complete; normal attempt commit and exact hash handoff follow.
+Phase 08 implementation attempt: `7a85a5ba9f01dbc0e8fa8e8a612cf01de909fda2`.
+`AIPC Phase 08 attempt 01 - recovery manager`.
+This documentation-only handoff records the verified implementation hash; its resulting
+HEAD is supplied in the final Phase Completion Report. No self-referential hash is inferred.
 
 ## Completed Phases
 
@@ -140,4 +142,4 @@ AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/RECOVERY_MANAGER.md,
 docs/PHASE_08_EVIDENCE.md, src/aipc/recovery, src/aipc/version and recovery/version tests.
 
 ## Updated
-2026-09-27T22:10:35.285953+07:00
+2026-09-27T22:11:24.932760+07:00
