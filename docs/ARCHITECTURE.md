@@ -59,3 +59,10 @@ the inputs; a separate PromptContext carries ordered rendering options and expli
 prior-attempt identity. The output is text for later TaskRequest assembly. No agent
 execution, retry policy, state mutation or evidence collection occurs. All schemas
 and the help-only CLI remain unchanged. See [PROMPT_ENGINE.md](PROMPT_ENGINE.md).
+
+Phase 06 adds observational evidence collection under `aipc.evidence`. Typed canonical
+inputs are revalidated; fixed Git reads and authorized bounded file copies create
+relative, hashed artifact indexes and atomically publish an attempt manifest. Declared
+commands/tests remain distinct from observed Git changes and parsed logs. Missing or
+failed evidence remains explicit, never a phase decision. No execution authority or
+state advancement is introduced. See [EVIDENCE_COLLECTOR.md](EVIDENCE_COLLECTOR.md).

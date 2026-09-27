@@ -7,44 +7,30 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 05 — Prompt Engine
+Phase 06 — Evidence Collector
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-05-pass` on `master` identifies the Phase 05 PASS-state commit
-including this finalized summary. Its exact target is reported after commit.
-Previous Phase 04 stable target:
-`fddb51f59b7358e8b3bd88ad72f6cc6f25b633ec`.
-Verified actual tag/HEAD before creating Phase 05 branch; all references matched.
-Previous Phase 03: `f6e58dfafde178a0044ce9e859bff2a9e7055288`.
-Previous Phase 02: `fa189a31e8483831f92f9fa86907ff022211cfe8`.
-Previous Phase 01: `5efcc4cdf50a4dd81713a1f40c52b7f810ac419f`.
-Previous Phase 00: `ae0e476d1586bdcfea6b0a46005d675dc618f12f`.
-Prior PASS tags and histories are preserved.
+`aipc-phase-05-pass` on `master`:
+`f5d61ea5e546bc0b6cd0c23aa726fb61ad13b6e6`.
+Exact starting HEAD/tag verified, clean tree; prior PASS tags preserved.
 
 ## Current Branch / Worktree
-Stable development branch / finalized checkout: `master`.
-Approved attempt branch: `codex/phase-05-attempt-01` (retained).
-Normal checkout: `H:/000ProjectCode/AI_Project_Controller`.
-Integration is a history-preserving fast-forward. No Phase 06 branch or implementation.
+`codex/phase-06-attempt-01` in `H:/000ProjectCode/AI_Project_Controller`.
+Created from approved Phase 05 checkpoint. No Phase 06 PASS tag or master integration.
 
 ## Last Commit
-Actual approved Git HEAD verified before finalization:
-`0dd5740c5b5b940226b06e858423c11a87736f20`.
-`AIPC Phase 05 attempt 01 - record review handoff`.
-Approved implementation: `2475041eeeb9d53eded6984175a99633dcd0cf1f`.
-`AIPC Phase 05 attempt 01 - prompt engine`.
-This summary is included in `AIPC Phase 05 PASS - prompt engine`;
-its exact resulting hash is reported after commit and identified by `aipc-phase-05-pass`.
-Historical attempt evidence remains in docs/PHASE_05_EVIDENCE.md.
+Verified approved base before implementation:
+`f5d61ea5e546bc0b6cd0c23aa726fb61ad13b6e6` — AIPC Phase 05 PASS - prompt engine.
+Phase 06 attempt commit is created after validation; exact hash recorded in handoff.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -55,107 +41,108 @@ Historical attempt evidence remains in docs/PHASE_05_EVIDENCE.md.
 - Phase 05 — Prompt Engine: PASS (external reviewer approved).
 
 ## Authorized Current Phase
-Phase 05 approved and finalized. This session performs finalization only.
+Phase 06 only. Implementation complete; external review pending.
 
 ## Next Authorized Phase
-Phase 06 — Evidence Collector
+None. Await Phase 06 external decision and separately authorized documentation alignment.
 
-## Phase 06 Status
+## Phase 07 Status
 NOT_STARTED
 
 ## Current Work
-- Pure PromptEngine phase/repair builders from typed existing contracts; text only.
-- Immutable PromptContext sidecar for scope/files/checks/checkpoint/prior task and attempt.
-- Fixed 13-section phase contract, 17 report fields, mandatory stop and preservation rules.
-- Canonical review revalidation, REVISE path and explicit task/attempt/criterion association.
-- Declaration-order rendering and lossless dynamic text fences for supplied content.
-- Full phase/repair golden examples, repeated and fresh-process/hash-seed determinism.
-- No provider execution, file discovery, state mutation, retry/gate/evidence/controller logic.
-- No new dependencies or changes to existing canonical/project models or six schemas.
+- EvidenceCollector revalidates canonical TaskRequest/AgentResult and explicit context.
+- Immutable typed bundle/index records distinguish collected/unavailable/failed evidence.
+- Exclusive attempt directory, existing atomic JSON writer and manifest-last publication.
+- Fixed read-only Git status/HEAD/branch/baseline/diff/changes; no workspace/index mutation.
+- Git configured filters/external diff/textconv/fsmonitor/optional locks/lazy fetching disabled.
+- Submodules in index/baseline are explicitly unavailable, preventing child execution.
+- Declared commands/structured tests retained separately from observations/parsed logs.
+- Narrow injectable pytest parser; contradictory prose never overrides canonical data.
+- Bounded artifact/raw/log copies, relative paths, SHA-256, deduplication with provenance.
+- Portable traversal/absolute/drive/UNC/ADS/reserved path rejection; links/junctions rejected.
+- Case-insensitive .env/.git exclusions; missing logs/files/Git remain explicit.
+- No execution/provider/reviewer/gate/controller/recovery/version-manager functionality.
+- Existing canonical/project models, six schemas, dependencies and instructions unchanged.
 
 ## Tests
-Windows / Python 3.13.0; local pytest 9.1.1, Ruff 0.16.9, Pydantic 2.13.5.
-
-- Full `pytest -q`: 668 passed, 0 failed/skipped, 12.54 seconds, exit 0.
-  Existing 589 plus 79 new: 71 prompt unit cases and 8 contracts.
-- Explicit Prompt Engine subset: 79 passed, 2.79 seconds, exit 0.
-- Explicit normalization subset: 71 passed, 0.67 seconds, exit 0.
-- Adapter contract subset: 7 passed, 0.32 seconds, exit 0.
-- CLI help, Ruff lint, Ruff format (54 files), pip check: exit 0.
-- Four canonical and two project/state schema drift checks: exit 0, unchanged.
-- Protected source/model/schema/dependency/instruction diff against Phase 04: unchanged.
-- Internal fresh read-only reviewer independently passed 79 tests; no actionable findings.
-- 52 initial phase tests failed before production prompt modules existed; 18 repair tests
-  failed with the repair method absent, then passed after implementation.
-- Subprocess byte comparison initially exposed Windows stdout LF-to-CRLF translation;
-  test writes UTF-8 bytes directly, confirming deterministic strings across hash seeds.
-- No type checker configured. Python 3.11/non-Windows and wheel install unverified.
-- No global installs or new dependency declarations. Git diff checks pass.
-- Secret-pattern audit: 110 tracked/staged files scanned, no matches or tracked .env.
-
-## Finalization Verification
-Before integration: `pytest -q` returned 668 passed, 0 failed/skipped, 11.13 seconds,
-exit 0. Only CURRENT_STATE.md changes during finalization; implementation remains approved.
-Full tests, Ruff, pip, both schema checks, adapter contracts, normalization and prompt
-subsets are required on integrated master before the final report.
+Windows / Python 3.13.0, project-local .venv.
+- Full pytest: 775 passed, 0 failed/skipped, 23.63 seconds, exit 0.
+- Evidence subset: 107 passed, 11.60 seconds, exit 0.
+- Adapter contracts: 7 passed, 0.33 seconds, exit 0.
+- Normalization subset: 71 passed, 0.69 seconds, exit 0.
+- Prompt Engine subset: 79 passed, 2.94 seconds, exit 0.
+- CLI help, Ruff lint, Ruff format (64 files), pip check: exit 0.
+- Four canonical and two project/state schema checks: exit 0, unchanged.
+- Protected source/schema/dependency/instruction diff against Phase 05: unchanged.
+- Git diff whitespace checks pass. No type checker configured.
+- Initial 81 missing-module tests red before implementation; then green.
+- Required manifest items, configured Git filter execution, uppercase restricted files,
+  index/baseline submodules independently reproduced red then corrected and verified green.
+- Atomic write/manifest failure, overwrite refusal, read-only source/index bytes,
+  real Windows junctions/symlinks and hash correctness covered by fixtures.
+- Python 3.11/non-Windows and wheel installation not verified this phase.
 
 ## Remaining Work
-None for Phase 05. Phase 06 is NOT_STARTED; await a separate implementation request.
+External review only. Do not promote checkpoint or start any later phase.
 
 ## Known Issues
-No known defects. Rendering is not execution authority, dependency readiness or a gate
-decision. Caller supplies previous-task/attempt provenance; correlation is checked but
-not authenticated. Text fences preserve structure, not semantic LLM injection safety.
-Canonical mutable collections must still be revalidated at external/provider boundaries.
-Raw diagnostics remain external and unresolved approval is not terminal AgentResult.
-Mock process-local storage and Phase 02 single-writer limits remain accepted.
-No configured live controller state exists; persisted state under tests is a fixture.
+- Evidence is an observation/declared-data snapshot, not authenticated execution or PASS.
+- Commands are agent declarations; transcript association is not per-command authentication.
+- COMPLETE/PARTIAL is availability only; absent logs/raw refs remain PARTIAL.
+- Submodules in current index or baseline explicitly lack Git evidence in this phase.
+- Pytest errors/xfail/xpass and opaque/remote raw refs are unsupported and explicit.
+- Size cap is per artifact; Git cap is postcapture, not streaming memory/total-run budget.
+- Trusted quiescent filesystem assumed; no adversarial races/hard-link provenance guarantee.
+- Sensitive caller data can appear in snapshots/diffs/logs; no general content redaction.
+- Phase 02 single-writer/power-loss limitations remain; failed owned directories preserved.
+- Mock persistence and real provider approval-blocking semantics remain deferred.
+- No configured live controller state exists; test JSON state is fixture material.
 
 ## Last Reviewer Result
-PASS
-External reviewer approves Phase 05: provider-neutral phase/repair generation,
-required sections/report contracts, mandatory stops, canonical structured ReviewResult
-input, preservation of known-good work, deterministic repeated/subprocess/hash-seed
-rendering and lossless optional/multiline/unusual text. No agent execution, provider API,
-Controller loop or Phase 06 work. Canonical models and all existing schemas unchanged;
-668/668 tests pass. Explicit previous-task/attempt provenance is accepted and preferred.
-Generated prompts are not execution-security or semantic prompt-injection boundaries.
+PENDING for Phase 06. Phase 05 external result remains PASS.
+Internal read-only review confirmed configured Git filter execution, Windows casing
+and hidden/unsafe submodule inspection risks. Regression tests and fixes completed.
+Internal review is not authority to mark the phase PASS.
 
 ## Required Fixes
-None. External Phase 05 review returned PASS.
+None known after verification; external reviewer may return REVISE/BLOCKED.
+
+## Phase-Numbering Discrepancy
+MASTER_PLAN roadmap: 07 Version & Checkpoint Manager, 08 Recovery Manager,
+09 Reviewer + Phase Gate, 10 Controller Orchestration Loop, 11 Approval Router,
+12 Codex Adapter, 13 Independent LLM Reviewer.
+AGENTS section 29: 07 Reviewer + Phase Gate, 08 Controller Loop, 09 Approval Router,
+10 Codex Adapter, 11 Independent LLM Reviewer; no Version/Recovery in first sequence.
+SKILL.md has no numbered phase roadmap; it defines layer/workflow patterns.
+Documents have not been renumbered. Resolve in a dedicated authorized alignment step
+before affected Phase 07 authorization. Phase 06 numbering is consistent.
 
 ## Recovery Notes
-- Inspect instructions/state/Git before resuming; preserve unknown human edits.
-- Stable master / aipc-phase-05-pass identify the approved Phase 05 PASS-state checkpoint.
-- Project-local environment: `pip install -e '.[dev]'` if setup is needed.
-- Prompt output is text only; future runtime must authorize execution separately.
-- Supply explicit previous_task_id and previous_attempt for REVISE repair prompts.
-- Preserve raw normalization boundary and revalidate canonical objects downstream.
-- Phase 06 is authorized next but NOT_STARTED. Stop this finalization session.
+- Read instructions/state/Git and preserve unknown human edits before resuming.
+- Stable master remains aipc-phase-05-pass; resume only this attempt branch.
+- Read docs/EVIDENCE_COLLECTOR.md and docs/PHASE_06_EVIDENCE.md.
+- Existing evidence directories must never be silently overwritten or auto-cleaned.
+- Failed writes can leave unfinalized attempts; inspect, preserve and authorize a new attempt.
+- Supply explicit run ID/checkpoint, authorized roots and relative file references.
+- Revalidate canonical objects at downstream boundaries; raw formats remain outside core.
+- Execution/tool authority and previous task/attempt provenance remain explicit.
+- Do not infer authorization from prompt text, hashes, worker summary or bundle completeness.
 
 ## Future Considerations
-Mock persistence and real provider approval blocking remain deferred. Stronger
-locking/power-loss durability belongs to later hardening unless required earlier.
-The AGENTS.md / MASTER_PLAN.md numbering discrepancy remains unresolved and must
-be corrected before affected later phases are authorized (after Phase 06).
-Future provider normalizers belong at provider boundaries; future consumers must
-validate canonical objects, including mutable collections, before downstream use.
-Raw diagnostics remain externally referenced. Unresolved approval is not a terminal
-AgentResult. Provider/run correlation and reference retention responsibilities remain
-explicit until later runtime/evidence phases. No later phase is implemented here.
-Generated prompt text is not itself an execution-security boundary; later orchestration
-must preserve explicit execution/tool authority and canonical boundary revalidation.
-Previous-task and attempt provenance must remain explicit. Resolve the MASTER_PLAN /
-AGENTS phase-number discrepancy before authorizing affected phases after Phase 06.
+Safe submodule observation, streaming/aggregate limits, retention/redaction, stronger
+locking/durability and hostile filesystem protection belong to later authorized scope.
+Provider raw diagnostic retention and command/run correlation remain caller responsibilities.
+Do not implement the Reviewer, Phase Gate, Controller, or future adapters early.
 
 ## Next Action
-Stop after Phase 05 finalization. Await a separate request to implement Phase 06 — Evidence Collector.
+Submit Phase 06 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
 
 ## Files to Read on Resume
 - AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md
-- docs/PROMPT_ENGINE.md and docs/PHASE_05_EVIDENCE.md
-- src/aipc/prompts and prompt unit/contract tests
-- tests/fixtures/prompts/inputs.json, phase.md and repair.md
+- docs/EVIDENCE_COLLECTOR.md, docs/PHASE_06_EVIDENCE.md
+- src/aipc/evidence, src/aipc/storage/json_store.py
+- tests/unit/test_evidence.py, tests/integration/test_evidence_collection.py
+- tests/contract/test_evidence_contracts.py
 
 ## Updated
-2026-09-27T13:59:50+07:00
+2026-09-27T14:32:40+07:00

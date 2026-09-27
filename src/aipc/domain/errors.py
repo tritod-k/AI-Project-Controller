@@ -63,3 +63,27 @@ class CanonicalValidationError(NormalizationError):
 
 class PromptError(Exception):
     """Prompt inputs are invalid or describe conflicting task context."""
+
+
+class EvidenceError(Exception):
+    """An evidence bundle cannot be collected or finalized."""
+
+
+class EvidencePathError(EvidenceError):
+    """An evidence path is unsafe or outside the authorized roots."""
+
+
+class EvidenceAlreadyExistsError(EvidenceError):
+    """An attempt directory already exists and must be preserved."""
+
+
+class EvidenceValidationError(EvidenceError):
+    """Evidence inputs or manifest violate their typed contracts."""
+
+
+class GitEvidenceError(EvidenceError):
+    """A fixed read-only Git observation failed."""
+
+
+class TestParseError(EvidenceError):
+    """A test log has no supported unambiguous summary."""

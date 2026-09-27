@@ -121,3 +121,11 @@ project/state/review contracts. Caller-supplied context adds scope, files, check
 checkpoint/attempt information without schema changes. Both paths preserve the
 completion report and mandatory stop condition. No agent or command is executed.
 See [prompt contracts and examples](docs/PROMPT_ENGINE.md).
+
+## Phase 06 Evidence Collector
+
+The observational EvidenceCollector consumes revalidated canonical task/result records
+and an authorized workspace. It stores read-only Git evidence, declared command/test
+data, parsed logs and safely copied artifacts in a hashed attempt manifest. Missing
+evidence stays visible; existing attempts are never overwritten. It executes no worker
+commands and makes no phase verdict. See [evidence contracts](docs/EVIDENCE_COLLECTOR.md).
