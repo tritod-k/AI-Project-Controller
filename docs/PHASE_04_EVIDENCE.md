@@ -1,4 +1,4 @@
-# Phase 04 Evidence โ€” Normalization Layer
+# Phase 04 Evidence — Normalization Layer
 
 ## Review handoff
 

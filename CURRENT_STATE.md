@@ -7,7 +7,7 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 04 โ€” Normalization Layer
+Phase 04 — Normalization Layer
 
 ## Status
 AWAITING_REVIEW
@@ -40,13 +40,13 @@ its own resulting HEAD is reported separately after commit.
 See docs/PHASE_04_EVIDENCE.md for acceptance and command evidence.
 
 ## Completed Phases
-- Phase 00 โ€” Repository Bootstrap: PASS (external reviewer approved).
-- Phase 01 โ€” Canonical Domain Models: PASS (external reviewer approved).
-- Phase 02 โ€” Project Definition + State Machine: PASS (external reviewer approved).
-- Phase 03 โ€” Agent Adapter Interface + Mock Agent: PASS (external reviewer approved).
+- Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
+- Phase 01 — Canonical Domain Models: PASS (external reviewer approved).
+- Phase 02 — Project Definition + State Machine: PASS (external reviewer approved).
+- Phase 03 — Agent Adapter Interface + Mock Agent: PASS (external reviewer approved).
 
 ## Authorized Current Phase
-Phase 04 โ€” Normalization Layer, implementation attempt only.
+Phase 04 — Normalization Layer, implementation attempt only.
 
 ## Next Authorized Phase
 None. Await external Phase 04 review and a separate human/controller authorization.
