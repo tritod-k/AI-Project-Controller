@@ -33,9 +33,11 @@ Normal checkout: `H:/000ProjectCode/AI_Project_Controller`.
 Stable master remains Phase 03. No Phase 04 PASS tag or Phase 05 branch.
 
 ## Last Commit
-Verified pre-attempt HEAD: `f6e58dfafde178a0044ce9e859bff2a9e7055288`.
-This implementation/state is prepared for `AIPC Phase 04 attempt 01 - normalization layer`.
-The exact resulting attempt hash will be recorded in the subsequent documentation handoff.
+Implementation attempt: `bc10f9aae15656793c3df2663f5c169c9bfaaf8b`.
+`AIPC Phase 04 attempt 01 - normalization layer`.
+This documentation handoff records the exact approved-for-review implementation hash;
+its own resulting HEAD is reported separately after commit.
+See docs/PHASE_04_EVIDENCE.md for acceptance and command evidence.
 
 ## Completed Phases
 - Phase 00 โ€” Repository Bootstrap: PASS (external reviewer approved).
@@ -72,14 +74,16 @@ Pydantic 2.13.5 / PyYAML 6.0.3. No global installs or new dependency declaration
 - `python -m aipc --help`: original help-only CLI, exit 0.
 - `pytest -q`: 589 passed, 0 failed, 0 skipped, 8.81 seconds, exit 0.
   Existing 518 plus 71 new cases: 55 unit, 8 integration, 8 normalization contracts.
-- Explicit normalization subset: 71 passed; final output recorded in Phase 04 evidence.
-- Adapter contract subset: 7 passed; final output recorded in Phase 04 evidence.
+- Explicit normalization subset: 71 passed, 0.60 seconds, exit 0.
+- Adapter contract subset: 7 passed, 0.42 seconds, exit 0.
 - `python -m ruff check .`: all checks passed, exit 0.
 - `python -m ruff format --check .`: 48 files already formatted, exit 0.
 - `python -m pip check`: no broken requirements, exit 0.
 - `python -m aipc.domain.schemas --check`: four consistent canonical schemas, exit 0.
 - `python -m aipc.project.schemas --check`: two consistent project/state schemas, exit 0.
 - Full protected-source/schema/dependency diff against Phase 03: unchanged, exit 0.
+- Git diff checks passed; 97 tracked/staged files scanned for secret patterns: no matches.
+  Raw mock status/detail keys occur in production only under adapters/mock.
 - Read-only reviewer found one contradictory-known-field gap; eight regressions failed
   before the fix and passed after it. Independent final subset: 71 passed, 0.62 seconds;
   no remaining actionable findings. External Phase Gate review is still pending.
