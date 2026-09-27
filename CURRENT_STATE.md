@@ -10,30 +10,38 @@ AI Project Controller
 Phase 06 — Evidence Collector
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING
+PASS
 
 ## Last Stable Checkpoint
-`aipc-phase-05-pass` on `master`:
+`aipc-phase-06-pass` on `master` identifies the finalized Phase 06 PASS-state commit,
+including this approved summary. Its exact resulting target is reported after commit.
+Previous stable Phase 05: `aipc-phase-05-pass`,
 `f5d61ea5e546bc0b6cd0c23aa726fb61ad13b6e6`.
-Exact starting HEAD/tag verified, clean tree; prior PASS tags preserved.
+Supplied implementation/handoff/stable references verified exactly, clean starting tree.
+Prior PASS tags and histories are preserved.
 
 ## Current Branch / Worktree
-`codex/phase-06-attempt-01` in `H:/000ProjectCode/AI_Project_Controller`.
-Created from approved Phase 05 checkpoint. No Phase 06 PASS tag or master integration.
+Stable development branch / finalized checkout: `master`.
+Approved attempt branch: `codex/phase-06-attempt-01` (retained).
+Normal checkout: `H:/000ProjectCode/AI_Project_Controller`.
+Integration is a history-preserving fast-forward. No Phase 07 branch or implementation.
 
 ## Last Commit
+Actual approved documentation/handoff HEAD before finalization:
+`3bbf3df70cd115fa7fd1d1d2d5a4b7dc7ce5cd9b`.
+`AIPC Phase 06 attempt 01 - record review handoff`.
 Phase 06 implementation attempt:
 `9912eb5d14826e9cad33368711caa6a79e49e496`.
 `AIPC Phase 06 attempt 01 - evidence collector`.
-Documentation/handoff commit records this actual implementation hash; its resulting
-HEAD is reported in the Phase Completion Report. Stable base remains
-`f5d61ea5e546bc0b6cd0c23aa726fb61ad13b6e6`.
+This summary is included in `AIPC Phase 06 PASS - evidence collector`;
+the exact resulting hash is reported after commit and identified by `aipc-phase-06-pass`.
+Historical attempt evidence remains in docs/PHASE_06_EVIDENCE.md.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external reviewer approved).
@@ -42,15 +50,21 @@ HEAD is reported in the Phase Completion Report. Stable base remains
 - Phase 03 — Agent Adapter Interface + Mock Agent: PASS (external reviewer approved).
 - Phase 04 — Normalization Layer: PASS (external reviewer approved).
 - Phase 05 — Prompt Engine: PASS (external reviewer approved).
+- Phase 06 — Evidence Collector: PASS (external reviewer approved).
 
 ## Authorized Current Phase
-Phase 06 only. Implementation complete; external review pending.
+Phase 06 approved and finalized. This session performs finalization only.
 
 ## Next Authorized Phase
-None. Await Phase 06 external decision and separately authorized documentation alignment.
+None. Phase 07 implementation is not authorized pending dedicated documentation alignment.
+
+## Phase 07
+Phase 07 — Version & Checkpoint Manager
 
 ## Phase 07 Status
-NOT_STARTED
+BLOCKED_PENDING_DOC_ALIGNMENT
+Administrative/documentation gate, not an implementation failure.
+Implementation remains NOT_STARTED; no Phase 07 branch is created.
 
 ## Current Work
 - EvidenceCollector revalidates canonical TaskRequest/AgentResult and explicit context.
@@ -87,11 +101,20 @@ Windows / Python 3.13.0, project-local .venv.
 - Python 3.11/non-Windows and wheel installation not verified this phase.
 
 ## Remaining Work
-External review only. Do not promote checkpoint or start any later phase.
+None for Phase 06. Record documentation alignment as the next action and stop.
+Do not edit roadmap numbering or authorize/start Phase 07 in this finalization session.
+
+## Finalization Verification
+Fresh pre-integration full suite: 775 passed, 0 failed/skipped, 31.45 seconds, exit 0.
+Only CURRENT_STATE.md changes in this finalization; approved source/tests remain unchanged.
+Full tests, Ruff, pip, both schema checks and all requested subsets are required on
+integrated master before the final report. Exact PASS-state/tag target is reported there.
 
 ## Known Issues
 - Evidence is an observation/declared-data snapshot, not authenticated execution or PASS.
 - Commands are agent declarations; transcript association is not per-command authentication.
+- Evidence hashes provide integrity, not origin authentication; command transcripts are not
+  execution receipts. Raw/reference and canonical boundaries remain explicit.
 - COMPLETE/PARTIAL is availability only; absent logs/raw refs remain PARTIAL.
 - Submodules in current index or baseline explicitly lack Git evidence in this phase.
 - Pytest errors/xfail/xpass and opaque/remote raw refs are unsupported and explicit.
@@ -103,13 +126,19 @@ External review only. Do not promote checkpoint or start any later phase.
 - No configured live controller state exists; test JSON state is fixture material.
 
 ## Last Reviewer Result
-PENDING for Phase 06. Phase 05 external result remains PASS.
-Internal read-only review confirmed configured Git filter execution, Windows casing
-and hidden/unsafe submodule inspection risks. Regression tests and fixes completed.
-Internal review is not authority to mark the phase PASS.
+PASS
+External reviewer approves Phase 06: canonical AgentResult consumption and input
+revalidation; read-only Git evidence; distinct structured/parsed test data; worker prose
+cannot override evidence; explicit missing evidence; authorized relative artifact paths;
+SHA-256, duplicate/path/link/junction/overwrite safeguards; atomic manifest publication;
+availability-only manifests; existing Phase 00–05 behavior and all six schemas unchanged;
+775/775 tests pass. Submodules, stronger concurrency/durability, origin authentication,
+streaming limits and retention/redaction remain accepted later-phase concerns.
+The roadmap mismatch requires a dedicated alignment step before Phase 07 begins.
 
 ## Required Fixes
-None known after verification; external reviewer may return REVISE/BLOCKED.
+None for Phase 06. External review returned PASS.
+Phase 07 requires administrative documentation alignment before implementation authorization.
 
 ## Phase-Numbering Discrepancy
 MASTER_PLAN roadmap: 07 Version & Checkpoint Manager, 08 Recovery Manager,
@@ -123,7 +152,8 @@ before affected Phase 07 authorization. Phase 06 numbering is consistent.
 
 ## Recovery Notes
 - Read instructions/state/Git and preserve unknown human edits before resuming.
-- Stable master remains aipc-phase-05-pass; resume only this attempt branch.
+- Stable master / aipc-phase-06-pass identify the approved Phase 06 PASS-state checkpoint.
+  Attempt history remains available on codex/phase-06-attempt-01.
 - Read docs/EVIDENCE_COLLECTOR.md and docs/PHASE_06_EVIDENCE.md.
 - Existing evidence directories must never be silently overwritten or auto-cleaned.
 - Failed writes can leave unfinalized attempts; inspect, preserve and authorize a new attempt.
@@ -135,11 +165,12 @@ before affected Phase 07 authorization. Phase 06 numbering is consistent.
 ## Future Considerations
 Safe submodule observation, streaming/aggregate limits, retention/redaction, stronger
 locking/durability and hostile filesystem protection belong to later authorized scope.
+Stronger filesystem concurrency/durability belongs to later hardening unless required earlier.
 Provider raw diagnostic retention and command/run correlation remain caller responsibilities.
 Do not implement the Reviewer, Phase Gate, Controller, or future adapters early.
 
 ## Next Action
-Submit Phase 06 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
+Documentation Alignment — synchronize roadmap numbering in AGENTS.md with MASTER_PLAN.md before Phase 07 authorization.
 
 ## Files to Read on Resume
 - AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md
@@ -149,4 +180,4 @@ Submit Phase 06 results to the external ChatGPT reviewer and wait for PASS / REV
 - tests/contract/test_evidence_contracts.py
 
 ## Updated
-2026-09-27T14:32:40+07:00
+2026-09-27T14:43:05+07:00
