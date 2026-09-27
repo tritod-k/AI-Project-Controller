@@ -5,7 +5,9 @@ Base master: `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 Last stable implementation tag: `aipc-phase-06-pass`,
 `8a553c3aba55222a1e0dfcfd47fc0ad0c508f074` (unchanged).
 Attempt branch: `codex/phase-07-attempt-01`.
-Implementation commit will be recorded after the verified attempt commit is created.
+Implementation commit: `9cd4e1e0f69d042f19131bab2983388d5ec4495b`.
+Message: `AIPC Phase 07 attempt 01 - version and checkpoint manager`.
+This later handoff changes only evidence/state documentation; implementation remains identical.
 
 ## Architecture and acceptance evidence
 
