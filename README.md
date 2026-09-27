@@ -129,3 +129,12 @@ and an authorized workspace. It stores read-only Git evidence, declared command/
 data, parsed logs and safely copied artifacts in a hashed attempt manifest. Missing
 evidence stays visible; existing attempts are never overwritten. It executes no worker
 commands and makes no phase verdict. See [evidence contracts](docs/EVIDENCE_COLLECTOR.md).
+
+## Phase 07 Version & Checkpoint Manager
+
+The provider-neutral VersionManager stores immutable pre-phase, attempt and explicitly
+approved stable checkpoints. It validates Git/metadata identity and ancestry, refuses
+unknown edits, and creates isolated attempt/restore worktrees without resetting the
+active checkout. Metadata survives reload using existing atomic JSON storage.
+See [version and checkpoint contracts](docs/VERSION_MANAGER.md). The CLI remains
+help-only; automatic recovery and later orchestration are deferred.

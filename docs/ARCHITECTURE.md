@@ -1,5 +1,15 @@
 # Current architecture
 
+Phase 07 adds `aipc.version`: strict private checkpoint/authorization/worktree records,
+VersionManager, centralized GitBackend and worktree operations. PRE_PHASE captures a
+clean base; ATTEMPT records caller-created committed work; STABLE requires explicit
+external PASS context bound to the exact attempt/commit. Immutable project-scoped refs
+and existing atomic JSON storage in the Git common directory provide restartable
+inspection, with mismatch detection rather than automatic repair. Unknown/hidden edits
+are refused; restore creates a new isolated worktree and clean removal retains branches.
+This subsystem has no provider, reviewer, gate or Recovery Manager policy. See
+[version contracts](VERSION_MANAGER.md) for API, path and persistence limits.
+
 Phase 00 implements an installable `src/aipc` package, a help-only CLI and an
 application logging skeleton. The runtime uses the Python standard library.
 
