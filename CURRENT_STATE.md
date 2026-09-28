@@ -10,27 +10,34 @@ AI Project Controller
 Phase 09 — Reviewer + Phase Gate
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING — external ChatGPT review has not decided Phase 09.
+PASS — external ChatGPT reviewer approved Phase 09; manual finalization is authorized.
 
 ## Last Stable Checkpoint
-`aipc-phase-08-pass` — `f95ee453d4dc13971276f5b971b9350b00c0555b`.
+`aipc-phase-09-pass` — the Phase 09 PASS-state commit containing this finalized summary.
+Resolve its exact target with Git; the finalization report records the full target hash.
+Previous `aipc-phase-08-pass` — `f95ee453d4dc13971276f5b971b9350b00c0555b`.
 Previous `aipc-phase-07-pass` — `5df11213c7f25884046fcc3a7bff62b78c01fcad`.
-Manual external-review PASS checkpoint for Phase 08 remains unchanged.
+All previous manual external-review PASS checkpoints remain unchanged.
 
 ## Current Branch / Worktree
-`codex/phase-09-attempt-01`, normal checkout `H:/000ProjectCode/AI_Project_Controller`.
-Created from `aipc-phase-08-pass`; `master` remains at the approved Phase 08 stable point.
+Stable branch: `master`, normal checkout `H:/000ProjectCode/AI_Project_Controller`.
+Approved history from `codex/phase-09-attempt-01` is integrated by fast-forward
+during this authorized finalization. The attempt branch is retained for traceability.
 
 ## Last Commit
 Phase 09 implementation attempt: `9ecd6bde8c1c249120fa499daabd7c960acd5a6f`.
 Message: `AIPC Phase 09 attempt 01 - reviewer and phase gate`.
-A documentation/handoff commit records this actual implementation hash; it changes only state and evidence documentation.
+Approved documentation/handoff commit: `85530da8099f175b122f6f9d958c4be16e0ae9cd`.
+The handoff changes only state and evidence documentation.
+PASS-state message: `AIPC Phase 09 PASS - reviewer and phase gate`.
+The PASS-state commit is identified by `aipc-phase-09-pass`; its actual hash is
+reported after creation, avoiding a self-referential commit hash in this file.
 
 ## Completed Phases
 
@@ -43,16 +50,23 @@ A documentation/handoff commit records this actual implementation hash; it chang
 - Phase 06 — Evidence Collector: PASS (external approval).
 - Phase 07 — Version & Checkpoint Manager: PASS (external approval).
 - Phase 08 — Recovery Manager: PASS (external approval).
+- Phase 09 — Reviewer + Phase Gate: PASS (external approval).
 
 ## Documentation Alignment
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a` integrated on master.
 MASTER_PLAN.md and AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 09 — Reviewer + Phase Gate, attempt 01. No Phase 10 authorization.
+Phase 09 finalization only in this session. Phase 10 implementation is not started.
 
 ## Phase 09 Status
-AWAITING_REVIEW. The coding worker has not marked its own phase PASS.
+PASS — authorized by the supplied external reviewer decision.
+
+## Next Authorized Phase
+Phase 10 — Controller Orchestration Loop
+
+## Phase 10 Status
+NOT_STARTED
 
 ## Current Work
 
@@ -68,22 +82,40 @@ AWAITING_REVIEW. The coding worker has not marked its own phase PASS.
 
 ## Tests
 Windows / Python 3.13.0, project-local .venv.
-Final full pytest: 1017 passed in 1450.48s (0:24:10), exit 0 (927 prior + 90 Phase 09).
+Approved implementation validation: full pytest 1017 passed in 1450.48s (0:24:10), exit 0 (927 prior + 90 Phase 09).
 Dedicated Phase 09 subset: 90 passed in 77.50s, exit 0.
 Explicit Recovery/Version/Evidence/Prompt/Normalization/Adapter subset: 455 passed in 1517.99s (0:25:17), exit 0.
 CLI help, Ruff lint/format, pip check, four canonical and two project/state schema drift checks: exit 0.
 Git diff --check: exit 0. Full attempt diff inspected before commit.
+Finalization reruns full pytest, the explicit legacy and Reviewer/Gate integration
+subsets, Ruff, pip and both schema checks on aligned master. Fresh command results
+and exit codes are reported in the Phase 09 Finalization Report.
 
 ## Last Reviewer Result
-Phase 09: PENDING external independent review. An internal read-only whole-branch review
-found stale reference rebinding, unsupported file-change PASS, citation/optional PASS
-and ERROR handling gaps. Regressions failed before fixes and pass now. This internal
-review does not grant Phase Gate PASS. Phase 08 external reviewer result remains PASS.
+PASS
+Phase 09 external ChatGPT reviewer approved implementation
+`9ecd6bde8c1c249120fa499daabd7c960acd5a6f` and handoff
+`85530da8099f175b122f6f9d958c4be16e0ae9cd`, accepting the documented limitations.
+The supplied manual external review, not the newly implemented Phase Gate, is
+the authority for this real repository's PASS-state commit and stable tag.
+
+## Preserved Reviewer Notes
+
+- Required FAIL or UNVERIFIED criteria cannot produce PASS.
+- Evidence conflicts must stay visible; never choose the favorable source silently.
+- Worker narrative is supplemental, not authoritative evidence.
+- Gate authorization must bind the exact reviewed phase, attempt, review and commit.
+- Version Manager owns checkpoint publication; logical PASS is not publication.
+- Recovery Manager owns recovery decisions and protection of unknown human edits.
+- Prompt Engine owns phase and repair prompt rendering.
+- Deterministic Reviewer is not a semantic LLM reviewer; Phase 13 owns the Independent LLM Reviewer.
+- Caller/reviewer authority and evidence origin are not cryptographically authenticated.
+- External/manual review remains authoritative for the real repository until later phases are explicitly approved.
 
 ## Required Fixes / Remaining Work
-No known Phase 09 implementation fixes remain after internal review and validation.
-Submit the committed attempt and evidence to the external ChatGPT reviewer. Do not
-self-approve, create a PASS tag, merge to master or begin Phase 10.
+No Phase 09 fixes requested by the external reviewer. Phase 09 is approved.
+Complete authorized manual checkpoint/integration verification and stop.
+Phase 10 remains NOT_STARTED; this session does not create its branch or run it.
 
 ## Warnings / Known Issues
 
@@ -97,19 +129,20 @@ self-approve, create a PASS tag, merge to master or begin Phase 10.
 - No type checker configured; Python 3.11/non-Windows execution not verified this session.
 
 ## Recovery Notes / Phase 10 and Phase 13 Boundaries
-The current stable implementation remains `aipc-phase-08-pass`. Preserve unknown human
+The current stable implementation is `aipc-phase-09-pass`. Preserve unknown human
 edits; never use destructive reset or blind stale-lock removal. Phase 09 only evaluates
 review facts and returns logical gate decisions. It does not dispatch agents, schedule
 retries, apply state changes or publish Git checkpoints. Phase 10 owns orchestration;
 Phase 13 owns real independent LLM review. Raw provider payloads remain outside core.
 
 ## Next Action
-Submit Phase 09 results to the external ChatGPT reviewer and wait for PASS / REVISE /
-BLOCKED decision. Stop; do not implement Phase 10 in this attempt.
+Phase 10 — Controller Orchestration Loop is the next authorized implementation
+phase, from finalized master. Stop after the Phase 09 Finalization Report; do not
+create a Phase 10 branch, start retries/advancement or invoke a real provider here.
 
 ## Files to Read on Resume
 AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/REVIEW_GATE.md,
 docs/PHASE_09_EVIDENCE.md, src/aipc/review and tests/review.
 
 ## Updated
-2026-09-28T06:08:43.7184668+07:00
+2026-09-28T15:54:42.1558608+07:00
