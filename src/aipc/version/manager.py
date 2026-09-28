@@ -306,10 +306,10 @@ class VersionManager(WorktreeOperations, ReconciliationOperations):
             commit = self._validated(Commit, commit)
             if workspace is not None:
                 work = self.inspect_worktree(f"phase-{phase_id}-attempt-{attempt:02d}")
+                self.attempt_source(pre_checkpoint, work.checkpoint_id, attempt)
                 if (
                     work.removed
                     or work.operation != "ATTEMPT"
-                    or work.checkpoint_id != pre_checkpoint
                     or Path(work.path) != Path(workspace).absolute()
                 ):
                     raise WorktreeSafetyError("checkpoint workspace must match managed attempt")

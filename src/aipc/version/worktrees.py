@@ -59,12 +59,40 @@ class WorktreeOperations:
         self.git.run(["worktree", "add", "-b", branch, str(target), checkpoint.git_commit])
         return self.inspect_worktree(identifier)
 
-    def create_attempt_worktree(self, pre_checkpoint: str, attempt: int, relative_path: str):
+    def attempt_source(self, pre_checkpoint: str, source_checkpoint: str, attempt: int):
+        """Validate direct pre-phase or immediately preceding repair ancestry."""
+        pre = self.inspect_checkpoint(pre_checkpoint)
+        source = self.inspect_checkpoint(source_checkpoint)
+        if pre.checkpoint_type != CheckpointType.PRE_PHASE:
+            raise WorktreeSafetyError("attempt source requires pre-phase checkpoint")
+        if source.checkpoint_id != pre.checkpoint_id and (
+            source.checkpoint_type != CheckpointType.ATTEMPT
+            or source.phase_id != pre.phase_id
+            or source.parent_checkpoint != pre.checkpoint_id
+            or source.attempt != attempt - 1
+        ):
+            raise WorktreeSafetyError(
+                "repair source must be immediately previous same-phase attempt"
+            )
+        return source
+
+    def create_attempt_worktree(
+        self,
+        pre_checkpoint: str,
+        attempt: int,
+        relative_path: str,
+        *,
+        source_attempt: str | None = None,
+    ):
         with self._mutation():
             checkpoint = self.inspect_checkpoint(pre_checkpoint)
             if checkpoint.checkpoint_type != CheckpointType.PRE_PHASE:
                 raise WorktreeSafetyError("attempt worktree requires pre-phase checkpoint")
             attempt = self._validated(Attempt, attempt)
+            if source_attempt is not None:
+                checkpoint = self.attempt_source(pre_checkpoint, source_attempt, attempt)
+                if checkpoint.checkpoint_type != CheckpointType.ATTEMPT:
+                    raise WorktreeSafetyError("explicit repair source must be an attempt")
             identifier = f"phase-{checkpoint.phase_id}-attempt-{attempt:02d}"
             branch = (
                 f"aipc-work/{self.project_id}/phase-{checkpoint.phase_id}/attempt-{attempt:02d}"

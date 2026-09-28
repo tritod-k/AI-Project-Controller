@@ -1,12 +1,19 @@
 # Current architecture
 
+Phase 10 adds `aipc.controller`: a library-level, injected single-phase lifecycle
+composes prompt, adapter/normalization, evidence, review/gate, version/recovery and
+validated project state. Versioned journals record intents and audit events;
+stable publication precedes completion. Bounded repair preserves prior attempts.
+Waiting/ambiguous conditions stop without provider or approval policy. See
+[Controller contracts](CONTROLLER.md).
+
 Phase 09 adds provider-neutral review under `aipc.review`. Revalidated canonical
 task/result and Phase 06 evidence feed explicit objective criterion evaluators and
 canonical ReviewResult; a separate read-only PhaseGate checks review, state and exact
 Phase 07 attempt binding before returning logical actions and existing stable
 authorization. It never performs VersionManager or StateManager mutations. See
 [review and gate contracts](REVIEW_GATE.md). A semantic LLM reviewer (Phase 13)
-and the Controller orchestration loop (Phase 10) remain absent.
+remains absent; Phase 10 composes these existing logical decisions above.
 
 Phase 07 adds `aipc.version`: strict private checkpoint/authorization/worktree records,
 VersionManager, centralized GitBackend and worktree operations. PRE_PHASE captures a

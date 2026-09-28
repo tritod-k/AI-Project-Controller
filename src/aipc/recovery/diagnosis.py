@@ -166,6 +166,14 @@ class RecoveryInspection:
             raw = self.journal.read(
                 self.versions._worktree_metadata(observation.worktree_id), ManagedWorktree
             )
+            source = checkpoint(raw.checkpoint_id)
+            if source.checkpoint_id != pre.checkpoint_id and (
+                source.checkpoint_type != CheckpointType.ATTEMPT
+                or source.phase_id != pre.phase_id
+                or source.parent_checkpoint != pre.checkpoint_id
+                or source.attempt != state.current_attempt - 1
+            ):
+                raise RecoveryError("repair source lineage differs")
             if (
                 raw.path != observation.workspace
                 or raw.branch != observation.branch
@@ -173,8 +181,7 @@ class RecoveryInspection:
                 or raw.phase_id != state.current_phase
                 or raw.attempt != state.current_attempt
                 or raw.operation != "ATTEMPT"
-                or raw.checkpoint_id != pre.checkpoint_id
-                or raw.git_commit != pre.git_commit
+                or raw.git_commit != source.git_commit
                 or raw.project_id != state.project_id
                 or raw.worktree_id != observation.worktree_id
             ):

@@ -145,3 +145,13 @@ unexpected identity or an unregistered path prevent removal.
 Trusted quiescent local filesystems/Git configuration are assumed. No hostile-race
 sandbox, directory fsync/power-loss transaction, signed approvals, remote backup,
 automatic rollback/resume or lifecycle repair is promised by Phase 07.
+
+## Phase 10 repair composition
+
+`create_attempt_worktree(pre_checkpoint, attempt, relative_path, source_attempt=...)`
+optionally starts a repair from the immediately previous same-phase ATTEMPT whose
+parent is that PRE_PHASE. Stable/different-phase/non-immediate sources fail closed.
+The new managed worktree records this starting attempt and exact commit; its new
+attempt checkpoint still has the original PRE_PHASE parent. `attempt_source`
+shares lineage validation with Recovery. Existing calls without this keyword keep
+the original PRE_PHASE behavior. Earlier refs/worktrees/evidence remain intact.

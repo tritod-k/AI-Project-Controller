@@ -167,3 +167,9 @@ There is no daemon, supervisor, provider adapter, fallback router, retry schedul
 Reviewer, Phase Gate, acceptance scoring, automatic PASS/REVISE or Controller loop.
 CLI runtime wiring and real reconnect/dispatch belong to later authorized runtime work.
 Phase 09 remains `canonical AgentResult + Evidence -> Reviewer + Phase Gate`.
+
+Phase 10 Controller composition can register a repair worktree starting from the
+immediately previous ATTEMPT under the same PRE_PHASE. Registration and restart
+inspection validate source type, phase, parent, attempt number and exact starting
+commit. Recovery policy and ownership/edit protections remain unchanged. Controller
+calls the existing plan/execute APIs; Recovery does not dispatch or decide PASS.

@@ -55,6 +55,7 @@ class AttemptObservations:
         primary = self.versions.git.clean()
         pre = self.versions.inspect_checkpoint(pre_checkpoint)
         work = self.versions.inspect_worktree(worktree_id)
+        self.versions.attempt_source(pre_checkpoint, work.checkpoint_id, state.current_attempt)
         if (
             pre.checkpoint_type != CheckpointType.PRE_PHASE
             or pre.phase_id != state.current_phase
@@ -62,7 +63,6 @@ class AttemptObservations:
             or work.removed
             or work.attempt != state.current_attempt
             or work.phase_id != state.current_phase
-            or work.checkpoint_id != pre_checkpoint
         ):
             raise RecoveryError("attempt/pre-phase/worktree identity differs")
         current = self.versions.git.clean(Path(work.path))

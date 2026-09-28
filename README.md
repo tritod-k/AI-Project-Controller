@@ -156,3 +156,14 @@ binds structured reviews to the exact Phase 07 attempt and returns logical PASS,
 repair or resolution actions. It does not execute those actions. Arbitrary semantic
 criteria remain UNVERIFIED; no LLM reviewer, provider call or Controller loop is
 included. See [review and gate contracts](docs/REVIEW_GATE.md).
+
+## Phase 10 Controller Orchestration Loop
+
+The library-level Controller composes the existing components for one explicitly
+authorized phase, using isolated attempt worktrees, canonical results, actual
+evidence, bound reviews and Gate authorizations. Stable publication precedes state
+completion; bounded repair retains previous work. Typed outcomes distinguish
+approval/provider/human waits and infrastructure failures. Durable stage journals
+support guarded restart without guessing external side effects or auto-running
+the next phase. See [Controller contracts](docs/CONTROLLER.md). The CLI remains
+help-only; real providers, approval routing and LLM review remain deferred.
