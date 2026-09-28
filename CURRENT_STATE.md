@@ -10,30 +10,32 @@ AI Project Controller
 Phase 10 — Controller Orchestration Loop
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING — Phase 10 requires external ChatGPT review.
+PASS — external ChatGPT reviewer approval; manual bootstrap authority.
 
 ## Last Stable Checkpoint
-`aipc-phase-09-pass` — `8cca14af4024cd5f070237956101ebf621bef73c`.
+`aipc-phase-10-pass` — manual stable tag on the finalized Phase 10 PASS-state commit.
+Previous `aipc-phase-09-pass` — `8cca14af4024cd5f070237956101ebf621bef73c`.
 Previous `aipc-phase-08-pass` — `f95ee453d4dc13971276f5b971b9350b00c0555b`.
 All previous manual external-review PASS checkpoints remain unchanged.
 
 ## Current Branch / Worktree
-`codex/phase-10-attempt-01`, normal checkout `H:/000ProjectCode/AI_Project_Controller`.
-Started from the exact Phase 09 stable checkpoint. Master remains unchanged.
+Stable development line: `master`, normal checkout `H:/000ProjectCode/AI_Project_Controller`.
+Approved history is integrated by fast-forward; `codex/phase-10-attempt-01` is preserved.
 Runtime Controller/Version/Recovery worktrees and state are disposable test fixtures only.
 
 ## Last Commit
 Starting HEAD: `8cca14af4024cd5f070237956101ebf621bef73c`.
 Phase 10 implementation attempt: `8c31330c8de9c56824c25eded1b265b6d5bca259`.
 Message: `AIPC Phase 10 attempt 01 - controller orchestration loop`.
-The documentation handoff follows that exact verified commit; its resulting HEAD
-is reported in the final Phase Completion Report. No implementation changed in the handoff.
+Approved documentation/handoff commit: `b7e128b3fa4ac332b4183eb6ab00b7c04565a860`.
+The PASS-state commit updates this file only and is referenced by `aipc-phase-10-pass`.
+Its actual hash is reported in the Phase 10 Finalization Report. No implementation changed.
 
 ## Completed Phases
 
@@ -47,19 +49,21 @@ is reported in the final Phase Completion Report. No implementation changed in t
 - Phase 07 — Version & Checkpoint Manager: PASS (external approval).
 - Phase 08 — Recovery Manager: PASS (external approval).
 - Phase 09 — Reviewer + Phase Gate: PASS (external approval).
+- Phase 10 — Controller Orchestration Loop: PASS (external approval).
 
 ## Documentation Alignment
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a` integrated on master.
 MASTER_PLAN.md and AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 10 implementation only. No Phase 11/12/13 implementation or real provider execution.
+Phase 10 finalization only in this session. External/manual PASS is authoritative.
+No Controller/Reviewer/Phase Gate runtime is used to self-approve the real repository.
 
 ## Next Authorized Phase
-None beyond Phase 10; external review must authorize further implementation.
+Phase 11 — Approval Router
 
 ## Phase 11 Status
-NOT_STARTED — not authorized.
+NOT_STARTED
 
 ## Current Work
 
@@ -89,9 +93,9 @@ Ruff check/format (113 files), pip check, four canonical and two project/state
 schema checks passed. Final documentation/diff checks are clean.
 
 ## Last Reviewer Result
-PENDING for Phase 10.
-Previous Phase 09 external review: PASS.
-Internal development review is not external Phase Gate authorization.
+PASS — external ChatGPT review approves Phase 10 implementation and handoff commits above.
+The approved review accepts the documented limitations. Internal development review
+does not replace external/manual Phase Gate authorization during bootstrap.
 
 ## Preserved Reviewer Notes
 
@@ -105,13 +109,26 @@ Internal development review is not external Phase Gate authorization.
 - Command logs/claims are not execution receipts.
 - Unknown human edits and stale/unknown locks must be preserved.
 - Manual external review remains authoritative for the real repository.
+- Controller orchestrates only actions authorized by typed subsystem contracts.
+- PASS does not automatically execute the next phase; retry remains bounded.
+- WAITING_APPROVAL remains policy-neutral until Phase 11 Approval Router.
+- Provider outage/quota remains operational waiting rather than code failure.
+- Stable publication requires exact Phase Gate authorization.
+- Version Manager remains checkpoint authority; Recovery Manager remains recovery authority.
+- Real provider execution remains Phase 12; semantic Independent LLM Reviewer remains Phase 13.
+- Exactly-once real-provider execution is not claimed; cross-resource persistence is non-transactional.
+- Single-writer/quiescent external Git/filesystem assumptions remain; ambiguous effects may need humans.
+- Authority and evidence origin are not cryptographically authenticated.
+- Ignored internal planning notes retained after policy-blocked removal are accepted and remain preserved.
 
 ## Required Fixes / Remaining Work
 Fresh whole-branch review found two Important issues; cancellation acknowledgement
 and post-intent authority guards are fixed with observed RED/GREEN regressions.
 Both findings are fixed and the fresh full suite is green. No known required
 implementation fixes remain. Actual implementation hash is recorded above.
-Submit Phase 10 for external review. Do not start Phase 11.
+External review returned PASS. Phase 10 is finalized through the manual PASS-state
+commit/tag and history-preserving integration. No required implementation fixes remain.
+Phase 11 is authorized for later work but is NOT_STARTED; stop after this finalization.
 
 ## Warnings / Known Issues
 
@@ -132,7 +149,8 @@ effects. Approval Router is Phase 11; real Codex provider is Phase 12; Independe
 Reviewer is Phase 13. These components remain NOT_STARTED.
 
 ## Next Action
-Submit Phase 10 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
+Stop after Phase 10 finalization. Phase 11 — Approval Router is authorized but NOT_STARTED;
+implementation belongs to a separate requested phase session.
 
 ## Files to Read on Resume
 AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CONTROLLER.md,
@@ -140,4 +158,4 @@ docs/plans/phase-10-controller.md, docs/PHASE_10_EVIDENCE.md, src/aipc/controlle
 and tests/controller. Execution rulings and review evidence are preserved in the evidence report.
 
 ## Updated
-2026-09-28T20:12:20+07:00
+2026-09-28T21:29:25+07:00
