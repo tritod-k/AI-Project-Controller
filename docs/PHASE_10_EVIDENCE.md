@@ -6,7 +6,10 @@ Phase 10 attempt 01 only, on `codex/phase-10-attempt-01`, starting from
 `aipc-phase-09-pass` / master `8cca14af4024cd5f070237956101ebf621bef73c`.
 Prior Phase 08 tag target: `f95ee453d4dc13971276f5b971b9350b00c0555b`.
 Documentation alignment: `59a5121458cd1f1dcc4f72425fd925a53531756a`.
-Implementation and handoff hashes will be recorded after verified commits.
+Implementation attempt: `8c31330c8de9c56824c25eded1b265b6d5bca259`.
+Message: `AIPC Phase 10 attempt 01 - controller orchestration loop`.
+The following documentation-only handoff records that verified implementation;
+its resulting HEAD is reported in the final Phase Completion Report.
 External Phase 10 review remains PENDING; this report is not PASS authorization.
 
 The real AIPC checkout was used only for source/documentation/test development,

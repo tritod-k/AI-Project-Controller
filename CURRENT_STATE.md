@@ -30,9 +30,10 @@ Runtime Controller/Version/Recovery worktrees and state are disposable test fixt
 
 ## Last Commit
 Starting HEAD: `8cca14af4024cd5f070237956101ebf621bef73c`.
-Phase 10 source is fully validated; the coherent attempt commit and exact-hash
-documentation handoff are being finalized in this session.
-Intended attempt message: `AIPC Phase 10 attempt 01 - controller orchestration loop`.
+Phase 10 implementation attempt: `8c31330c8de9c56824c25eded1b265b6d5bca259`.
+Message: `AIPC Phase 10 attempt 01 - controller orchestration loop`.
+The documentation handoff follows that exact verified commit; its resulting HEAD
+is reported in the final Phase Completion Report. No implementation changed in the handoff.
 
 ## Completed Phases
 
@@ -85,7 +86,7 @@ Version/Recovery and the complete Phase 09 Review suite.
 Standalone fresh review regressions: cancellation 2 passed; intent-authority 5 passed,
 after observed RED. Other targeted results are recorded in docs/PHASE_10_EVIDENCE.md.
 Ruff check/format (113 files), pip check, four canonical and two project/state
-schema checks passed. Final documentation/diff verification follows the handoff update.
+schema checks passed. Final documentation/diff checks are clean.
 
 ## Last Reviewer Result
 PENDING for Phase 10.
@@ -109,8 +110,8 @@ Internal development review is not external Phase Gate authorization.
 Fresh whole-branch review found two Important issues; cancellation acknowledgement
 and post-intent authority guards are fixed with observed RED/GREEN regressions.
 Both findings are fixed and the fresh full suite is green. No known required
-implementation fixes remain. Complete actual-hash documentation handoff and
-submit Phase 10 for external review. Do not start Phase 11.
+implementation fixes remain. Actual implementation hash is recorded above.
+Submit Phase 10 for external review. Do not start Phase 11.
 
 ## Warnings / Known Issues
 
@@ -139,4 +140,4 @@ docs/plans/phase-10-controller.md, docs/PHASE_10_EVIDENCE.md, src/aipc/controlle
 and tests/controller. Execution rulings and review evidence are preserved in the evidence report.
 
 ## Updated
-2026-09-28T20:10:00+07:00
+2026-09-28T20:12:20+07:00
