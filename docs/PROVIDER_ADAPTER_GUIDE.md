@@ -25,5 +25,8 @@ JSON Schema alone does not check cross-field totals/time ordering. Avoid uncheck
 construction/copies at boundaries and revalidate mutable payloads before consuming them.
 
 Phase 03 includes shared adapter contract tests and mock lifecycle/approval responses.
-Real provider integration, capability negotiation, retry/routing and
-approval policy remain later-phase implementation work.
+Phase 11 supplies provider-neutral approval policy and optional canonical pending
+approval observation; see [APPROVAL_POLICY.md](APPROVAL_POLICY.md). Provider-specific
+approval IDs/action/resource translation must stop in the adapter before downstream
+routing. Real provider integration, session reconstruction and provider response
+idempotency remain Phase 12+ work.

@@ -999,22 +999,23 @@ Risk Classifier
        +---- CRITICAL -> Human approval + explicit confirmation
 ```
 
-Suggested default policy:
+Phase 11 safe default (the current authorized scope overrides the earlier automatic
+LOW/AI-review examples): unmatched requests REQUIRE_HUMAN at every risk level.
+AUTO_ALLOW requires an explicit narrow local rule and execution authority;
+HIGH/CRITICAL and unknown actions never auto-allow. No AI approval review is
+implemented. See `docs/APPROVAL_POLICY.md`.
 
 ## LOW
 
 Examples:
 
 - read files inside workspace
-- run tests
-- run linter
 - inspect git diff
-- create new source file inside workspace
 
 Default:
 
 ```text
-AUTO_ALLOW
+REQUIRE_HUMAN unless an explicit scoped policy safely allows the exact action
 ```
 
 ## MEDIUM
@@ -1025,11 +1026,13 @@ Examples:
 - outbound documentation lookup
 - start local development service
 - modify development configuration
+- create new source file inside workspace
+- run tests or linter through shell execution (Phase 11 executable-operation floor)
 
 Default:
 
 ```text
-AI_REVIEW
+REQUIRE_HUMAN or explicit configured policy; no AI reviewer in Phase 11
 ```
 
 ## HIGH
@@ -2640,6 +2643,12 @@ Support agent permission requests safely.
 - CRITICAL always requires human by default
 - approval decisions recorded
 - rejected approval returns meaningful result to worker
+
+Phase 11 implementation: private typed routing/context/audit models, deterministic
+structured risk, conservative policy, optional console decision boundary and
+same-run Controller/Mock integration with response intents. Canonical schemas are
+unchanged. LOW alone is not permission. External administrative review remains
+required before marking this implementation PASS. See `docs/APPROVAL_POLICY.md`.
 
 ---
 

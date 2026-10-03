@@ -5,6 +5,7 @@ from typing import Literal, Self
 from pydantic import StrictBool, model_validator
 
 from aipc.agents.models import AgentRunHandle
+from aipc.approvals.models import ApprovalRoutingDecision
 from aipc.domain.models import (
     AgentResult,
     CanonicalRecord,
@@ -26,6 +27,7 @@ Outcome = Literal[
     "WAITING_HUMAN",
     "CANCELLED",
     "INFRASTRUCTURE_ERROR",
+    "APPROVAL_DENIED",
 ]
 Stage = Literal[
     "PREPARING",
@@ -33,6 +35,8 @@ Stage = Literal[
     "START_INTENT",
     "WAITING_WORKER",
     "WAITING_APPROVAL",
+    "APPROVAL_RESPONSE_INTENT",
+    "APPROVAL_RESPONDED",
     "NORMALIZED",
     "CHECKPOINT_INTENT",
     "CHECKPOINTED",
@@ -94,6 +98,7 @@ class ControllerResult(CanonicalRecord):
     next_phase_id: NonBlank | None = None
     waiting_reason: str | None = None
     pending_run: AgentRunHandle | None = None
+    pending_approval: ApprovalRoutingDecision | None = None
     warnings: tuple[str, ...] = ()
 
     @model_validator(mode="after")
@@ -119,6 +124,19 @@ class ControllerEvent(CanonicalRecord):
     worker_run_id: NonBlank | None = None
 
 
+class ControllerApprovalEvent(CanonicalRecord):
+    routing: ApprovalRoutingDecision
+    state: Literal["ROUTED", "RESPONSE_INTENT", "RESPONDED", "CANCELLED"]
+    resolution: Literal["APPROVE", "DENY"] | None = None
+    timestamp: Timestamp
+
+    @model_validator(mode="after")
+    def response_requires_resolution(self) -> Self:
+        if self.state in ("RESPONSE_INTENT", "RESPONDED") and self.resolution is None:
+            raise ValueError("approval response event requires a decision")
+        return self
+
+
 class RunRecord(CanonicalRecord):
     schema_version: Literal["1.0"] = "1.0"
     project_id: NonBlank
@@ -136,6 +154,7 @@ class RunRecord(CanonicalRecord):
     stage: Stage = "PREPARING"
     attempts: tuple[AttemptRecord, ...]
     events: tuple[ControllerEvent, ...] = ()
+    approval_events: tuple[ControllerApprovalEvent, ...] = ()
     outcome: ControllerResult | None = None
 
     @model_validator(mode="after")
@@ -159,6 +178,8 @@ class RunRecord(CanonicalRecord):
             "START_INTENT": ("task", "workspace", "started_at"),
             "WAITING_WORKER": ("task", "workspace", "handle"),
             "WAITING_APPROVAL": ("task", "workspace", "handle"),
+            "APPROVAL_RESPONSE_INTENT": ("task", "workspace", "handle"),
+            "APPROVAL_RESPONDED": ("task", "workspace", "handle"),
             "CANCEL_INTENT": ("task", "workspace", "handle"),
             "NORMALIZED": ("result", "completed_head"),
             "CHECKPOINT_INTENT": ("result", "completed_head"),
@@ -175,6 +196,54 @@ class RunRecord(CanonicalRecord):
         }
         if any(getattr(current, key) is None for key in required.get(self.stage, ())):
             raise ValueError("stage lacks required persisted facts")
+        previous_approval = None
+        for event in self.approval_events:
+            identity = event.routing.identity
+            a = next((a for a in self.attempts if a.attempt == identity.attempt), None)
+            if (
+                a is None
+                or a.task is None
+                or a.handle is None
+                or (
+                    identity.project_id,
+                    identity.project_run_id,
+                    identity.phase_id,
+                    identity.task_id,
+                    identity.agent_id,
+                    identity.worker_run_id,
+                )
+                != (
+                    self.project_id,
+                    self.run_id,
+                    self.phase_id,
+                    a.task.task_id,
+                    a.handle.agent_id,
+                    a.handle.run_id,
+                )
+            ):
+                raise ValueError("approval routing identity differs from owned attempt")
+            if event.state != "ROUTED" and (
+                previous_approval is None
+                or previous_approval.routing != event.routing
+                or (event.state == "RESPONSE_INTENT" and previous_approval.state != "ROUTED")
+                or (
+                    event.state == "RESPONDED"
+                    and (
+                        previous_approval.state != "RESPONSE_INTENT"
+                        or previous_approval.resolution != event.resolution
+                    )
+                )
+            ):
+                raise ValueError("approval response lacks its exact preceding event")
+            previous_approval = event
+        expected = {
+            "APPROVAL_RESPONSE_INTENT": "RESPONSE_INTENT",
+            "APPROVAL_RESPONDED": "RESPONDED",
+        }
+        if self.stage in expected and (
+            previous_approval is None or previous_approval.state != expected[self.stage]
+        ):
+            raise ValueError("approval stage lacks durable response evidence")
         for a in self.attempts:
             if a.task is not None and (a.task.project_id, a.task.phase_id, a.task.attempt) != (
                 self.project_id,

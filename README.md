@@ -166,4 +166,14 @@ completion; bounded repair retains previous work. Typed outcomes distinguish
 approval/provider/human waits and infrastructure failures. Durable stage journals
 support guarded restart without guessing external side effects or auto-running
 the next phase. See [Controller contracts](docs/CONTROLLER.md). The CLI remains
-help-only; real providers, approval routing and LLM review remain deferred.
+help-only; real providers and LLM review remain deferred.
+
+## Phase 11 Approval Router
+
+The provider-neutral ApprovalRouter revalidates canonical requests, classifies
+structured risk and applies explicit scoped policy. LOW alone grants no permission;
+deny and human rules precede automatic rules. Atomic audits bind exact action/run
+identity without retaining command text. Optional Controller integration records
+response intents/acknowledgements, resumes the same Mock run and stops on ambiguous
+effects. Approval never grants phase PASS or extra tool authority. See
+[approval policy and lifecycle](docs/APPROVAL_POLICY.md). Real providers remain Phase 12.

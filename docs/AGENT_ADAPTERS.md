@@ -91,3 +91,15 @@ Mock unit tests cover all scenarios, terminal ordering, mutation and run isolati
 The production CLI stays help-only. Phase 03 introduced no controller loop or
 normalization; Phase 04 supplies [mock normalization](NORMALIZATION.md) without
 changing the approved adapter behavior, including its exception-based timeout.
+
+## Phase 11 canonical pending approval
+
+The separate optional `PendingApprovalSource` protocol provides async
+`pending_approval(handle) -> ApprovalRequest | None`. Mock returns a stable,
+revalidated canonical request for the exact owned WAITING_APPROVAL run, and None
+after resolution/cancellation. Provider-specific translation remains adapter-owned;
+Controller does not parse raw payload fields. Required AgentAdapter methods remain
+unchanged. Router classifies/audits; Controller alone calls `respond_to_approval`
+after exact request/run/state/tool/Git checks and durable response intent. See
+[approval lifecycle](APPROVAL_POLICY.md). Real session persistence/idempotency is
+Phase 12 work; a new Mock instance never owns a previous instance's handle.

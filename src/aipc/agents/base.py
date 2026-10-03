@@ -8,7 +8,7 @@ from aipc.agents.models import (
     ApprovalDecision,
     RawAgentResult,
 )
-from aipc.domain.models import TaskRequest
+from aipc.domain.models import ApprovalRequest, TaskRequest
 
 
 @runtime_checkable
@@ -28,3 +28,10 @@ class AgentAdapter(Protocol):
     async def respond_to_approval(
         self, run: AgentRunHandle, decision: ApprovalDecision
     ) -> None: ...
+
+
+@runtime_checkable
+class PendingApprovalSource(Protocol):
+    """Optional adapter-owned canonical observation; raw payloads never reach policy."""
+
+    async def pending_approval(self, run: AgentRunHandle) -> ApprovalRequest | None: ...

@@ -54,12 +54,15 @@ infrastructure or protected-facts outcomes without fabricated canonical success.
 
 ## Approval, provider interruption and cancellation
 
-WAITING_APPROVAL returns the exact pending run handle and persists the lifecycle
-wait. Controller supplies no approval policy and never calls `respond_to_approval`.
-A caller may independently respond through the adapter and explicitly transition
-state to RUNNING before invoking the same phase again; Controller polls the same
-handle, without starting a worker. Provider-specific approval event IDs/risk/action
-translation remain Phase 11 work.
+Without Router, WAITING_APPROVAL retains Phase 10 behavior: exact pending handle,
+persisted wait and caller-owned response/RUNNING transition. Phase 11 optionally
+injects ApprovalRouter, separate ApprovalPolicy and a trusted structured facts resolver.
+The optional canonical adapter observation supplies the pending request. Human routing
+returns a safe typed `pending_approval`; `submit_approval(..., human, policy=...)` accepts
+an external decision. Responses use the same handle. Durable intent/acknowledgement
+prevent blind resend. APPROVAL_DENIED is operational waiting, never repair or a phase
+verdict. Execution/tool/Git preconditions remain required. See
+[approval lifecycle](APPROVAL_POLICY.md).
 
 Adapters/callers can raise typed `ProviderInterruption(ProviderCondition)` rather
 than relying on error prose. Quota/outage and AgentTimeoutError delegate diagnosis

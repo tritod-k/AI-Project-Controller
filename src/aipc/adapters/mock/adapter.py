@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -21,7 +22,7 @@ from aipc.domain.errors import (
     InvalidApprovalDecisionError,
     UnknownRunError,
 )
-from aipc.domain.models import NonBlank, TaskRequest
+from aipc.domain.models import ApprovalRequest, NonBlank, TaskRequest
 
 
 class MockScenario(StrEnum):
@@ -37,6 +38,7 @@ class _Run:
     handle: AgentRunHandle
     status: RunStatus = RunStatus.RUNNING
     result: RawAgentResult | None = None
+    approval: ApprovalRequest | None = None
 
 
 class MockAgentAdapter:
@@ -103,6 +105,19 @@ class MockAgentAdapter:
             else:
                 payload: dict[str, Any] = {"mock_run": run.run_id}
                 if self._scenario == MockScenario.APPROVAL_REQUEST:
+                    record.approval = ApprovalRequest(
+                        schema_version="1.0",
+                        approval_id="mock-approval:" + run.run_id,
+                        task_id=run.task_id,
+                        agent_id=run.agent_id,
+                        action_type="mock_action",
+                        description="Simulated pending mock action",
+                        command=None,
+                        risk_level="MEDIUM",
+                        scope="workspace",
+                        requested_at=datetime.now(UTC),
+                        expires_at=None,
+                    )
                     payload.update(
                         mock_status="permission_needed",
                         mock_permission={"action": "mock_action", "request": run.run_id},
@@ -118,6 +133,14 @@ class MockAgentAdapter:
             raise AgentTimeoutError("mock execution timed out")
         assert record.result is not None
         return deepcopy(record.result)
+
+    async def pending_approval(self, run: AgentRunHandle) -> ApprovalRequest | None:
+        record = self._owned(run)
+        if record.status != RunStatus.WAITING_APPROVAL:
+            return None
+        if record.approval is None:
+            raise InvalidApprovalDecisionError("pending approval lacks canonical observation")
+        return ApprovalRequest.model_validate(deepcopy(record.approval))
 
     async def cancel(self, run: AgentRunHandle) -> None:
         record = self._owned(run)

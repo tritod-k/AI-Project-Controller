@@ -9,6 +9,10 @@ from pydantic import ValidationError
 
 from aipc.agents.models import AgentRunHandle, RawAgentResult, RunStatus
 from aipc.agents.registry import AgentRegistry
+from aipc.approvals.errors import ApprovalRouterError
+from aipc.approvals.models import ActionFacts, ApprovalPolicy
+from aipc.approvals.router import ApprovalRouter
+from aipc.controller.approval_flow import ApprovalFlow
 from aipc.controller.errors import ControllerError, ControllerJournalError, ProviderInterruption
 from aipc.controller.journal import ControllerJournal, fingerprint
 from aipc.controller.models import (
@@ -28,7 +32,7 @@ from aipc.domain.errors import (
     StateError,
     UnknownRunError,
 )
-from aipc.domain.models import AgentResult, TaskRequest
+from aipc.domain.models import AgentResult, ApprovalRequest, TaskRequest
 from aipc.evidence.collector import EvidenceCollector
 from aipc.evidence.models import EvidenceContext
 from aipc.evidence.paths import authorized_root
@@ -49,7 +53,7 @@ from aipc.version.errors import VersionManagerError
 from aipc.version.manager import VersionManager
 
 
-class Controller(PublicationFlow):
+class Controller(ApprovalFlow, PublicationFlow):
     def __init__(
         self,
         *,
@@ -70,6 +74,9 @@ class Controller(PublicationFlow):
         raw_retainer: Callable[[RawAgentResult, TaskRequest], str | None] | None = None,
         clock: Callable[[], datetime] | None = None,
         on_stage: Callable[[RunRecord], None] | None = None,
+        approval_router: ApprovalRouter | None = None,
+        approval_policy: ApprovalPolicy | None = None,
+        approval_facts: Callable[[ApprovalRequest, TaskRequest], ActionFacts] | None = None,
     ) -> None:
         if not provider.strip() or not review_authority.strip():
             raise ControllerError("explicit provider identity and reviewer authority required")
@@ -94,6 +101,18 @@ class Controller(PublicationFlow):
         self.evidence_factory, self.raw_retainer = evidence_factory, raw_retainer
         self.clock = clock or (lambda: datetime.now(UTC))
         self.on_stage = on_stage
+        self.approval_router = approval_router
+        self.approval_policy = ApprovalPolicy.model_validate(approval_policy or ApprovalPolicy())
+        self.approval_facts = approval_facts
+        if approval_router is None and (approval_policy is not None or approval_facts is not None):
+            raise ControllerError("approval policy/facts require an injected Router")
+        if approval_router is not None:
+            audit = approval_router.store.root
+            for root in (versions.repository, versions.worktree_root, self.evidence_destination):
+                if audit.is_relative_to(root) or root.is_relative_to(audit):
+                    raise ControllerError(
+                        "approval audit root must be disjoint from execution/evidence roots"
+                    )
         self._active = None
         self._cancellations = {}
 
@@ -101,15 +120,19 @@ class Controller(PublicationFlow):
         return ControllerJournal(self.versions.metadata_root / "controller", run_id, phase_id)
 
     def _configuration(self):
-        return fingerprint(
-            dict(
-                provider=self.provider,
-                authority=self.review_authority,
-                evidence_destination=str(self.evidence_destination),
-                rules=[r.model_dump(mode="json") for r in self.rules],
-                prompt=self.prompt_context.model_dump(mode="json"),
-            )
+        config = dict(
+            provider=self.provider,
+            authority=self.review_authority,
+            evidence_destination=str(self.evidence_destination),
+            rules=[r.model_dump(mode="json") for r in self.rules],
+            prompt=self.prompt_context.model_dump(mode="json"),
         )
+        if self.approval_router is not None:
+            config["approvals"] = dict(
+                root=str(self.approval_router.store.root),
+                policy=self.approval_policy.model_dump(mode="json"),
+            )
+        return fingerprint(config)
 
     def _write(self, journal, record, stage=None, **changes):
         data = record.model_dump(mode="python")
@@ -151,6 +174,11 @@ class Controller(PublicationFlow):
             next_phase_id=next_id,
             waiting_reason=reason,
             pending_run=a.handle if outcome == "WAITING_APPROVAL" else None,
+            pending_approval=(
+                record.approval_events[-1].routing
+                if outcome == "WAITING_APPROVAL" and record.approval_events
+                else None
+            ),
             warnings=("Provider side effects and local stores are not one atomic transaction.",),
         )
         self._write(journal, record, stage, outcome=result)
@@ -426,6 +454,14 @@ class Controller(PublicationFlow):
                     return record.outcome
                 if existing:
                     self._primary(record)
+                    if record.stage == "APPROVAL_RESPONSE_INTENT":
+                        return self._outcome(
+                            journal,
+                            record,
+                            "WAITING_HUMAN",
+                            "Approval response receipt is ambiguous; no resend.",
+                            stage=record.stage,
+                        )
                     ambiguous = record.stage in (
                         "PREPARING",
                         "START_INTENT",
@@ -437,7 +473,12 @@ class Controller(PublicationFlow):
                     )
                     if record.stage == "WAITING_APPROVAL" and state.status == "WAITING_APPROVAL":
                         self._live(project, record, running=False)
-                        return record.outcome
+                        if self.approval_router is None:
+                            return record.outcome
+                        result = await self._route_approval(project, journal, record, adapter)
+                        if isinstance(result, ControllerResult):
+                            return result
+                        record = result
                     if ambiguous or state.status in (
                         "WAITING_PROVIDER",
                         "INTERRUPTED",
@@ -469,6 +510,16 @@ class Controller(PublicationFlow):
                 return await self._drive(project, journal, record, adapter)
             except ControllerJournalError:
                 raise
+            except UnknownRunError:
+                latest = journal.load()
+                self._invalidate_pending(latest, "SESSION_LOST")
+                return self._outcome(
+                    journal,
+                    latest,
+                    "WAITING_HUMAN",
+                    "Owned approval session lost; no replacement dispatch.",
+                    stage=latest.stage,
+                )
             except VersionManagerError as exc:
                 latest = journal.load()
                 current = self.state.load(project)
@@ -505,7 +556,7 @@ class Controller(PublicationFlow):
                     "Version operation requires inspection: " + type(exc).__name__ + recovery_note,
                     stage=latest.stage,
                 )
-            except (ControllerError, RecoveryError, StateError) as exc:
+            except (ControllerError, RecoveryError, StateError, ApprovalRouterError) as exc:
                 latest = journal.load()
                 return self._outcome(
                     journal,
@@ -556,7 +607,11 @@ class Controller(PublicationFlow):
                     raise ControllerError("adapter start handle identity differs")
                 record = self._attempt(journal, record, "WAITING_WORKER", handle=handle)
                 a = record.attempts[-1]
-            if record.stage in ("WAITING_WORKER", "WAITING_APPROVAL"):
+            if record.stage == "APPROVAL_RESPONDED":
+                result = self._finish_approval(project, journal, record)
+                if isinstance(result, ControllerResult):
+                    return result
+            if record.stage in ("WAITING_WORKER", "WAITING_APPROVAL", "APPROVAL_RESPONDED"):
                 self._live(project, record)
                 try:
                     raw = await adapter.wait(AgentRunHandle.model_validate(a.handle))
@@ -583,13 +638,20 @@ class Controller(PublicationFlow):
                 self._live(project, record)
                 if raw.status == RunStatus.WAITING_APPROVAL:
                     self.state.transition(project, "WAITING_APPROVAL")
-                    return self._outcome(
+                    waiting = self._outcome(
                         journal,
                         record,
                         "WAITING_APPROVAL",
                         "External approval decision required.",
                         stage="WAITING_APPROVAL",
                     )
+                    if self.approval_router is None:
+                        return waiting
+                    result = await self._route_approval(project, journal, journal.load(), adapter)
+                    if isinstance(result, ControllerResult):
+                        return result
+                    record = result
+                    continue
                 if raw.status == RunStatus.RUNNING:
                     return self._outcome(
                         journal,
@@ -772,6 +834,7 @@ class Controller(PublicationFlow):
                 raise ControllerError("cancellation lifecycle authority changed")
             await self.agents.get(project.agents.worker).cancel(a.handle)
             self._live(project, record, running=False)
+            self._invalidate_pending(record, "CANCELLED")
             state = self.state.load(project)
             if state.status == "WAITING_APPROVAL":
                 self.state.transition(project, "RUNNING")

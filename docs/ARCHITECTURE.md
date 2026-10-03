@@ -100,3 +100,10 @@ planning/execution and precondition revalidation. VersionManager retains Git saf
 recovery adds write-ahead publication intent, owner-aware lock inspection, continuation data
 and isolated restore preparation. It never consumes raw provider responses or judges code.
 Public canonical/project schemas remain unchanged. See [recovery design](RECOVERY_MANAGER.md).
+
+Phase 11 adds `aipc.approvals` as a decision/audit boundary independent of adapters,
+review/Gate and version/recovery mutation. Private context/policy/audit records reuse
+canonical ApprovalRequest without public schema changes. The optional canonical
+adapter observation protocol stops provider syntax at the adapter boundary. Controller
+alone sends same-run responses after durable intents and live authority checks.
+See [approval architecture](APPROVAL_POLICY.md) for precedence, identity and restart limits.

@@ -70,6 +70,8 @@ class ControllerJournal:
                 raise ControllerJournalError("journal binding changed")
             if value.events[: len(previous.events)] != previous.events:
                 raise ControllerJournalError("audit history cannot be removed")
+            if value.approval_events[: len(previous.approval_events)] != previous.approval_events:
+                raise ControllerJournalError("approval response history cannot be removed")
             count = (
                 len(previous.attempts)
                 if len(value.attempts) > len(previous.attempts)
