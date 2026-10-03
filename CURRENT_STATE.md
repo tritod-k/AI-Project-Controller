@@ -30,8 +30,11 @@ Real provider workers run only in disposable external fixture repositories.
 
 ## Last Commit
 Pre-attempt HEAD: `8a937057f43e4b0443a0a87668407ef79e7aaf4b`.
-Implementation and validation are complete; the verified attempt commit is being
-prepared. Its exact hash will be recorded in the documentation-only handoff.
+Verified Phase 12 implementation attempt:
+`5daa6f0db4de52e05945f0117735918142aabba0`.
+Message: `AIPC Phase 12 attempt 01 - codex adapter`.
+This subsequent documentation-only handoff records that exact implementation hash;
+the handoff HEAD is reported in the Phase Completion Report.
 
 ## Completed Phases
 
@@ -167,4 +170,4 @@ AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CODEX_ADAPTER.md,
 docs/superpowers/specs/2026-10-03-phase-12-design.md and the Phase 12 plan.
 
 ## Timestamp
-2026-10-03 23:38 Asia/Bangkok — implementation validated, awaiting external review.
+2026-10-03 23:40 Asia/Bangkok — verified attempt recorded, awaiting external review.

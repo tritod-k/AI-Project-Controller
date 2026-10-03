@@ -162,5 +162,9 @@ semantic LLM Reviewer is implemented.
 
 All required regression receipts completed. CURRENT_STATE.md is AWAITING_REVIEW,
 Attempt 01, Phase Gate PENDING; Phase 00–11 PASS and documentation alignment remain
-preserved. The exact attempt commit will be recorded in the documentation handoff.
+preserved. Verified implementation attempt:
+`5daa6f0db4de52e05945f0117735918142aabba0`.
+Commit message: `AIPC Phase 12 attempt 01 - codex adapter`.
+This subsequent documentation-only handoff records the implementation hash without
+changing verified source/tests; the final handoff HEAD is in the Phase Completion Report.
 Submit to external ChatGPT review and stop before Phase 13 or stable promotion.
