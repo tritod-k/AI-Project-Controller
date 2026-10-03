@@ -177,3 +177,15 @@ identity without retaining command text. Optional Controller integration records
 response intents/acknowledgements, resumes the same Mock run and stops on ambiguous
 effects. Approval never grants phase PASS or extra tool authority. See
 [approval policy and lifecycle](docs/APPROVAL_POLICY.md). Real providers remain Phase 12.
+
+## Phase 12 First Real Provider: Codex Adapter
+
+The optional pinned official Python SDK integration adds an exact-workspace Codex
+worker and provider-specific normalizer. Raw events stop at the canonical boundary;
+existing core modules and schemas are unchanged. Default sandbox/network/tool policy
+is conservative, native approvals are denied, and approval_events is false because
+no safe AIPC bridge is exposed. Durable thread/turn binding supports guarded resume
+and confirmed cancellation without replacement dispatch. The CLI remains help-only.
+Install the optional extra with `pip install -e '.[dev,codex]'`; ordinary tests remain
+offline. See [Codex setup, safety and lifecycle](docs/CODEX_ADAPTER.md) and
+[Phase 12 evidence](docs/PHASE_12_EVIDENCE.md). Independent LLM review remains Phase 13.

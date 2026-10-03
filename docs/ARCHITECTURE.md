@@ -107,3 +107,12 @@ canonical ApprovalRequest without public schema changes. The optional canonical
 adapter observation protocol stops provider syntax at the adapter boundary. Controller
 alone sends same-run responses after durable intents and live authority checks.
 See [approval architecture](APPROVAL_POLICY.md) for precedence, identity and restart limits.
+
+Phase 12 adds optional `aipc.adapters.codex`: pinned official Python SDK transport,
+exact caller-authorized workspace/session journal and CodexNormalizer. Provider syntax
+stops at validated canonical AgentResult; no core model/schema or Controller provider
+branch is introduced. Native approval capability is false and all escalations are denied.
+Two pin-specific private guards prevent default low-level acceptance and verify effective
+host tool/sandbox policy; lifecycle uses public SDK APIs. Turns inherit the validated
+thread sandbox. Provider operational errors use existing interruption seams; worker
+completion is not Phase Gate PASS. See [Codex boundary](CODEX_ADAPTER.md).

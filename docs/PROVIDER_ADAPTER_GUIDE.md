@@ -30,3 +30,9 @@ approval observation; see [APPROVAL_POLICY.md](APPROVAL_POLICY.md). Provider-spe
 approval IDs/action/resource translation must stop in the adapter before downstream
 routing. Real provider integration, session reconstruction and provider response
 idempotency remain Phase 12+ work.
+
+Phase 12 now implements the first real provider under `aipc.adapters.codex` with
+optional official Python SDK, exact-workspace/session binding and CodexNormalizer.
+All raw syntax remains local; core schemas/components are unchanged. The Codex
+approval capability is false and native escalation is explicitly denied; no
+provider-native reviewer supplies AIPC authority. See [Codex lifecycle and safety](CODEX_ADAPTER.md).
