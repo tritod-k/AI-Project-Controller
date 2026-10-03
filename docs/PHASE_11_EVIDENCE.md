@@ -127,6 +127,23 @@ all exited 0. Local development transcripts are retained in the ignored Phase 11
 planning directory; they are development validation evidence, not production
 action execution receipts. No production runtime metadata was created.
 
+## Git handoff
+
+- Last stable checkpoint: `aipc-phase-10-pass`.
+- Stable target / unchanged master: `0c2375ff936fb6cd2b5e09fc8694cae49ed4c4b6`.
+- Phase 11 branch: `codex/phase-11-attempt-01`.
+- Verified implementation attempt: `75df9724432361401c52d6ea7f18daf18b97834a`.
+- Message: `AIPC Phase 11 attempt 01 - approval router`.
+- The attempt changes 37 scoped files: 15 implementation, 11 new test/support and
+  11 current documentation/state files. Historical evidence, all six schemas,
+  canonical domain models and existing tests remain unchanged.
+- Working tree was clean immediately after the attempt commit. The following
+  documentation-only handoff records its exact hash and plan completion; its own
+  resulting HEAD and final clean status are reported externally, avoiding a
+  self-referential commit hash.
+- CURRENT_STATE: AWAITING_REVIEW; Phase Gate PENDING; completed phases 00–10 only.
+- No merge, Phase 11 PASS tag, Phase 12 branch or real provider work.
+
 ## Limitations and rulings
 
 Single-writer/quiescent filesystem assumptions, nontransactional audit/journal/state/

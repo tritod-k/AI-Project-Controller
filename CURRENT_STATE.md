@@ -29,8 +29,10 @@ master remains on the approved Phase 10 checkpoint. Runtime mutations occur only
 
 ## Last Commit
 Starting/actual pre-attempt HEAD: `0c2375ff936fb6cd2b5e09fc8694cae49ed4c4b6`.
-Implementation changes are verified and prepared for the attempt commit.
-Final verification is complete; the verified attempt hash will be recorded in the documentation handoff after the attempt commit exists.
+Phase 11 verified implementation attempt: `75df9724432361401c52d6ea7f18daf18b97834a`.
+Message: `AIPC Phase 11 attempt 01 - approval router`.
+The documentation handoff records this exact implementation hash; its own resulting
+HEAD is reported in the Phase Completion Report. No implementation changes follow verification.
 
 ## Completed Phases
 
@@ -146,4 +148,4 @@ docs/CONTROLLER.md, docs/superpowers/plans/2026-09-29-phase-11.md, src/aipc/appr
 src/aipc/controller/approval_flow.py and tests/approvals. Preserve earlier phase evidence.
 
 ## Updated
-2026-10-03T12:45:09+07:00
+2026-10-03T12:47:43+07:00
