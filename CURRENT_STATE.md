@@ -10,29 +10,32 @@ AI Project Controller
 Phase 11 — Approval Router
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING — external manual/bootstrap review required.
+PASS — external ChatGPT reviewer approval; manual bootstrap authority.
 
 ## Last Stable Checkpoint
-`aipc-phase-10-pass` — `0c2375ff936fb6cd2b5e09fc8694cae49ed4c4b6`.
+`aipc-phase-11-pass` — manual stable tag on the finalized Phase 11 PASS-state commit.
+Previous `aipc-phase-10-pass` — `0c2375ff936fb6cd2b5e09fc8694cae49ed4c4b6`.
 Previous `aipc-phase-09-pass` — `8cca14af4024cd5f070237956101ebf621bef73c`.
 All previous manual PASS tags remain unchanged.
 
 ## Current Branch / Worktree
-`codex/phase-11-attempt-01`, checkout `H:/000ProjectCode/AI_Project_Controller`.
-master remains on the approved Phase 10 checkpoint. Runtime mutations occur only in disposable test repositories.
+Stable development line: `master`, checkout `H:/000ProjectCode/AI_Project_Controller`.
+Approved history is integrated by fast-forward; `codex/phase-11-attempt-01` is preserved.
+Runtime mutations occur only in disposable test repositories.
 
 ## Last Commit
 Starting/actual pre-attempt HEAD: `0c2375ff936fb6cd2b5e09fc8694cae49ed4c4b6`.
 Phase 11 verified implementation attempt: `75df9724432361401c52d6ea7f18daf18b97834a`.
 Message: `AIPC Phase 11 attempt 01 - approval router`.
-The documentation handoff records this exact implementation hash; its own resulting
-HEAD is reported in the Phase Completion Report. No implementation changes follow verification.
+Approved documentation/handoff HEAD: `05c8212cea52fb586a9991ce9e40ffe1e7302ef1`.
+The PASS-state commit finalizes this file only; its exact hash is reported in the
+Phase 11 Finalization Report and referenced by the manual stable tag.
 
 ## Completed Phases
 
@@ -47,19 +50,28 @@ HEAD is reported in the Phase Completion Report. No implementation changes follo
 - Phase 08 — Recovery Manager: PASS (external approval).
 - Phase 09 — Reviewer + Phase Gate: PASS (external approval).
 - Phase 10 — Controller Orchestration Loop: PASS (external approval).
+- Phase 11 — Approval Router: PASS (external approval).
 
 ## Documentation Alignment
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a` integrated on master.
 MASTER_PLAN.md and AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 11 — Approval Router only. Do not implement Phase 12/13, create a PASS tag or integrate into master.
+Phase 11 finalization only in this session. External/manual PASS authorizes the
+state update, stable tag and history-preserving integration; no runtime stack
+is used to self-authorize the real repository.
 
 ## Next Authorized Phase
-None beyond the current Phase 11 attempt; external review required before progression.
+Phase 12 — First Real Provider: Codex Adapter
 
 ## Phase 11 Status
-AWAITING_REVIEW
+PASS
+
+## Phase 12 Status
+NOT_STARTED
+
+## Phase 13 Status
+NOT_STARTED
 
 ## Current Work
 - Private typed approval context, facts, rules, routing and audit models.
@@ -84,10 +96,21 @@ CLI help, Ruff check/format (134 files), pip check, four canonical schemas,
 two project/state schemas and git diff --check passed again.
 Logs/XML/exit receipts are retained under .superpowers/sdd/2026-09-29-phase-11.
 Earlier interrupted runs have no final receipt and are not counted as PASS.
+Fresh Phase 11 finalization regression on 2026-10-03: 1201 passed in 8434.40s
+(2:20:34); explicit component regression: 690 passed in 8446.10s (2:20:46).
+Both exited 0; XML confirms zero failures, errors or skips. Each execution includes
+Approval 104, Controller 80, Reviewer/Gate 90, Recovery 72, Version 80,
+Evidence 107, Prompt 79, Normalization 71 and adapter contracts 7.
+All 160 source/input hashes remain identical to the tested implementation. Only
+CURRENT_STATE.md changes during finalization; no source, tests or schemas change.
+Fresh logs/XML/exit receipts are retained under
+.superpowers/sdd/2026-10-03-phase-11-finalization. CLI help, Ruff check/format,
+pip check, canonical/project schemas and Git diff checks are verified during finalization.
 
 ## Last Reviewer Result
-NOT_REVIEWED — Phase 11 awaits external ChatGPT review after completed verification/handoff.
-Fresh internal whole-branch review is development advice, not Phase Gate authority.
+PASS — external ChatGPT review approves the Phase 11 implementation and handoff
+commits above, including the documented limitations. Internal development review
+does not replace external/manual Phase Gate authority during bootstrap.
 
 ## Preserved Reviewer Notes
 
@@ -112,11 +135,21 @@ Fresh internal whole-branch review is development advice, not Phase Gate authori
 - Single-writer/quiescent external Git/filesystem assumptions remain; ambiguous effects may need humans.
 - Authority and evidence origin are not cryptographically authenticated.
 - Ignored internal planning notes retained after policy-blocked removal are accepted and remain preserved.
+- LOW risk does not imply automatic approval; AUTO_ALLOW requires explicit narrow policy authority.
+- Unknown/ambiguous approval requests fail closed; deny/human-required rules override broad allow.
+- Approval authority remains exact request/run/action/resource/policy/state bound.
+- Stale, closed, cancelled or lost-session approvals cannot be reused.
+- Approval never overrides current execution/Git/workspace safety preconditions.
+- Approval Router remains distinct from Reviewer, Phase Gate and Recovery Manager.
+- Controller owns worker lifecycle and adapter approval responses.
+- Exactly-once real-provider approval response is not guaranteed; session/idempotency behavior remains Phase 12 work.
+- Structured caller facts remain trusted inputs; full command-semantic secret detection/DLP is not implemented.
 
 ## Required Fixes / Remaining Work
-Implementation, regressions, fresh-review fixes and final verification are complete.
-No known required implementation fixes remain; external review is pending.
-Phase 11 is not PASS. Phase 12/13 remain NOT_STARTED.
+External review returned PASS. No required implementation fixes remain.
+Phase 11 is finalized through the manual PASS-state commit/tag and history-preserving
+integration. Phase 12 is authorized for a separate implementation session but remains
+NOT_STARTED; Phase 13 also remains NOT_STARTED. Stop after this finalization.
 
 ## Warnings / Known Issues
 
@@ -136,11 +169,12 @@ Phase 11 is not PASS. Phase 12/13 remain NOT_STARTED.
 ## Recovery Notes / Phase 11–13 Boundaries
 Read persisted project state, exact checkpoint refs/metadata and Controller journal before
 continuation. Do not reset/clean, blindly retire locks, infer PASS or replay uncertain side
-effects. Approval Router is the current Phase 11 attempt. Real Codex provider is Phase 12 and Independent LLM
+effects. Approval Router is approved Phase 11. Real Codex provider is Phase 12 and Independent LLM
 Reviewer is Phase 13; both remain NOT_STARTED.
 
 ## Next Action
-Submit Phase 11 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision.
+Stop after Phase 11 finalization. Phase 12 — First Real Provider: Codex Adapter
+is authorized for a separate requested implementation session but remains NOT_STARTED.
 
 ## Files to Read on Resume
 AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/APPROVAL_POLICY.md,
@@ -148,4 +182,4 @@ docs/CONTROLLER.md, docs/superpowers/plans/2026-09-29-phase-11.md, src/aipc/appr
 src/aipc/controller/approval_flow.py and tests/approvals. Preserve earlier phase evidence.
 
 ## Updated
-2026-10-03T12:47:43+07:00
+2026-10-03T16:08:29+07:00
