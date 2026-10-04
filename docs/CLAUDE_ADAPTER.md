@@ -5,6 +5,28 @@ contracts. All Claude SDK syntax remains inside that provider package. Controlle
 canonical models, public schemas, Evidence, Reviewer/Gate, Version and Recovery are
 unchanged. The CLI remains help-only. No Gemini, routing/fallback or consensus.
 
+## External acceptance and production capability
+
+External review approved Phase 14 **implementation PASS** at
+`af0e4aaf32d98f0eb3ffda03ca6d5aff505372db`. Offline AgentAdapter/Normalizer
+contracts pass; this acceptance does **not** establish a production-ready worker.
+Production Claude coding/tool execution remains **NOT READY / BLOCKED**,
+official `approval_events=FALSE`, AIPC approval bridge **UNVERIFIED**, and live
+worker compatibility **UNVERIFIED**. Synthetic approval behavior is test-only.
+Real mutating tools remain unavailable until separately reviewed live capability
+validation succeeds on a supported sandbox host. Native Claude permissions do not
+grant AIPC authority; broad auto-allow and inherited settings remain disabled,
+and sandbox fail-if-unavailable must never become an unsandboxed fallback.
+
+Forward Phase 16 requirement: Agent Router MUST honor provider capabilities.
+ClaudeAdapter MUST NOT be selected for real coding/tool execution while its
+approval_events/tool execution remain unavailable or unverified. This documents
+a retained architectural constraint; no routing/fallback is implemented here.
+
+The reviewed baseline remains SDK 0.2.159 / bundled CLI 2.1.281. Any later upgrade
+affecting permissions, sandbox, hooks, sessions or tools must rerun compatibility
+and safety probes before expanding capabilities.
+
 ## Install and readiness
 
 Use the project environment: `python -m pip install -e '.[dev,claude]'`.
@@ -167,4 +189,5 @@ with a fake public client; they make no Anthropic requests.
 `AIPC_CLAUDE_LIVE=1 python tools/claude_live_smoke.py` produces separate readiness
 receipts. It does not dispatch paid calls while sandbox/auth/bridge readiness is
 blocked. LIVE READ/WRITE/DENY/RESUME/CANCEL/CONTROLLER stay explicitly UNVERIFIED.
-No live mutation targets the real AIPC repository and no new stable tag is created.
+No live mutation targets the real AIPC repository. Live probes cannot authorize
+stable promotion; external/manual review controls bootstrap PASS checkpoints.

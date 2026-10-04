@@ -10,31 +10,33 @@ AI Project Controller
 Phase 14 — Claude Adapter
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING
+PASS
 
 ## Last Stable Checkpoint
-`aipc-phase-13-pass` — manual stable checkpoint authorized by external Phase 13 PASS.
-Exact target: `bb51456a24b7a63b95538342a1dac76e86692ec0`.
+`aipc-phase-14-pass` — manual stable checkpoint authorized by external Phase 14 implementation PASS.
+The tag points to the containing `AIPC Phase 14 PASS - claude adapter` state commit;
+its exact target is recorded in the finalization report and retained handoff receipt.
+Previous `aipc-phase-13-pass` — `bb51456a24b7a63b95538342a1dac76e86692ec0`.
 Previous `aipc-phase-12-pass` — `82c7d9dec5b606881bf7c02043ae0ccc6b34d82b`.
-Previous `aipc-phase-11-pass` — `8a937057f43e4b0443a0a87668407ef79e7aaf4b`.
 All previous PASS tags remain unchanged.
 
 ## Current Branch / Worktree
-Attempt branch: `codex/phase-14-attempt-01`, checkout `H:/000ProjectCode/AI_Project_Controller`.
-Created from verified `aipc-phase-13-pass`; stable `master` and all PASS tags remain unchanged.
+Stable branch: `master`, checkout `H:/000ProjectCode/AI_Project_Controller`.
+Approved history integrated by history-preserving fast-forward from
+`codex/phase-14-attempt-01`; attempt branch and evidence receipts remain preserved.
 
 ## Last Commit
-Phase 14 pre-attempt HEAD: `bb51456a24b7a63b95538342a1dac76e86692ec0`.
-Containing implementation/documentation/state commit:
-`AIPC Phase 14 attempt 01 - claude adapter` on `codex/phase-14-attempt-01`.
-Its actual full SHA is supplied in the final Phase Completion Report and retained
-at `.superpowers/sdd/2026-10-04-phase-14/handoff.json`; a commit cannot embed its own hash.
+Approved Phase 14 implementation/documentation/handoff: `af0e4aaf32d98f0eb3ffda03ca6d5aff505372db`.
+Message: `AIPC Phase 14 attempt 01 - claude adapter`.
+Containing PASS-state commit: `AIPC Phase 14 PASS - claude adapter`; actual full SHA
+is recorded in the finalization report and `.superpowers/sdd/phase-14-finalization/handoff.json`.
+A containing commit cannot embed its own hash.
 Historical approved Phase 13 attempt: `edc20cf1d7106e58ad91cdfb522d750d449f108a`.
 Phase 13 stable/PASS-state: `bb51456a24b7a63b95538342a1dac76e86692ec0`.
 Preserved Phase 12 implementation: `5daa6f0db4de52e05945f0117735918142aabba0`.
@@ -56,16 +58,18 @@ Preserved Phase 12 handoff: `93e31a1fec51659e04b6cb95b6d4b7e49aea594b`.
 - Phase 11 — Approval Router: PASS (external approval).
 - Phase 12 — First Real Provider: Codex Adapter: PASS (external approval).
 - Phase 13 — Independent LLM Reviewer: PASS (external approval; credentialed live quality remains UNVERIFIED).
+- Phase 14 — Claude Adapter: PASS (external implementation approval; production tools BLOCKED).
 
 ## Documentation Alignment
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a` integrated on master.
 MASTER_PLAN.md and AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 14 — Claude Adapter, implementation attempt only. No later phase is authorized.
+Phase 14 — Claude Adapter: finalized implementation PASS under explicit external/manual review.
+Finalization authorizes no automatic next-phase execution.
 
 ## Next Authorized Phase
-Phase 15 — Gemini Adapter: NOT_AUTHORIZED. Await external Phase 14 review.
+Phase 15 — Gemini Adapter
 
 ## Phase 12 Status
 PASS
@@ -74,24 +78,24 @@ PASS
 PASS
 
 ## Phase 14 Status
-AWAITING_REVIEW
+PASS (implementation); production coding/tool capability remains NOT READY / BLOCKED.
+
+## Phase 15 Status
+NOT_STARTED
 
 ## Current Work
-Optional ClaudeSDKClient transport, exact session/run/task/workspace journal,
-bounded raw projection and ClaudeNormalizer, and same-session permission correlation.
-All SDK types remain in the Claude provider package. Existing Controller, Approval
-Router, Evidence Collector, Reviewer/Gate, Version/Recovery and canonical schemas
-remain unchanged. Official approval_events=FALSE and every tool is denied until a
-real supported-runtime permission-engine proof exists; verified fake transport
-demonstrates offline approval/denial only. No deferred-tool approval resume.
-Phase 15/Gemini, routing/fallback and consensus are NOT_IMPLEMENTED.
+Phase 14 implementation accepted and finalized; no implementation changes in finalization.
+Claude SDK/raw data remains provider-local and passes through ClaudeNormalizer before
+canonical downstream use. Core, canonical contracts and all six schemas remain unchanged.
+Production Claude capability restrictions below remain mandatory.
+Phase 15/Gemini, Phase 16 routing/fallback and Phase 17 consensus are NOT_IMPLEMENTED.
 
 ## Tests
 Stable Phase 13 baseline: 1445 tests. Phase 14 adds 119 cases:
 112 Claude cases plus seven additional cases in the shared adapter factory.
-Final full regression: 1564/1564 passed in 8590.44s, exit 0.
-Final explicit component regression: 1053/1053 passed in 8582.15s, exit 0.
-Final Claude/shared subset: 133/133 passed in 263.50s, exit 0.
+Approved attempt full regression: 1564/1564 passed in 8590.44s, exit 0.
+Approved attempt explicit component regression: 1053/1053 passed in 8582.15s, exit 0.
+Approved attempt Claude/shared subset: 133/133 passed in 263.50s, exit 0.
 All three JUnit XML reports contain zero failures, errors or skips; all 112 Claude
 cases pass in both whole/component suites. All 219 frozen inputs are unchanged.
 Ruff check/format (201 files), pip check, CLI help, all six schema drift checks,
@@ -101,6 +105,9 @@ Four Important technical findings fixed in one pass; ten witnessed RED/GREEN cas
 plus an additional dispatch-failure cleanup guard verify the fixes.
 Historical Phase 00–13 evidence remains unchanged. Actual commands, exits, XML,
 input/package digests and handoff receipt: `.superpowers/sdd/2026-10-04-phase-14/`.
+Finalization reruns full pytest and every listed offline component plus Ruff, pip
+and all six schema checks on integrated master; actual exits/XML are retained at
+`.superpowers/sdd/phase-14-finalization/` and reported in the finalization handoff.
 LIVE results below remain separate; blocked/not-run tasks are never counted as PASS.
 
 ## Runtime / Reviewer Boundaries
@@ -114,26 +121,49 @@ Production permission_mode=default, allowed_tools=[], setting_sources=[], empty
 strict MCP set, no additional writable directories, sandbox enabled with explicit
 failIfUnavailable=true and no unsandboxed fallback.
 
+## Claude Capability Qualification
+ClaudeAdapter implementation: PASS.
+Offline AgentAdapter/Normalizer contracts: PASS.
+Claude production tool execution: NOT READY / BLOCKED.
+Claude approval_events: FALSE.
+Claude AIPC approval bridge: UNVERIFIED.
+Claude live worker compatibility: UNVERIFIED.
+Claude-native permission as AIPC Approval Router authority: NO.
+Broad allowed_tools auto-approval: DISABLED (`allowed_tools=[]`).
+Inherited user/project/local settings: DISABLED / ISOLATED (`setting_sources=[]`).
+Sandbox fail-if-unavailable: ENABLED; unsandboxed fallback: DISABLED.
+Live approval interception is unproven; synthetic approval behavior is test-only.
+Real mutating Claude tools remain unavailable until separately reviewed live
+capability validation succeeds. This is a capability restriction, not a warning.
+Reviewed compatibility stays pinned: claude-agent-sdk 0.2.159 / Claude CLI 2.1.281.
+Permission/sandbox/hook/session/tool-affecting upgrades require fresh compatibility
+and safety probes before capability expansion.
+
+## Phase 16 Forward Constraint
+Agent Router MUST honor provider capabilities. ClaudeAdapter MUST NOT be selected
+for tasks requiring real coding/tool execution while approval_events/tool execution
+remain unavailable or unverified. Retained requirement only; no Router implementation.
+
 ## Live Evidence
-Opt-in official readiness probe ran with AIPC_CLAUDE_LIVE=1; safe receipt retained.
-LIVE AUTH/RUNTIME: BLOCKED_WITH_REASON — native Windows sandbox unavailable,
-AUTH_REQUIRED and real-runtime permission bridge not yet demonstrated.
-LIVE READ: UNVERIFIED / NOT_RUN.
-LIVE WRITE: UNVERIFIED / NOT_RUN.
-LIVE DENY: UNVERIFIED / NOT_RUN.
-LIVE RESUME: UNVERIFIED / NOT_RUN.
-LIVE CANCEL: UNVERIFIED / NOT_RUN.
-LIVE CONTROLLER: UNVERIFIED / NOT_RUN.
-Zero paid provider calls and zero live mutation calls. SDK fake-client and fake
-transport results are OFFLINE evidence, never substituted for real-runtime proof.
+Finalization LIVE AUTH/RUNTIME: BLOCKED / NOT RE-RUN.
+Prior read-only readiness receipt remains historical evidence: native Windows sandbox
+unavailable, AUTH_REQUIRED and real-runtime permission bridge not demonstrated.
+LIVE READ: UNVERIFIED.
+LIVE WRITE: UNVERIFIED.
+LIVE DENY: UNVERIFIED.
+LIVE RESUME: UNVERIFIED.
+LIVE CANCEL: UNVERIFIED.
+LIVE CONTROLLER: UNVERIFIED.
+No finalization login, live task, paid call or live mutation was performed. Synthetic
+SDK/client approval results remain OFFLINE evidence, never real-provider capability.
 
 ## Last Reviewer Result
-Phase 14: PENDING external review. One fresh technical reviewer found four
-Important issues, all fixed with observed regressions and green final full/component
-suites; no Critical or deferred Minor finding remains. Initial Astra review seat
-failed without findings due to usage limits; fresh Sol reviewer filled that seat.
-Technical review is not Phase Gate authorization. Historical Phase 13 remains PASS.
-No worker/model self-authorizes Phase 14, stable promotion or the next phase.
+PASS — external Phase 14 implementation review approves `af0e4aaf32d98f0eb3ffda03ca6d5aff505372db`.
+This PASS is not production worker readiness or live approval-bridge validation.
+All four Important fresh technical-review findings were fixed before the approved
+attempt; no unresolved Critical/Important finding remains. Manual external review
+is the authority for the real repository PASS-state commit/tag and integration.
+No adapter, IndependentLLMReviewer or Controller stack self-authorizes finalization.
 
 ## Preserved Reviewer Notes
 
@@ -187,12 +217,11 @@ No worker/model self-authorizes Phase 14, stable promotion or the next phase.
 - Actor/provider identity is not cryptographically authenticated; known-field redaction is not full DLP; single-writer/quiescent filesystem assumptions remain.
 
 ## Required Fixes / Remaining Work
-No unresolved Critical/Important technical findings after the single fix pass
-and final regression. Submit the coherent Phase 14 attempt for external PASS /
-REVISE / BLOCKED decision; do not self-promote. Native Windows sandbox, absent auth
-and lack of a real-runtime permission-engine proof block live tasks. Real Claude
-tool usability remains unavailable pending supported-runtime validation; never
-broaden execution authority or remove sandbox requirements to obtain proof.
+No required implementation fixes remain after external PASS.
+Real Claude coding/tools remain unavailable until separately reviewed live capability
+validation proves exact AIPC-controlled interception/denial on a supported sandbox host.
+Do not broaden tools, enable approval_events or relax sandbox requirements to obtain proof.
+Phase 15 remains NOT_STARTED; this finalization does not begin another phase.
 
 ## Phase 13 External Reviewer Notes
 
@@ -239,10 +268,12 @@ a new session. Remote interruption requires an observed aborted terminal reason.
 No destructive reset/clean/force operations or real-repository recovery authorized.
 
 ## Next Action
-Submit Phase 14 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision. Stop; do not create a Phase 15 branch, merge master or create a PASS tag.
+Phase 15 — Gemini Adapter is authorized and NOT_STARTED. Stop after Phase 14
+finalization; begin only in a separate explicitly requested implementation task.
+Claude live capability expansion requires separate supported-runtime validation/review.
 
 ## Files to Read on Resume
 AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CLAUDE_ADAPTER.md, Phase 14 spec/plan and `.superpowers/sdd/2026-10-04-phase-14/progress.md`.
 
 ## Timestamp
-2026-10-04 Asia/Bangkok — Phase 14 Attempt 01 verified; AWAITING_REVIEW / PENDING.
+2026-10-04T14:48:41.241649+00:00 — Phase 14 external implementation PASS finalization; Phase 15 NOT_STARTED.
