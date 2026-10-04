@@ -7,43 +7,35 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 14 — Claude Adapter
+Phase 15 — Gemini Adapter
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-14-pass` — manual stable checkpoint authorized by external Phase 14 implementation PASS.
-The tag points to the containing `AIPC Phase 14 PASS - claude adapter` state commit;
-its exact target is recorded in the finalization report and retained handoff receipt.
+`aipc-phase-14-pass` — `a895b03fae2b322fa550469008fee7ada07f5ebb`.
 Previous `aipc-phase-13-pass` — `bb51456a24b7a63b95538342a1dac76e86692ec0`.
-Previous `aipc-phase-12-pass` — `82c7d9dec5b606881bf7c02043ae0ccc6b34d82b`.
-All previous PASS tags remain unchanged.
+All previous PASS tags remain unchanged. No Phase 15 PASS tag or master integration.
 
 ## Current Branch / Worktree
-Stable branch: `master`, checkout `H:/000ProjectCode/AI_Project_Controller`.
-Approved history integrated by history-preserving fast-forward from
-`codex/phase-14-attempt-01`; attempt branch and evidence receipts remain preserved.
+`codex/phase-15-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
+Branch starts at the approved Phase 14 stable tag.
 
 ## Last Commit
-Approved Phase 14 implementation/documentation/handoff: `af0e4aaf32d98f0eb3ffda03ca6d5aff505372db`.
-Message: `AIPC Phase 14 attempt 01 - claude adapter`.
-Containing PASS-state commit: `AIPC Phase 14 PASS - claude adapter`; actual full SHA
-is recorded in the finalization report and `.superpowers/sdd/phase-14-finalization/handoff.json`.
-A containing commit cannot embed its own hash.
-Historical approved Phase 13 attempt: `edc20cf1d7106e58ad91cdfb522d750d449f108a`.
-Phase 13 stable/PASS-state: `bb51456a24b7a63b95538342a1dac76e86692ec0`.
-Preserved Phase 12 implementation: `5daa6f0db4de52e05945f0117735918142aabba0`.
-Preserved Phase 12 handoff: `93e31a1fec51659e04b6cb95b6d4b7e49aea594b`.
+Starting approved HEAD: `a895b03fae2b322fa550469008fee7ada07f5ebb`.
+Phase 14 approved implementation: `af0e4aaf32d98f0eb3ffda03ca6d5aff505372db`.
+Phase 15 containing attempt/handoff commit: `AIPC Phase 15 attempt 01 - gemini adapter`.
+Its actual full SHA is supplied after publication in the completion report and
+`.superpowers/sdd/2026-10-04-phase-15/handoff.json`. A containing commit cannot embed
+its own hash. No placeholder Git command is used as commit evidence.
 
 ## Completed Phases
-
 - Phase 00 — Repository Bootstrap: PASS (external approval).
 - Phase 01 — Canonical Domain Models: PASS (external approval).
 - Phase 02 — Project Definition + State Machine: PASS (external approval).
@@ -61,112 +53,98 @@ Preserved Phase 12 handoff: `93e31a1fec51659e04b6cb95b6d4b7e49aea594b`.
 - Phase 14 — Claude Adapter: PASS (external implementation approval; production tools BLOCKED).
 
 ## Documentation Alignment
-COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a` integrated on master.
-MASTER_PLAN.md and AGENTS.md retain the aligned Phase 00–22 roadmap.
+COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 14 — Claude Adapter: finalized implementation PASS under explicit external/manual review.
-Finalization authorizes no automatic next-phase execution.
+Phase 15 — Gemini Adapter, Attempt 01 only, explicitly authorized by the human.
 
 ## Next Authorized Phase
-Phase 15 — Gemini Adapter
-
-## Phase 12 Status
-PASS
-
-## Phase 13 Status
-PASS
-
-## Phase 14 Status
-PASS (implementation); production coding/tool capability remains NOT READY / BLOCKED.
+None. Phase 16 requires separate human/controller authorization after review.
 
 ## Phase 15 Status
-NOT_STARTED
+AWAITING_REVIEW; external review pending. OFFLINE implementation complete; LIVE_RUNTIME_BLOCKED.
+
+## Phase 16 Status
+NOT_STARTED / NOT_AUTHORIZED. No Agent Router or fallback.
 
 ## Current Work
-Phase 14 implementation accepted and finalized; no implementation changes in finalization.
-Claude SDK/raw data remains provider-local and passes through ClaudeNormalizer before
-canonical downstream use. Core, canonical contracts and all six schemas remain unchanged.
-Production Claude capability restrictions below remain mandatory.
-Phase 15/Gemini, Phase 16 routing/fallback and Phase 17 consensus are NOT_IMPLEMENTED.
+Provider-local GeminiAdapter, typed config/raw/operational errors, bounded ACP
+JSON-RPC and normalization use existing AgentAdapter contracts. Original mutable
+tasks and exact workspace/repository/session/turn identities are revalidated.
+Atomic intent journals preserve ambiguous effects and terminal replay. No core,
+canonical/schema or prior-provider implementation changed. Controller integration
+uses disposable repositories; missing evidence yields REVISE_REQUIRED, never PASS.
 
 ## Tests
-Stable Phase 13 baseline: 1445 tests. Phase 14 adds 119 cases:
-112 Claude cases plus seven additional cases in the shared adapter factory.
-Approved attempt full regression: 1564/1564 passed in 8590.44s, exit 0.
-Approved attempt explicit component regression: 1053/1053 passed in 8582.15s, exit 0.
-Approved attempt Claude/shared subset: 133/133 passed in 263.50s, exit 0.
-All three JUnit XML reports contain zero failures, errors or skips; all 112 Claude
-cases pass in both whole/component suites. All 219 frozen inputs are unchanged.
-Ruff check/format (201 files), pip check, CLI help, all six schema drift checks,
-wheel build and SDK-free base installation pass. All ten Claude modules match source,
-wheel and installed bytes. Core, canonical models and public schemas are unchanged.
-Four Important technical findings fixed in one pass; ten witnessed RED/GREEN cases
-plus an additional dispatch-failure cleanup guard verify the fixes.
-Historical Phase 00–13 evidence remains unchanged. Actual commands, exits, XML,
-input/package digests and handoff receipt: `.superpowers/sdd/2026-10-04-phase-14/`.
-Finalization reruns full pytest and every listed offline component plus Ruff, pip
-and all six schema checks on integrated master; actual exits/XML are retained at
-`.superpowers/sdd/phase-14-finalization/` and reported in the finalization handoff.
-LIVE results below remain separate; blocked/not-run tasks are never counted as PASS.
+Full: 1661 passed; explicit components: 1150 passed. Zero failures/errors/skips; frozen input verification and exact receipts retained under .superpowers/sdd/2026-10-04-phase-15/.
+Development followed targeted RED -> GREEN. One fresh read-only technical review
+found four Important issues; eight RED regressions reproduced them, then 48 related
+tests passed. No Critical/Minor finding reported. Final suites run once each after
+source freeze. Ruff/format, CLI help, pip check, all six schema drift checks and
+wheel/base imports are verified and receipts retained. Ordinary tests are offline.
 
-## Runtime / Reviewer Boundaries
-Python 3.13.0 / native Windows; optional claude-agent-sdk==0.2.159,
-bundled CLI 2.1.281. Installed SDK/runtime were inspected before design.
-Authentication: loggedIn=false / authMethod=none; no supported auth environment
-source present. No credential files/values copied or reported, and no login started.
-Model: provider default, actual model UNOBSERVED. Required native Windows sandbox
-is unavailable. Live execution is BLOCKED; no paid task request was dispatched.
-Production permission_mode=default, allowed_tools=[], setting_sources=[], empty
-strict MCP set, no additional writable directories, sandbox enabled with explicit
-failIfUnavailable=true and no unsandboxed fallback.
+## Gemini Runtime / Security
+Python 3.13.0; Node v24.18.0; npm 11.18.0. Gemini CLI actual version unavailable;
+not in PATH or known global npm package. Auth environment/cached OAuth presence
+false. No credential contents read, auth launched, runtime install/upgrade or paid call.
+Inspected static reference v0.61.0 is not installed/live compatibility evidence.
+Model/latency unobserved. Transport: ACP protocol over injected trusted streams.
+Official transport launch is blocked even with later CLI presence until effective
+settings/policy, native denial and sandbox qualification are separately reviewed.
+Requested plan: default approval, sandbox required, network false, no extra roots,
+extensions or MCP, no yolo/auto_edit/allowed-tools/Always Allow/permanent learning.
+Effective enforcement UNVERIFIED; no unsandboxed fallback. All production capability
+flags false, including approval_events/filesystem/shell/git. Every native permission
+request is cancelled; client filesystem/terminal proxy is disabled and rejected.
+No AIPC approval bridge or advertised mutating capability exists.
 
-## Claude Capability Qualification
-ClaudeAdapter implementation: PASS.
-Offline AgentAdapter/Normalizer contracts: PASS.
-Claude production tool execution: NOT READY / BLOCKED.
-Claude approval_events: FALSE.
-Claude AIPC approval bridge: UNVERIFIED.
-Claude live worker compatibility: UNVERIFIED.
-Claude-native permission as AIPC Approval Router authority: NO.
-Broad allowed_tools auto-approval: DISABLED (`allowed_tools=[]`).
-Inherited user/project/local settings: DISABLED / ISOLATED (`setting_sources=[]`).
-Sandbox fail-if-unavailable: ENABLED; unsandboxed fallback: DISABLED.
-Live approval interception is unproven; synthetic approval behavior is test-only.
-Real mutating Claude tools remain unavailable until separately reviewed live
-capability validation succeeds. This is a capability restriction, not a warning.
-Reviewed compatibility stays pinned: claude-agent-sdk 0.2.159 / Claude CLI 2.1.281.
-Permission/sandbox/hook/session/tool-affecting upgrades require fresh compatibility
-and safety probes before capability expansion.
-
-## Phase 16 Forward Constraint
-Agent Router MUST honor provider capabilities. ClaudeAdapter MUST NOT be selected
-for tasks requiring real coding/tool execution while approval_events/tool execution
-remain unavailable or unverified. Retained requirement only; no Router implementation.
+## Session / Resume / Cancellation
+New attempt owns a fresh exact session. Terminal replay is local; fresh active
+or ambiguous dispatch never resends. Explicit same-attempt continuation is only
+available with independently tested transport resume. Deterministic fake supports
+it; native ACP resume_session=false and loaded-session prompts are refused because
+v0.61.0 asynchronously streams history without a proven replay barrier. Actual
+prompt future binds before dispatch; post-terminal text cannot become evidence.
+Cancel intent targets exact session/turn; notification alone never means CANCELLED.
+Only observed cancelled prompt terminal confirms it; timeout/loss/races remain ambiguous.
 
 ## Live Evidence
-Finalization LIVE AUTH/RUNTIME: BLOCKED / NOT RE-RUN.
-Prior read-only readiness receipt remains historical evidence: native Windows sandbox
-unavailable, AUTH_REQUIRED and real-runtime permission bridge not demonstrated.
-LIVE READ: UNVERIFIED.
-LIVE WRITE: UNVERIFIED.
-LIVE DENY: UNVERIFIED.
-LIVE RESUME: UNVERIFIED.
-LIVE CANCEL: UNVERIFIED.
-LIVE CONTROLLER: UNVERIFIED.
-No finalization login, live task, paid call or live mutation was performed. Synthetic
-SDK/client approval results remain OFFLINE evidence, never real-provider capability.
+LIVE AUTH/RUNTIME: LIVE_RUNTIME_BLOCKED.
+LIVE READ: UNVERIFIED / NOT_RUN.
+LIVE DENY: UNVERIFIED / NOT_RUN.
+LIVE WRITE: UNVERIFIED / NOT_RUN.
+LIVE RESUME: UNVERIFIED / NOT_RUN.
+LIVE CANCEL: UNVERIFIED / NOT_RUN.
+LIVE CONTROLLER: UNVERIFIED / NOT_RUN.
+Smoke is opt-in presence-only, cannot run real tasks and cannot produce live PASS.
+
+## Existing Provider Qualifications
+Codex: real/live validated worker, existing documented limitations unchanged.
+Claude: Phase 14 implementation PASS; production coding/tool capability NOT READY / BLOCKED.
+Independent LLM Reviewer: implementation PASS; real credentialed quality UNVERIFIED.
+Gemini: tested OFFLINE boundary/lifecycle; production coding/runtime NOT READY / BLOCKED.
+
+## Claude Capability Qualification (preserved)
+Phase 14 implementation PASS does not authorize real Claude coding/tool use.
+approval_events remains FALSE; official tools remain denied pending real interception
+proof. Claude-native permission is not AIPC authority. Broad allowed_tools remains
+disabled, inherited settings remain isolated, and required sandbox has no downgrade.
+Reviewed compatibility stays pinned to claude-agent-sdk 0.2.159 / CLI 2.1.281.
+Permission/sandbox/hook/session/tool upgrades require fresh safety qualification.
+LIVE READ/WRITE/DENY/RESUME/CANCEL/CONTROLLER remain UNVERIFIED.
+See docs/CLAUDE_ADAPTER.md and unchanged historical Phase 14 evidence for full limits.
+
+## Phase 16 Forward Constraint
+Any later Agent Router must honor tested capability restrictions: neither Claude
+nor Gemini may be selected for real coding/tools while production capability is
+blocked/unverified. This is a retained constraint; no Router/fallback is implemented.
 
 ## Last Reviewer Result
-PASS — external Phase 14 implementation review approves `af0e4aaf32d98f0eb3ffda03ca6d5aff505372db`.
-This PASS is not production worker readiness or live approval-bridge validation.
-All four Important fresh technical-review findings were fixed before the approved
-attempt; no unresolved Critical/Important finding remains. Manual external review
-is the authority for the real repository PASS-state commit/tag and integration.
-No adapter, IndependentLLMReviewer or Controller stack self-authorizes finalization.
+Phase 15 external review: PENDING. Fresh technical review requested REVISE for four
+Important findings; all were reproduced and fixed before final source freeze.
+Phase 14 external implementation PASS remains historical approval, not Gemini approval.
 
 ## Preserved Reviewer Notes
-
 - Required FAIL/UNVERIFIED and conflicting evidence cannot become PASS.
 - Worker narrative is supplemental; structured/observable evidence remains authoritative.
 - Gate authorization binds exact reviewed phase, attempt, review and commit.
@@ -199,7 +177,6 @@ No adapter, IndependentLLMReviewer or Controller stack self-authorizes finalizat
 - Structured caller facts remain trusted inputs; full command-semantic secret detection/DLP is not implemented.
 
 ## Phase 12 External Reviewer Notes (historical approval)
-
 - Codex stays behind the provider-neutral AgentAdapter boundary; Controller must never branch on Codex-specific provider details.
 - Codex raw results must pass through CodexNormalizer and canonical validation before downstream use.
 - Real provider completion alone cannot authorize Phase PASS; Evidence Collector, Reviewer and Phase Gate remain mandatory.
@@ -216,15 +193,7 @@ No adapter, IndependentLLMReviewer or Controller stack self-authorizes finalizat
 - Exactly-once external dispatch/approval semantics are not claimed; dispatch and journal publication remain non-transactional.
 - Actor/provider identity is not cryptographically authenticated; known-field redaction is not full DLP; single-writer/quiescent filesystem assumptions remain.
 
-## Required Fixes / Remaining Work
-No required implementation fixes remain after external PASS.
-Real Claude coding/tools remain unavailable until separately reviewed live capability
-validation proves exact AIPC-controlled interception/denial on a supported sandbox host.
-Do not broaden tools, enable approval_events or relax sandbox requirements to obtain proof.
-Phase 15 remains NOT_STARTED; this finalization does not begin another phase.
-
 ## Phase 13 External Reviewer Notes
-
 - Reviewer context/session must remain independent from worker context/session.
 - No worker hidden reasoning may be transferred to the reviewer.
 - Repository/evidence content remains untrusted reviewer data.
@@ -244,36 +213,32 @@ Phase 15 remains NOT_STARTED; this finalization does not begin another phase.
 - Known-field redaction is not full DLP; hashes do not authenticate origin; single-writer/quiescent filesystem assumptions remain.
 - Python 3.11 and non-Windows execution remain unverified.
 
+## Required Fixes / Remaining Work
+Await external Phase 15 PASS / REVISE / BLOCKED. No worker-created PASS or next phase.
+Real Gemini official process launch/effective settings audit, sandbox/native DENY
+proof and safe native replay barrier remain unimplemented/unqualified on this host.
+Do not weaken authority to obtain live proof. Claude restrictions remain unchanged.
+
 ## Warnings / Known Issues
-- Official approval_events=FALSE; real Claude tools are all denied pending live bridge proof.
-- Native Windows sandbox and authentication block all live task smokes.
-- Key/environment presence is readiness only, not evidence of a paid request.
-- Active permission futures cannot survive restart; ambiguous intents require inspection.
-- SDK query/tool effects and journal publication are not one atomic transaction.
-- Single-writer/quiescent filesystem assumptions; no exactly-once API/tool/billing claim.
-- Command claims lack exit receipts; test evidence is absent unless separately observed.
-- Hashes provide integrity/correlation, not origin or caller-authority authentication.
-- Known-field redaction is not full DLP; caller owns raw retention and authorized roots.
-- Python 3.11/non-Windows and real-model resume/cancel/deny remain unverified.
-- Existing Independent LLM Reviewer live quality and Codex live cancellation limitations remain.
-- No automatic recovery, provider fallback, phase advancement or stable publication.
+Single-writer/quiescent access; provider dispatch/journal writes are nontransactional.
+No exactly-once prompt/tool/approval/billing or cryptographic origin/authority proof.
+Known-field redaction is not universal DLP. Raw reference retention is caller-owned.
+ACP tool locations remain worker claims; shell/test/exit receipts are not invented.
+Python 3.11/non-Windows and all real Gemini execution remain UNVERIFIED.
+No automatic recovery, provider fallback, consensus, stable publication or phase advance.
 
 ## Recovery Notes
-Inspect exact AIPC run/task/config/workspace/session and journal stages before
-continuation. Fresh terminal replay requires no provider query. Active/deferred,
-DISPATCH_INTENT, CANCEL_INTENT and ambiguous permission decisions never blindly
-resume/replay. Unknown human edits and corrupt journals remain preserved. Explicit
-successful-turn continuation reuses the owned session; a new repair attempt uses
-a new session. Remote interruption requires an observed aborted terminal reason.
-No destructive reset/clean/force operations or real-repository recovery authorized.
+Inspect exact project/phase/attempt/task/run/session/local-turn/config/workspace
+and persisted intent stages. Preserve unknown human edits/corrupt journals/locks.
+Do not blindly resume active prompts, resend cancel, remove locks or reset workspaces.
+No real-repository recovery is exercised by this phase.
 
 ## Next Action
-Phase 15 — Gemini Adapter is authorized and NOT_STARTED. Stop after Phase 14
-finalization; begin only in a separate explicitly requested implementation task.
-Claude live capability expansion requires separate supported-runtime validation/review.
+Submit Phase 15 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CLAUDE_ADAPTER.md, Phase 14 spec/plan and `.superpowers/sdd/2026-10-04-phase-14/progress.md`.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/GEMINI_ADAPTER.md,
+docs/PHASE_15_EVIDENCE.md and Phase 15 spec/plan/progress/frozen receipts.
 
 ## Timestamp
-2026-10-04T14:48:41.241649+00:00 — Phase 14 external implementation PASS finalization; Phase 15 NOT_STARTED.
+2026-10-04T21:46:39.297900+00:00

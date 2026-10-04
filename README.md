@@ -210,3 +210,12 @@ The official transport currently advertises approval_events=false and denies too
 until supported-runtime interception is verified. Native Windows lacks the required
 sandbox; live Claude execution is blocked without downgrading isolation. See
 [Claude setup, permissions and readiness limits](docs/CLAUDE_ADAPTER.md).
+
+## Phase 15 Gemini Adapter
+
+The optional provider-local Gemini adapter adds exact session/turn journals,
+bounded ACP JSON-RPC and canonical normalization. Offline lifecycle and wire tests
+require no Node/Gemini runtime. The default transport cannot launch Gemini until
+effective policy/sandbox and real denial behavior are qualified; all production
+tool/approval capabilities remain false. This host lacks Gemini CLI/authentication.
+No routing/fallback is added. See [Gemini boundary and readiness](docs/GEMINI_ADAPTER.md).

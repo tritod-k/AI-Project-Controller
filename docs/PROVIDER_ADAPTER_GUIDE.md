@@ -53,3 +53,10 @@ normalization contracts without changing core interfaces or public schemas.
 Its synthetic same-session callback bridge is offline verified. Official SDK tools
 remain denied and approval_events=false until live interception compatibility is
 established on a supported sandbox host. See [Claude adapter](CLAUDE_ADAPTER.md).
+
+## Phase 15 Gemini provider
+
+`aipc.adapters.gemini` adds bounded ACP streams, exact owned lifecycle journals
+and GeminiNormalizer without core/schema changes. Production launch/tools/approvals
+remain blocked pending effective configuration/sandbox and live DENY qualification;
+offline protocol proof cannot enable native authority. See [Gemini adapter](GEMINI_ADAPTER.md).
