@@ -2705,7 +2705,9 @@ Use an AI model for semantic review.
 - schema retry
 - evidence budget
 - reviewer timeout
-- reviewer fallback
+- dedicated stateless Responses transport with optional official SDK
+- restart audit with guarded paid-call intents
+- no implicit provider/model fallback or consensus (later phases)
 
 ## Reviewer Rules
 

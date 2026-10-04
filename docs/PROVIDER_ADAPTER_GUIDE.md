@@ -36,3 +36,12 @@ optional official Python SDK, exact-workspace/session binding and CodexNormalize
 All raw syntax remains local; core schemas/components are unchanged. The Codex
 approval capability is false and native escalation is explicitly denied; no
 provider-native reviewer supplies AIPC authority. See [Codex lifecycle and safety](CODEX_ADAPTER.md).
+
+# Dedicated Phase 13 review transport
+
+`LLMReviewerTransport` is a separate narrow async review protocol; it is not an
+AgentAdapter execution interface. Optional `OpenAIResponsesReviewerTransport` uses
+public official SDK methods for fresh, strict, tool-free Responses calls. It never
+reuses Codex thread/turn/session objects or worker transports. Provider syntax is
+projected to a private raw result and normalized before canonical ReviewResult.
+See [reviewer setup and boundaries](INDEPENDENT_LLM_REVIEWER.md).

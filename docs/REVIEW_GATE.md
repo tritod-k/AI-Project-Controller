@@ -91,3 +91,13 @@ No audit database was added. Phase 10 may persist/apply decisions and schedule
 workers; Phase 13 may supply an independent LLM reviewer. Neither is present
 here. Single-writer, evidence origin-authentication, live Git/evidence races,
 cross-process coordination and stronger durability remain later concerns.
+
+# Phase 13 semantic reviewer integration
+
+`IndependentLLMReviewer` implements the existing synchronous Reviewer contract and
+also offers native async review. The deterministic reviewer remains supported.
+Private model proposals are locally checked, objective facts override optimism,
+and canonical results bind through the existing exact-attempt provenance boundary.
+The Gate receives no SDK object or provider branch and publishes no Git state.
+Only audit storage is written by the reviewer. See
+[independent review contract](INDEPENDENT_LLM_REVIEWER.md).

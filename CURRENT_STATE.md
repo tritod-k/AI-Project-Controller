@@ -7,37 +7,34 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 12 — First Real Provider: Codex Adapter
+Phase 13 — Independent LLM Reviewer
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-12-pass` — manual stable checkpoint authorized by external Phase 12 PASS.
-Its exact PASS-state commit/tag target is recorded in the Phase 12 Finalization Report.
+`aipc-phase-12-pass` — `82c7d9dec5b606881bf7c02043ae0ccc6b34d82b`.
 Previous `aipc-phase-11-pass` — `8a937057f43e4b0443a0a87668407ef79e7aaf4b`.
-All previous PASS tags remain unchanged.
+Master and all previous PASS tags remain unchanged.
 
 ## Current Branch / Worktree
-Stable branch: `master`, checkout `H:/000ProjectCode/AI_Project_Controller`.
-Approved history is integrated from `codex/phase-12-attempt-01` without rewriting it.
-Real provider workers were used only in disposable external fixture repositories.
+`codex/phase-13-attempt-01`, checkout `H:/000ProjectCode/AI_Project_Controller`.
+Started from the verified clean Phase 12 PASS checkpoint. No Phase 14 branch.
 
 ## Last Commit
-Pre-attempt HEAD: `8a937057f43e4b0443a0a87668407ef79e7aaf4b`.
-Verified Phase 12 implementation attempt:
-`5daa6f0db4de52e05945f0117735918142aabba0`.
-Message: `AIPC Phase 12 attempt 01 - codex adapter`.
-Approved Phase 12 documentation/handoff commit:
-`93e31a1fec51659e04b6cb95b6d4b7e49aea594b`.
-The subsequent PASS-state commit is identified by `aipc-phase-12-pass` and its exact
-hash in the finalization report; it changes this state document only.
+Phase 13 pre-attempt HEAD: `82c7d9dec5b606881bf7c02043ae0ccc6b34d82b`.
+Final attempt identity: `AIPC Phase 13 attempt 01 - independent llm reviewer` on
+`codex/phase-13-attempt-01`. Its full Git hash is recorded after commit in the final
+Phase Completion Report and retained `.superpowers/sdd/2026-10-04-phase-13/handoff.json`.
+The commit containing this state cannot embed its own content-derived hash.
+Preserved approved Phase 12 implementation: `5daa6f0db4de52e05945f0117735918142aabba0`.
+Preserved Phase 12 handoff: `93e31a1fec51659e04b6cb95b6d4b7e49aea594b`.
 
 ## Completed Phases
 
@@ -60,69 +57,60 @@ COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a` integrated on master.
 MASTER_PLAN.md and AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 12 is finalized. This session performs administrative finalization only.
+Phase 13 — Independent LLM Reviewer only.
 
 ## Next Authorized Phase
-Phase 13 — Independent LLM Reviewer
-
-## Phase 11 Status
-PASS
+Phase 13 — Independent LLM Reviewer (implementation complete; awaiting external review).
+Phase 14 is NOT_AUTHORIZED / NOT_STARTED.
 
 ## Phase 12 Status
 PASS
 
 ## Phase 13 Status
-NOT_STARTED
+AWAITING_REVIEW
 
 ## Current Work
-Completed optional pinned official Python Codex SDK transport, provider-specific
-adapter/normalizer, exact workspace/session journal, safe denial guard, restart/cancel
-tests, redacted lifecycle logging and gated live fixtures. Independent technical
-re-review found no unresolved important findings. External reviewer approved Phase 12;
-manual external approval, not Codex/provider completion, authorizes the stable checkpoint.
-No core/canonical/schema modifications; no provider routing or LLM Reviewer.
+Independent provider-neutral semantic reviewer with deterministic bounded request,
+private proposal normalization, canonical ReviewResult and restart audit. Optional
+fresh tool-free OpenAI Responses transport is separate from Codex workers. Existing
+Controller/PhaseGate/canonical contracts/public schemas are unchanged. Fresh technical
+review found four Important issues; ten RED/GREEN regressions verify the fixes.
+Fresh full and component regressions passed on the final frozen source. This is a
+completed implementation attempt, not external approval or stable promotion.
 
 ## Tests
-Starting stable baseline: 1201 tests passed during Phase 11 finalization.
-Final full regression: 1322 passed in 8009.77s (2:13:29), exit 0.
-Explicit component selection: 811 passed in 8020.69s (2:13:40), exit 0.
-Both have zero failures/errors/skips and retain XML/log/exit receipts. The frozen
-164-file source/test/schema/pyproject SHA-256 snapshot is unchanged.
-Final Codex/shared adapter subset: 128 passed in 94.03s; no failures/errors/skips.
-Component counts: Codex 114, shared adapters 14, Controller 80, Approval Router 104,
-Reviewer/Gate 90, Recovery 72, Version 80, Evidence 107, Prompt 79, Normalization 71.
-CLI help, Ruff check/format (158 files), pip check, all six schema drift checks,
-git diff --check, wheel build/install and installed wheel SDK-free import/CLI passed.
-Original core source/schema Git content is unchanged (90 files); no historical
-phase evidence was rewritten. Final wheel SHA-256:
-4c09a44bd9d7c61b470c00d927179a5c6e157a1ce4cb52749f07592bb73a9a69.
-Earlier incomplete regressions were stopped for required safe lifecycle logging and
-malformed-event/session-identity guards; their receipts are preserved, not counted as PASS.
-Live auth/runtime, read, write and fresh-client resume passed with SDK/runtime 0.160.0.
-Live Controller canonical/evidence integration passed with REVISE_REQUIRED, no semantic PASS.
-All five final gated live checks passed again after independent-review fixes.
-Approval live smoke is SKIPPED_WITH_REASON: no safe bridge; approval_events=False.
-Evidence receipts are retained under .superpowers/sdd/2026-10-03-phase-12.
-Approved implementation results above remain historical verification evidence.
-Finalization offline regression/check receipts are retained separately under
-.superpowers/sdd/2026-10-04-phase-12-finalization; their exit codes and XML totals
-must be verified before returning the finalization report. No new live worker run
-is required for this state-only integration of the source-hash-validated implementation.
+Stable Phase 12 baseline: 1322 passed. Phase 13 adds 123 tests.
+Final full regression: 1445/1445 passed in 7741.57 seconds, exit 0.
+Final explicit component regression: 934/934 passed in 7698.50 seconds, exit 0.
+Both XML reports contain zero failures, errors or skips; all 123 Phase 13 cases pass
+in both runs. All 197 frozen source/test/schema/config inputs remain unchanged.
+Ruff check and format (180 files), pip check, all six schema checks, CLI help and
+git diff --check pass. Final wheel and isolated SDK-free base installation pass;
+all eleven new product modules match source, wheel and installed bytes.
+Evidence is retained at `.superpowers/sdd/2026-10-04-phase-13/`.
+Historical Phase 12 finalization receipts remain unchanged at
+`.superpowers/sdd/2026-10-04-phase-12-finalization/`.
 
-## Runtime / Approval / Boundaries
-Official SDK openai-codex 0.160.0; desktop CLI 0.159.2 inspected, bundled CLI 0.160.0 used live.
-Readiness-only auth/policy probes passed for both runtimes with SDK 0.160.0;
-real worker execution on 0.159.2 is not claimed. Tested Python: 3.13.0 on Windows.
-Existing authenticated ChatGPT session is available; no credentials are printed/stored by AIPC.
-Default workspace-write sandbox, network disabled, explicit deny_all/never approval policy.
-Provider-native auto-review never grants AIPC authority. Unsupported approval requests fail closed.
-Capabilities: filesystem=True, shell=True, git=True, streaming_events=True,
-resume_session=True, structured_output=False, approval_events=False.
-Canonical TaskRequest and AgentResult are revalidated; raw events stay inside Codex boundary.
+## Runtime / Reviewer Boundaries
+Python 3.13.0 / Windows; official optional SDK `openai==3.24.0`, public Responses API.
+Live reviewer model: UNCONFIGURED; reasoning: not configured; API authentication absent.
+No secrets printed or retained. Prompt version: `independent-review-v1`.
+Fresh SDK client/request, no worker thread/turn/session, no previous response or tools.
+Explicit worker model provenance is optional and unknown when not supplied by caller.
+Canonical context/evidence revalidated before paid review, after response and at Gate.
+
+## Live Evidence
+LIVE AUTH: BLOCKED — LIVE_REVIEW_BLOCKED_AUTH_REQUIRED.
+LIVE PASS REVIEW: SKIPPED_WITH_REASON — authentication required.
+LIVE REVISE REVIEW: SKIPPED_WITH_REASON — authentication required.
+LIVE SEMANTIC REVIEW: SKIPPED_WITH_REASON — authentication required.
+LIVE INJECTION REVIEW: SKIPPED_WITH_REASON — authentication required.
+LIVE CODEX→LLM PIPELINE: SKIPPED_WITH_REASON — authentication required.
+No paid request was made and no new reviewer self-approved this implementation.
 
 ## Last Reviewer Result
-PASS
-External ChatGPT reviewer approved Phase 12 implementation and handoff commits above.
+PENDING — manual external review has not judged Phase 13.
+Phase 12 external review remains PASS. Technical code review is not Phase Gate authority.
 
 ## Preserved Reviewer Notes
 
@@ -157,7 +145,7 @@ External ChatGPT reviewer approved Phase 12 implementation and handoff commits a
 - Exactly-once real-provider approval response is not guaranteed; session/idempotency behavior remains Phase 12 work.
 - Structured caller facts remain trusted inputs; full command-semantic secret detection/DLP is not implemented.
 
-## Phase 12 External Reviewer Notes
+## Phase 12 External Reviewer Notes (historical approval)
 
 - Codex stays behind the provider-neutral AgentAdapter boundary; Controller must never branch on Codex-specific provider details.
 - Codex raw results must pass through CodexNormalizer and canonical validation before downstream use.
@@ -176,36 +164,42 @@ External ChatGPT reviewer approved Phase 12 implementation and handoff commits a
 - Actor/provider identity is not cryptographically authenticated; known-field redaction is not full DLP; single-writer/quiescent filesystem assumptions remain.
 
 ## Required Fixes / Remaining Work
-Independent review fixes and re-review are complete; no important findings remain.
-External review is PASS; no required Phase 12 fixes remain.
-Finalization includes offline regression/checks on aligned master; exact commands,
-exit receipts and XML totals are retained in the finalization evidence directory
-and reported in the Phase 12 Finalization Report.
-Phase 13 implementation requires a separate task and is not started by this approval.
+No unresolved Critical/Important technical findings. Four Important findings were
+fixed in one pass with ten observed RED-to-GREEN cases and green final regressions.
+No second technical review or authoritative self-review is claimed. External ChatGPT
+review must return PASS / REVISE / BLOCKED; credentialed live quality remains unverified.
+No Phase 14 implementation, fallback, consensus or stable promotion is authorized.
 
 ## Warnings / Known Issues
-- SDK is pinned and two necessary private compatibility guards fail closed on layout drift.
-- Cross-resource dispatch/journal writes are not atomic; ambiguous intent requires inspection.
-- Single writer per provider state root; stronger process concurrency/durability is deferred.
-- Provider-native sandbox is an execution boundary; prompt prose is not enforceable authority.
-- No native approval bridge, provider fallback or semantic Independent LLM Reviewer.
-- Known-field redaction is not full DLP; caller controls diagnostic retention and access.
-- Python 3.11/non-Windows runtime execution remains unverified.
-- Live cancellation/session-loss behavior remains unverified.
-- Actor/provider identity is not cryptographically authenticated; exactly-once provider execution is not claimed.
+- Live LLM validation is blocked by absent API authentication; this is not worker REVISE.
+- Model judgments can be mistaken; prompt framing is not an execution/injection proof.
+- Hashes give integrity/correlation, not authenticated origin or reviewer authority.
+- Raw/journal/canonical publication is not a single transaction; exactly-once paid review is not claimed.
+- Unknown/stale locks and ambiguous dispatch intents require owner inspection; never blind resend/removal.
+- Single-writer/quiescent filesystem assumptions; stronger concurrency/durability are deferred.
+- Sync compatibility blocks the Controller caller; async callers can use review_async.
+- Timeout/cancellation does not prove remote processing/billing stopped.
+- Known credential redaction is not full DLP; caller controls retention/authorized roots.
+- Public schemas and Phase 00–12 behavior remain contracts; canonical boundary revalidation is mandatory.
+- Existing Codex native approval bridge remains unavailable; live cancellation/session loss remain unverified.
+- Python 3.11/non-Windows execution remains unverified.
 
 ## Recovery Notes
-Read exact task/workspace digest and provider thread/turn before resume. Never guess dispatch,
-resend uncertain interrupt, reset/clean user work, remove unknown locks or infer phase PASS.
+Inspect exact manifest/config/request/response and attempt digests before replay.
+Verified received/completed records can resume without paid dispatch. Ambiguous intent,
+corrupt records and unknown human edits/locks must be preserved for owner inspection.
+No destructive reset/clean/force operations or real-repository recovery are authorized.
 
 ## Next Action
-Await a separate Phase 13 implementation task after the Phase 12 Finalization Report.
-Next authorized phase is Phase 13 — Independent LLM Reviewer, status NOT_STARTED.
-Automatic next-phase execution is DISABLED; do not create its branch or implement it in this turn.
+Submit Phase 13 results to the external ChatGPT reviewer and wait for
+PASS / REVISE / BLOCKED decision.
+Automatic next-phase execution is DISABLED. No Phase 13 PASS tag or Phase 14 work.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CODEX_ADAPTER.md,
-docs/superpowers/specs/2026-10-03-phase-12-design.md and the Phase 12 plan.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md,
+docs/INDEPENDENT_LLM_REVIEWER.md, docs/PHASE_13_EVIDENCE.md,
+docs/superpowers/specs/2026-10-04-phase-13-design.md and the Phase 13 plan.
 
 ## Timestamp
-2026-10-04 Asia/Bangkok — external Phase 12 PASS; administrative finalization.
+2026-10-04 Asia/Bangkok — final regression completed 13:44; Phase 13 AWAITING_REVIEW,
+external gate PENDING.

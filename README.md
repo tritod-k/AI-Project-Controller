@@ -189,3 +189,14 @@ and confirmed cancellation without replacement dispatch. The CLI remains help-on
 Install the optional extra with `pip install -e '.[dev,codex]'`; ordinary tests remain
 offline. See [Codex setup, safety and lifecycle](docs/CODEX_ADAPTER.md) and
 [Phase 12 evidence](docs/PHASE_12_EVIDENCE.md). Independent LLM review remains Phase 13.
+
+## Phase 13 Independent LLM Reviewer
+
+The independent reviewer combines bounded semantic evidence judgment with existing
+objective checks and emits the unchanged canonical ReviewResult. Its optional
+official OpenAI Responses transport has no tools, worker session or hidden context.
+Audit records bind exact attempt/input hashes and guard ambiguous paid-call resume;
+the existing Gate retains authorization authority. Install with
+`pip install -e '.[dev,reviewer]'`; model/authentication are explicit and live smoke
+is opt-in. No fallback, consensus or Phase 14 provider is implemented. See
+[reviewer boundaries and restart limits](docs/INDEPENDENT_LLM_REVIEWER.md).

@@ -116,3 +116,11 @@ Two pin-specific private guards prevent default low-level acceptance and verify 
 host tool/sandbox policy; lifecycle uses public SDK APIs. Turns inherit the validated
 thread sandbox. Provider operational errors use existing interruption seams; worker
 completion is not Phase Gate PASS. See [Codex boundary](CODEX_ADAPTER.md).
+
+Phase 13 adds provider-neutral `aipc.review.llm` request selection, semantic
+normalization, audit and Reviewer compatibility. Only `aipc.adapters.openai.reviewer`
+imports the optional official Responses SDK. Raw structured proposals stop at local
+validation before canonical ReviewResult and the unchanged Gate/Controller. Fixed
+instructions are separate from bounded untrusted evidence; no worker session/tools
+are passed. Audit writes use an explicit disjoint root. See
+[independent reviewer](INDEPENDENT_LLM_REVIEWER.md) for authority and restart limits.
