@@ -124,3 +124,13 @@ validation before canonical ReviewResult and the unchanged Gate/Controller. Fixe
 instructions are separate from bounded untrusted evidence; no worker session/tools
 are passed. Audit writes use an explicit disjoint root. See
 [independent reviewer](INDEPENDENT_LLM_REVIEWER.md) for authority and restart limits.
+
+## Phase 14 provider boundary
+
+ClaudeAdapter -> ClaudeTransport -> public ClaudeSDKClient supplies provider-local
+structured messages; ClaudeRawResult -> ClaudeNormalizer -> validated AgentResult
+uses the unchanged Controller/Evidence/Reviewer/Gate pipeline. Core imports contain
+no Claude branches. Approval policy stays in Phase 11; native permissions never
+authorize AIPC actions. The official bridge remains capability false/tools denied
+pending real-runtime proof, and native Windows sandbox absence blocks live runs.
+See [Claude lifecycle and explicit limits](CLAUDE_ADAPTER.md).

@@ -7,37 +7,37 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 13 — Independent LLM Reviewer
+Phase 14 — Claude Adapter
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
 `aipc-phase-13-pass` — manual stable checkpoint authorized by external Phase 13 PASS.
-Its exact PASS-state commit/tag target is recorded in the Phase 13 Finalization Report.
+Exact target: `bb51456a24b7a63b95538342a1dac76e86692ec0`.
 Previous `aipc-phase-12-pass` — `82c7d9dec5b606881bf7c02043ae0ccc6b34d82b`.
 Previous `aipc-phase-11-pass` — `8a937057f43e4b0443a0a87668407ef79e7aaf4b`.
 All previous PASS tags remain unchanged.
 
 ## Current Branch / Worktree
-Stable branch: `master`, checkout `H:/000ProjectCode/AI_Project_Controller`.
-Approved history is integrated from `codex/phase-13-attempt-01` without rewriting it.
-No Phase 14 implementation branch or work is created by this finalization.
+Attempt branch: `codex/phase-14-attempt-01`, checkout `H:/000ProjectCode/AI_Project_Controller`.
+Created from verified `aipc-phase-13-pass`; stable `master` and all PASS tags remain unchanged.
 
 ## Last Commit
-Phase 13 pre-attempt HEAD: `82c7d9dec5b606881bf7c02043ae0ccc6b34d82b`.
-Approved Phase 13 implementation and documentation/handoff commit:
-`edc20cf1d7106e58ad91cdfb522d750d449f108a`.
-Message: `AIPC Phase 13 attempt 01 - independent llm reviewer`.
-The subsequent PASS-state commit is identified by `aipc-phase-13-pass` and its exact
-hash in the finalization report; it changes this state document only.
-Preserved approved Phase 12 implementation: `5daa6f0db4de52e05945f0117735918142aabba0`.
+Phase 14 pre-attempt HEAD: `bb51456a24b7a63b95538342a1dac76e86692ec0`.
+Containing implementation/documentation/state commit:
+`AIPC Phase 14 attempt 01 - claude adapter` on `codex/phase-14-attempt-01`.
+Its actual full SHA is supplied in the final Phase Completion Report and retained
+at `.superpowers/sdd/2026-10-04-phase-14/handoff.json`; a commit cannot embed its own hash.
+Historical approved Phase 13 attempt: `edc20cf1d7106e58ad91cdfb522d750d449f108a`.
+Phase 13 stable/PASS-state: `bb51456a24b7a63b95538342a1dac76e86692ec0`.
+Preserved Phase 12 implementation: `5daa6f0db4de52e05945f0117735918142aabba0`.
 Preserved Phase 12 handoff: `93e31a1fec51659e04b6cb95b6d4b7e49aea594b`.
 
 ## Completed Phases
@@ -62,10 +62,10 @@ COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a` integrated on master.
 MASTER_PLAN.md and AGENTS.md retain the aligned Phase 00–22 roadmap.
 
 ## Authorized Current Phase
-Phase 13 is finalized. This session performs administrative finalization only.
+Phase 14 — Claude Adapter, implementation attempt only. No later phase is authorized.
 
 ## Next Authorized Phase
-Phase 14 — Claude Adapter
+Phase 15 — Gemini Adapter: NOT_AUTHORIZED. Await external Phase 14 review.
 
 ## Phase 12 Status
 PASS
@@ -74,61 +74,66 @@ PASS
 PASS
 
 ## Phase 14 Status
-NOT_STARTED
+AWAITING_REVIEW
 
 ## Current Work
-Independent provider-neutral semantic reviewer with deterministic bounded request,
-private proposal normalization, canonical ReviewResult and restart audit. Optional
-fresh tool-free OpenAI Responses transport is separate from Codex workers. Existing
-Controller/PhaseGate/canonical contracts/public schemas are unchanged. Fresh technical
-review found four Important issues; ten RED/GREEN regressions verify the fixes.
-External reviewer approved the exact implementation/handoff commit above. Manual
-external approval authorizes this stable checkpoint; the new reviewer does not
-self-review or self-authorize the real repository. Credentialed live quality remains
-UNVERIFIED and is an accepted implementation limitation.
+Optional ClaudeSDKClient transport, exact session/run/task/workspace journal,
+bounded raw projection and ClaudeNormalizer, and same-session permission correlation.
+All SDK types remain in the Claude provider package. Existing Controller, Approval
+Router, Evidence Collector, Reviewer/Gate, Version/Recovery and canonical schemas
+remain unchanged. Official approval_events=FALSE and every tool is denied until a
+real supported-runtime permission-engine proof exists; verified fake transport
+demonstrates offline approval/denial only. No deferred-tool approval resume.
+Phase 15/Gemini, routing/fallback and consensus are NOT_IMPLEMENTED.
 
 ## Tests
-Stable Phase 12 baseline: 1322 passed. Phase 13 adds 123 tests.
-Final full regression: 1445/1445 passed in 7741.57 seconds, exit 0.
-Final explicit component regression: 934/934 passed in 7698.50 seconds, exit 0.
-Both XML reports contain zero failures, errors or skips; all 123 Phase 13 cases pass
-in both runs. All 197 frozen source/test/schema/config inputs remain unchanged.
-Ruff check and format (180 files), pip check, all six schema checks, CLI help and
-git diff --check pass. Final wheel and isolated SDK-free base installation pass;
-all eleven new product modules match source, wheel and installed bytes.
-Approved implementation results above remain historical verification evidence at
-`.superpowers/sdd/2026-10-04-phase-13/`.
-Finalization reruns are retained separately at
-`.superpowers/sdd/2026-10-04-phase-13-finalization/`; fresh exit codes/XML totals and
-unchanged-source/tag checks are verified before returning the Finalization Report.
-Historical Phase 12 finalization receipts remain unchanged at
-`.superpowers/sdd/2026-10-04-phase-12-finalization/`.
+Stable Phase 13 baseline: 1445 tests. Phase 14 adds 119 cases:
+112 Claude cases plus seven additional cases in the shared adapter factory.
+Final full regression: 1564/1564 passed in 8590.44s, exit 0.
+Final explicit component regression: 1053/1053 passed in 8582.15s, exit 0.
+Final Claude/shared subset: 133/133 passed in 263.50s, exit 0.
+All three JUnit XML reports contain zero failures, errors or skips; all 112 Claude
+cases pass in both whole/component suites. All 219 frozen inputs are unchanged.
+Ruff check/format (201 files), pip check, CLI help, all six schema drift checks,
+wheel build and SDK-free base installation pass. All ten Claude modules match source,
+wheel and installed bytes. Core, canonical models and public schemas are unchanged.
+Four Important technical findings fixed in one pass; ten witnessed RED/GREEN cases
+plus an additional dispatch-failure cleanup guard verify the fixes.
+Historical Phase 00–13 evidence remains unchanged. Actual commands, exits, XML,
+input/package digests and handoff receipt: `.superpowers/sdd/2026-10-04-phase-14/`.
+LIVE results below remain separate; blocked/not-run tasks are never counted as PASS.
 
 ## Runtime / Reviewer Boundaries
-Python 3.13.0 / Windows; official optional SDK `openai==3.24.0`, public Responses API.
-Live reviewer model: UNCONFIGURED; reasoning: not configured; API authentication absent.
-No secrets printed or retained. Prompt version: `independent-review-v1`.
-Fresh SDK client/request, no worker thread/turn/session, no previous response or tools.
-Explicit worker model provenance is optional and unknown when not supplied by caller.
-Canonical context/evidence revalidated before paid review, after response and at Gate.
+Python 3.13.0 / native Windows; optional claude-agent-sdk==0.2.159,
+bundled CLI 2.1.281. Installed SDK/runtime were inspected before design.
+Authentication: loggedIn=false / authMethod=none; no supported auth environment
+source present. No credential files/values copied or reported, and no login started.
+Model: provider default, actual model UNOBSERVED. Required native Windows sandbox
+is unavailable. Live execution is BLOCKED; no paid task request was dispatched.
+Production permission_mode=default, allowed_tools=[], setting_sources=[], empty
+strict MCP set, no additional writable directories, sandbox enabled with explicit
+failIfUnavailable=true and no unsandboxed fallback.
 
 ## Live Evidence
-Historical implementation smoke: AUTH was BLOCKED with
-LIVE_REVIEW_BLOCKED_AUTH_REQUIRED; remaining five cases were SKIPPED_WITH_REASON.
-Finalization does not rerun a live paid review:
-LIVE AUTH: BLOCKED / NOT RE-RUN — authentication was unavailable.
-LIVE PASS REVIEW: UNVERIFIED.
-LIVE REVISE REVIEW: UNVERIFIED.
-LIVE SEMANTIC REVIEW: UNVERIFIED.
-LIVE INJECTION REVIEW: UNVERIFIED.
-LIVE CODEX→LLM PIPELINE: UNVERIFIED.
-No paid request was made during finalization and no new reviewer self-approved this implementation.
+Opt-in official readiness probe ran with AIPC_CLAUDE_LIVE=1; safe receipt retained.
+LIVE AUTH/RUNTIME: BLOCKED_WITH_REASON — native Windows sandbox unavailable,
+AUTH_REQUIRED and real-runtime permission bridge not yet demonstrated.
+LIVE READ: UNVERIFIED / NOT_RUN.
+LIVE WRITE: UNVERIFIED / NOT_RUN.
+LIVE DENY: UNVERIFIED / NOT_RUN.
+LIVE RESUME: UNVERIFIED / NOT_RUN.
+LIVE CANCEL: UNVERIFIED / NOT_RUN.
+LIVE CONTROLLER: UNVERIFIED / NOT_RUN.
+Zero paid provider calls and zero live mutation calls. SDK fake-client and fake
+transport results are OFFLINE evidence, never substituted for real-runtime proof.
 
 ## Last Reviewer Result
-PASS
-External ChatGPT reviewer approved Phase 13 implementation and handoff commit
-`edc20cf1d7106e58ad91cdfb522d750d449f108a` with live quality explicitly UNVERIFIED.
-The external/manual review, not model output or technical review, authorizes finalization.
+Phase 14: PENDING external review. One fresh technical reviewer found four
+Important issues, all fixed with observed regressions and green final full/component
+suites; no Critical or deferred Minor finding remains. Initial Astra review seat
+failed without findings due to usage limits; fresh Sol reviewer filled that seat.
+Technical review is not Phase Gate authorization. Historical Phase 13 remains PASS.
+No worker/model self-authorizes Phase 14, stable promotion or the next phase.
 
 ## Preserved Reviewer Notes
 
@@ -182,13 +187,12 @@ The external/manual review, not model output or technical review, authorizes fin
 - Actor/provider identity is not cryptographically authenticated; known-field redaction is not full DLP; single-writer/quiescent filesystem assumptions remain.
 
 ## Required Fixes / Remaining Work
-No unresolved Critical/Important technical findings. Four Important findings were
-fixed in one pass with ten observed RED-to-GREEN cases and green final regressions.
-External review is PASS; no required Phase 13 implementation fixes remain.
-Finalization includes state-only integration and offline regression on master;
-actual command/exit/XML receipts are retained in the finalization evidence directory
-and reported in the Phase 13 Finalization Report. Phase 14 requires a separate task;
-no Claude, fallback/routing or consensus implementation begins in this turn.
+No unresolved Critical/Important technical findings after the single fix pass
+and final regression. Submit the coherent Phase 14 attempt for external PASS /
+REVISE / BLOCKED decision; do not self-promote. Native Windows sandbox, absent auth
+and lack of a real-runtime permission-engine proof block live tasks. Real Claude
+tool usability remains unavailable pending supported-runtime validation; never
+broaden execution authority or remove sandbox requirements to obtain proof.
 
 ## Phase 13 External Reviewer Notes
 
@@ -212,34 +216,33 @@ no Claude, fallback/routing or consensus implementation begins in this turn.
 - Python 3.11 and non-Windows execution remain unverified.
 
 ## Warnings / Known Issues
-- Live LLM validation is blocked by absent API authentication; this is not worker REVISE.
-- Model judgments can be mistaken; prompt framing is not an execution/injection proof.
-- Hashes give integrity/correlation, not authenticated origin or reviewer authority.
-- Raw/journal/canonical publication is not a single transaction; exactly-once paid review is not claimed.
-- Unknown/stale locks and ambiguous dispatch intents require owner inspection; never blind resend/removal.
-- Single-writer/quiescent filesystem assumptions; stronger concurrency/durability are deferred.
-- Sync compatibility blocks the Controller caller; async callers can use review_async.
-- Timeout/cancellation does not prove remote processing/billing stopped.
-- Known credential redaction is not full DLP; caller controls retention/authorized roots.
-- Public schemas and Phase 00–12 behavior remain contracts; canonical boundary revalidation is mandatory.
-- Existing Codex native approval bridge remains unavailable; live cancellation/session loss remain unverified.
-- Python 3.11/non-Windows execution remains unverified.
+- Official approval_events=FALSE; real Claude tools are all denied pending live bridge proof.
+- Native Windows sandbox and authentication block all live task smokes.
+- Key/environment presence is readiness only, not evidence of a paid request.
+- Active permission futures cannot survive restart; ambiguous intents require inspection.
+- SDK query/tool effects and journal publication are not one atomic transaction.
+- Single-writer/quiescent filesystem assumptions; no exactly-once API/tool/billing claim.
+- Command claims lack exit receipts; test evidence is absent unless separately observed.
+- Hashes provide integrity/correlation, not origin or caller-authority authentication.
+- Known-field redaction is not full DLP; caller owns raw retention and authorized roots.
+- Python 3.11/non-Windows and real-model resume/cancel/deny remain unverified.
+- Existing Independent LLM Reviewer live quality and Codex live cancellation limitations remain.
+- No automatic recovery, provider fallback, phase advancement or stable publication.
 
 ## Recovery Notes
-Inspect exact manifest/config/request/response and attempt digests before replay.
-Verified received/completed records can resume without paid dispatch. Ambiguous intent,
-corrupt records and unknown human edits/locks must be preserved for owner inspection.
-No destructive reset/clean/force operations or real-repository recovery are authorized.
+Inspect exact AIPC run/task/config/workspace/session and journal stages before
+continuation. Fresh terminal replay requires no provider query. Active/deferred,
+DISPATCH_INTENT, CANCEL_INTENT and ambiguous permission decisions never blindly
+resume/replay. Unknown human edits and corrupt journals remain preserved. Explicit
+successful-turn continuation reuses the owned session; a new repair attempt uses
+a new session. Remote interruption requires an observed aborted terminal reason.
+No destructive reset/clean/force operations or real-repository recovery authorized.
 
 ## Next Action
-Await a separate Phase 14 implementation task after the Phase 13 Finalization Report.
-Next authorized phase is Phase 14 — Claude Adapter, status NOT_STARTED.
-Automatic next-phase execution is DISABLED; do not create its branch or implement it in this turn.
+Submit Phase 14 results to the external ChatGPT reviewer and wait for PASS / REVISE / BLOCKED decision. Stop; do not create a Phase 15 branch, merge master or create a PASS tag.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md,
-docs/INDEPENDENT_LLM_REVIEWER.md, docs/PHASE_13_EVIDENCE.md,
-docs/superpowers/specs/2026-10-04-phase-13-design.md and the Phase 13 plan.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CLAUDE_ADAPTER.md, Phase 14 spec/plan and `.superpowers/sdd/2026-10-04-phase-14/progress.md`.
 
 ## Timestamp
-2026-10-04 Asia/Bangkok — external Phase 13 PASS; administrative finalization.
+2026-10-04 Asia/Bangkok — Phase 14 Attempt 01 verified; AWAITING_REVIEW / PENDING.

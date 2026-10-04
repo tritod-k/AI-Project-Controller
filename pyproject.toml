@@ -12,6 +12,7 @@ dependencies = ["pydantic>=2.10,<3", "PyYAML>=6.0.2,<7"]
 
 [project.optional-dependencies]
 codex = ["openai-codex==0.160.0"]
+claude = ["claude-agent-sdk==0.2.159"]
 reviewer = ["openai==3.24.0"]
 dev = ["pytest>=8", "ruff>=0.6", "jsonschema>=4.18,<5", "rfc3339-validator>=0.1.4"]
 

@@ -8,7 +8,7 @@ import pytest
 from aipc.domain.models import AgentResult, TaskRequest
 
 
-@pytest.fixture(params=["mock", "codex"])
+@pytest.fixture(params=["mock", "codex", "claude"])
 def adapter_factory(request, tmp_path):
     # Extend this factory table with controlled future adapter environments.
     factories = {
@@ -16,6 +16,10 @@ def adapter_factory(request, tmp_path):
             scenario=mode
         )
     }
+    if request.param == "claude":
+        from tests.claude.support import worker
+
+        return lambda mode: worker(tmp_path, mode)
     if request.param == "codex":
         from tests.codex.support import FakeTransport
 

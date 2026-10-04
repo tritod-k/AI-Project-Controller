@@ -2730,6 +2730,11 @@ The reviewer must:
 
 # Phase 14 — Claude Adapter
 
+Implementation contracts and current live-runtime limitations are documented in
+[Claude Adapter](docs/CLAUDE_ADAPTER.md). The official SDK transport fails closed
+without sandbox support or proven tool-interception compatibility; offline tests
+must never be reported as live provider proof. Core contracts and roadmap stay unchanged.
+
 ## Goal
 
 Prove provider replaceability.

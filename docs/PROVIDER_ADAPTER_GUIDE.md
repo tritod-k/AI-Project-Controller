@@ -45,3 +45,11 @@ public official SDK methods for fresh, strict, tool-free Responses calls. It nev
 reuses Codex thread/turn/session objects or worker transports. Provider syntax is
 projected to a private raw result and normalized before canonical ReviewResult.
 See [reviewer setup and boundaries](INDEPENDENT_LLM_REVIEWER.md).
+
+## Phase 14 Claude provider
+
+The optional `aipc.adapters.claude` package implements the existing execution and
+normalization contracts without changing core interfaces or public schemas.
+Its synthetic same-session callback bridge is offline verified. Official SDK tools
+remain denied and approval_events=false until live interception compatibility is
+established on a supported sandbox host. See [Claude adapter](CLAUDE_ADAPTER.md).

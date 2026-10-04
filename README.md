@@ -200,3 +200,13 @@ the existing Gate retains authorization authority. Install with
 `pip install -e '.[dev,reviewer]'`; model/authentication are explicit and live smoke
 is opt-in. No fallback, consensus or Phase 14 provider is implemented. See
 [reviewer boundaries and restart limits](docs/INDEPENDENT_LLM_REVIEWER.md).
+
+## Phase 14 Claude Adapter
+
+The optional Claude SDK transport, exact session journal, raw projection and normalizer
+use existing provider-neutral interfaces. Install `pip install -e '.[dev,claude]'`.
+Offline same-session approval tests exercise the existing Router/Controller boundary.
+The official transport currently advertises approval_events=false and denies tools
+until supported-runtime interception is verified. Native Windows lacks the required
+sandbox; live Claude execution is blocked without downgrading isolation. See
+[Claude setup, permissions and readiness limits](docs/CLAUDE_ADAPTER.md).
