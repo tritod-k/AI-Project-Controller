@@ -9,6 +9,21 @@ Controller -> AgentAdapter -> GeminiAdapter -> GeminiTransport -> Gemini CLI
 GeminiRawResult -> GeminiNormalizer -> validated AgentResult
 ```
 
+## External implementation approval
+
+Phase 15 implementation and OFFLINE AgentAdapter/Normalizer contracts: **PASS**
+for `fa29bea9e285c67c7c21adac47e2e59fd4b0f7c7` after external review.
+Production Gemini coding/runtime capability remains **NOT READY / BLOCKED**.
+`approval_events` remains **FALSE**; AIPC approval bridge remains
+**UNVERIFIED / NOT IMPLEMENTED**; live compatibility remains **UNVERIFIED**.
+This acceptance does not enable tools, native permissions or runtime launch.
+
+Phase 16 Agent Router MUST route according to proven provider capabilities,
+not merely adapter existence. Codex remains a previously live validated worker;
+Claude and Gemini implementations PASS while production coding/tool capabilities
+remain blocked. Neither may be selected for tasks requiring unavailable/unverified
+coding/tool capabilities. Router/fallback and consensus are not implemented.
+
 ## Actual readiness and production restriction
 
 This host has Python 3.13.0, Node 24.18.0 and npm 11.18.0. Gemini CLI is absent
