@@ -2,7 +2,9 @@
 
 Stable starting point: `aipc-phase-21-pass` / `f277426cad7a2e4fd231319b819b9bdb581df831`.
 Attempt branch: `codex/phase-22-attempt-01`.
-Status: AWAITING_REVIEW (Phase Gate: PENDING).
+Status: PASS (Phase Gate PASS under Commander-delegated Controller authority).
+Stable checkpoint: `aipc-phase-22-pass`.
+Roadmap Status: ALL 23 PHASES (00–22) COMPLETE.
 
 ---
 
