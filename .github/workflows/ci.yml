@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -55,6 +57,8 @@ jobs:
           python -m pip install build
           python -m build --wheel
 
-      - name: Run Fast Unit, Contract & Hardening Test Suites
+      - name: Run Fast Unit, Contract, Hardening & Plugin Test Suites
         run: |
-          pytest tests/unit tests/contract tests/routing tests/consensus tests/observability tests/dashboard tests/mcp tests/hardening -q
+          git config --global user.name "AIPC CI"
+          git config --global user.email "ci@aipc.local"
+          python -m pytest tests/unit tests/contract tests/routing/test_router.py tests/routing/test_structure.py tests/consensus/test_consensus.py tests/observability/test_metrics.py tests/dashboard/test_dashboard.py tests/mcp/test_mcp_tools.py tests/hardening/test_production_hardening.py tests/plugins/test_plugin_extension_model.py -q
