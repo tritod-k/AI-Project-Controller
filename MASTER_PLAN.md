@@ -2846,6 +2846,8 @@ Recommended implementation order:
 3. all_required
 4. majority
 
+See [Multi-Reviewer Consensus documentation](docs/CONSENSUS_REVIEW.md).
+
 ---
 
 # Phase 18 — Cost, Usage, and Performance Tracking

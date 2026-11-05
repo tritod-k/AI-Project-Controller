@@ -1,6 +1,15 @@
 """Offline provider-neutral review contracts and reference review implementation."""
 
-from aipc.review.errors import PhaseGateError, ReviewContextError
+from aipc.review.consensus import (
+    ConsensusDecision,
+    ConsensusEngine,
+    ConsensusMode,
+    ConsensusPolicy,
+    ConsensusReviewer,
+    MemberReviewRecord,
+    ReviewerSlot,
+)
+from aipc.review.errors import ConsensusError, PhaseGateError, ReviewContextError
 from aipc.review.gate import PhaseGate
 from aipc.review.models import (
     BoundReview,
@@ -15,9 +24,16 @@ from aipc.review.reviewer import DeterministicReviewer, Reviewer, bind_review
 
 __all__ = [
     "BoundReview",
+    "ConsensusDecision",
+    "ConsensusEngine",
+    "ConsensusError",
+    "ConsensusMode",
+    "ConsensusPolicy",
+    "ConsensusReviewer",
     "CriterionRule",
     "DeterministicReviewer",
     "GateAction",
+    "MemberReviewRecord",
     "PhaseGate",
     "PhaseGateDecision",
     "PhaseGateError",
@@ -26,5 +42,6 @@ __all__ = [
     "ReviewContextError",
     "ReviewProvenance",
     "Reviewer",
+    "ReviewerSlot",
     "bind_review",
 ]

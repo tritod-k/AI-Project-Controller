@@ -7,3 +7,7 @@ class ReviewContextError(Exception):
 
 class PhaseGateError(Exception):
     """A review is inconsistent, stale or ineligible for gate evaluation."""
+
+
+class ConsensusError(Exception):
+    """Consensus policy, member isolation or aggregation failure."""

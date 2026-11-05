@@ -7,32 +7,30 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 16 — Agent Router + Fallback
+Phase 17 — Multi-Reviewer / Consensus
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-16-pass` — the containing Phase 16 PASS-state commit.
+`aipc-phase-16-pass` — `1569ddddca3fcfd716609e4162a417b33a91425b`.
 Previous `aipc-phase-15-pass` — `ca593556583287716b61a6fb81a7ec8e9807d3b8`.
-All previous PASS tags remain unchanged. The Commander/Controller review workflow
-authorizes this checkpoint and history-preserving integration into master.
+All existing PASS tags and master remain unchanged.
 
 ## Current Branch / Worktree
-`codex/phase-16-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
-Created from the approved Phase 15 stable tag; no master integration or new PASS tag.
+`codex/phase-17-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
+Created from the approved Phase 16 stable tag; no master integration or new PASS tag.
 
 ## Last Commit
-Approved Phase 16 implementation/handoff: `203560f313fced05758cad3f4fefd9717aee4d5c`.
-Message: `AIPC Phase 16 attempt 01 - agent router and fallback`.
-Phase 16 containing PASS-state commit: `AIPC Phase 16 PASS - agent router and fallback`.
-Approved Phase 15 stable target: `ca593556583287716b61a6fb81a7ec8e9807d3b8`.
+Starting approved HEAD: `1569ddddca3fcfd716609e4162a417b33a91425b` (`aipc-phase-16-pass`).
+Phase 16 approved implementation/handoff: `1569ddddca3fcfd716609e4162a417b33a91425b`.
+Phase 17 implementation is in progress; no attempt commit yet.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -57,11 +55,11 @@ Approved Phase 15 stable target: `ca593556583287716b61a6fb81a7ec8e9807d3b8`.
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 16 — Agent Router + Fallback, Attempt 01 only, explicitly authorized
-by the human-supplied implementation blueprint.
+Phase 17 — Multi-Reviewer / Consensus, Attempt 01 only, explicitly authorized
+by Commander.
 
 ## Next Authorized Phase
-Phase 17 — Multi-Reviewer / Consensus
+Phase 18 — Cost, Usage, and Performance Tracking
 
 ## Phase 15 Status
 PASS (implementation; external review). OFFLINE contracts PASS; production
@@ -71,18 +69,17 @@ coding/runtime NOT READY / BLOCKED. This does not authorize Gemini production us
 PASS. Worker routing and bounded no-effect fallback completed and approved.
 
 ## Current Work
-Implementation completed for provider-neutral pure Registry-backed AgentRouter,
-typed capability observations, deterministic explicit/policy routing, Controller
-dispatch flow, and no-effects fallback. Completed minimal targeted fix and
-validation for corrupt journal detection (enforcing routed: StrictBool = False on
-RunRecord and ControllerJournal). All RED/GREEN tasks finished; handoff
-documentation and evidence compiled for review.
+Implementation completed for provider-neutral Multi-Reviewer Consensus supporting
+four distinct modes (single, primary_with_veto, all_required, majority). Reviewer
+isolation enforced via deep copying, worker self-review prohibited, and
+infrastructure errors/blockers fail closed. Fast targeted unit tests and Controller
+integration tests verified 100% green.
 
 ## Tests
-Routing targeted test suite: 59 passed, 0 failed (tests/routing). Contract suite:
-98 passed, 0 failed (tests/contract). Controller contracts: 15 passed, 0 failed.
-Legacy non-routed Controller lifecycle smoke: 1 passed in 77.3s. Quality harness
-(run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
+Consensus unit tests: 12 passed in 3.52s (tests/consensus/test_consensus.py).
+Controller integration: 2 passed in 134.29s (tests/consensus/test_consensus_controller.py).
+Contract suite: 98 passed in 14.57s (tests/contract). Controller contracts: 15 passed.
+Quality harness (run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
 project-schemas, cli-help, diff-check, wheel, base-install, base-import). Static
 analysis: Ruff check 0 errors, 21 files properly formatted.
 
@@ -173,8 +170,8 @@ capabilities. No Router/fallback or consensus is implemented; automatic next-pha
 execution remains disabled.
 
 ## Last Reviewer Result
-Phase 16 review: PASS. Under Commander-delegated Controller & Phase Gate Authority,
-Phase 16 Attempt 01 (203560f313fced05758cad3f4fefd9717aee4d5c) was approved.
+Phase 17 review: PENDING. Fresh whole-branch technical review not yet run.
+Phase 16 external implementation PASS remains approved historical evidence.
 
 ## Preserved Reviewer Notes
 - Required FAIL/UNVERIFIED and conflicting evidence cannot become PASS.
@@ -259,7 +256,7 @@ limitations do not enable unavailable capabilities or weaken fail-closed behavio
 All substantive RED/GREEN implementation and verification fixes completed.
 External technical review and Phase Gate decision pending. Commit creation and
 remote push pending human Commander authorization. Do not create PASS tag, merge
-or begin Phase 17.
+or begin Phase 18.
 
 ## Warnings / Known Issues
 Single-writer/quiescent access; provider dispatch/journal writes are nontransactional.
@@ -276,12 +273,13 @@ Do not blindly resume active prompts, resend cancel, remove locks or reset works
 No real-repository recovery is exercised by this phase.
 
 ## Next Action
-Ready to begin Phase 17 — Multi-Reviewer / Consensus (or resume in Codex Desktop / Gemini / Claude).
+Submit Phase 17 completion report and evidence to human Commander and external
+Phase Gate reviewer for review and commit/push authorization.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/AGENT_ROUTER.md,
-Phase 16 spec/plan and .superpowers/sdd/2026-10-05-phase-16/progress.md.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CONSENSUS_REVIEW.md,
+Phase 17 spec/plan and tests/consensus/.
 Inspect current diff and test receipts before any continuation.
 
 ## Timestamp
-2026-11-05T10:45:00Z
+2026-11-05T11:05:00Z

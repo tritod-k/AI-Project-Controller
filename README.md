@@ -229,3 +229,12 @@ after terminal no-effect start failure and Recovery clearance. Approval denial,
 cancellation, review failure and ambiguous effects never switch providers. Claude and
 Gemini production coding capabilities remain blocked. See
 [routing, policy and restart contracts](docs/AGENT_ROUTER.md).
+
+## Phase 17 Multi-Reviewer / Consensus
+
+Multi-Reviewer Consensus enables multi-model and multi-evaluator review orchestration
+under four configurable modes (single, primary_with_veto, ll_required, majority).
+Reviewer isolation and worker self-review prohibition fail closed. Infrastructure errors
+and context blockers take strict precedence over majority votes. Aggregated reviews satisfy
+canonical ReviewResult contracts and Phase Gate criteria evaluation without schema changes.
+See [consensus review contracts](docs/CONSENSUS_REVIEW.md).
