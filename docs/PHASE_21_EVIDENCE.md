@@ -2,7 +2,9 @@
 
 Stable starting point: `aipc-phase-20-pass` / `2cb78221ff9cbc879b586f3fbdbfaad9ba7c8b15`.
 Attempt branch: `codex/phase-21-attempt-01`.
-Status: AWAITING_REVIEW (Phase Gate: PENDING).
+Attempt 01 commit: `a1711cfe1b2d3f8639a6653227428093e51dad47`.
+Promotion status: PASS (Phase Gate PASS under Commander-delegated Controller authority).
+Stable checkpoint: `aipc-phase-21-pass`.
 
 ---
 
