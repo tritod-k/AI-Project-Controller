@@ -5,11 +5,13 @@ from .config import CodexAdapterConfig
 from .errors import CodexAdapterError
 from .events import CodexRawResult
 from .normalizer import CodexNormalizer
+from .telemetry import CodexTelemetryExtractor
 
 __all__ = [
     "CodexAdapter",
     "CodexAdapterConfig",
     "CodexAdapterError",
-    "CodexRawResult",
     "CodexNormalizer",
+    "CodexRawResult",
+    "CodexTelemetryExtractor",
 ]

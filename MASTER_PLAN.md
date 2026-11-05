@@ -2870,6 +2870,8 @@ Generate per-agent statistics.
 
 Do not use performance metrics for automatic routing until sufficient historical data exists.
 
+See [Cost and Usage Tracking documentation](docs/COST_AND_USAGE_TRACKING.md).
+
 ---
 
 # Phase 19 — Dashboard/API

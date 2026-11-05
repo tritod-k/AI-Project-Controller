@@ -87,3 +87,9 @@ class GitEvidenceError(EvidenceError):
 
 class TestParseError(EvidenceError):
     """A test log has no supported unambiguous summary."""
+
+
+class TelemetryError(Exception):
+    """Invalid telemetry records, conflicting idempotent replays, malformed provider telemetry
+    metadata, or invalid cost policies.
+    """

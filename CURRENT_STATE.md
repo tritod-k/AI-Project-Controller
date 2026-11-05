@@ -7,27 +7,26 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 17 — Multi-Reviewer / Consensus
+Phase 18 — Cost, Usage, and Performance Tracking
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-17-pass` (containing PASS commit; previous `aipc-phase-16-pass` — `1569ddddca3fcfd716609e4162a417b33a91425b`).
+`aipc-phase-17-pass` (`74bb4974c826cdb00b44259a4af71509d3d56dcf`).
 All previous PASS tags and master remain unchanged.
 
 ## Current Branch / Worktree
-`codex/phase-17-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
-Ready for fast-forward merge into master.
+`codex/phase-18-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-Approved Phase 17 attempt: `56eb9dca0ed562624b1756d01021c4d5bc7c50e9`.
+`74bb4974c826cdb00b44259a4af71509d3d56dcf` (`AIPC Phase 17 PASS - multi-reviewer consensus`).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -53,10 +52,10 @@ Approved Phase 17 attempt: `56eb9dca0ed562624b1756d01021c4d5bc7c50e9`.
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 17 — Multi-Reviewer / Consensus: PASS.
+Phase 18 — Cost, Usage, and Performance Tracking.
 
 ## Next Authorized Phase
-Phase 18 — Cost, Usage, and Performance Tracking
+Phase 19 — Dashboard/API (PENDING Phase 18 external review and Phase Gate PASS).
 
 ## Phase 15 Status
 PASS (implementation; external review). OFFLINE contracts PASS; production
@@ -68,32 +67,31 @@ PASS. Worker routing and bounded no-effect fallback completed and approved.
 ## Phase 17 Status
 PASS. Provider-neutral Multi-Reviewer Consensus completed, verified, and approved.
 
+## Phase 18 Status
+AWAITING_REVIEW. Attempt 01 implementation & targeted verification complete.
+Phase Gate: PENDING.
+
 ## Current Work
-Implementation completed for provider-neutral Multi-Reviewer Consensus supporting
-four distinct modes (single, primary_with_veto, all_required, majority). Reviewer
-isolation enforced via deep copying, worker self-review prohibited, and
-infrastructure errors/blockers fail closed. Fast targeted unit tests and Controller
-integration tests verified 100% green.
+Phase 18 implementation completed: provider-neutral observability, extractors for Codex,
+Claude, Gemini, Mock; durable atomic persistence in `MetricsStore` (`MetricsLedger` at
+`{project_id}.metrics.json`); in-place gate finalization; read-only `AgentStatistics` with
+`sufficient_historical_data` boundary (default 10 runs); `MetricsTracker` integration in
+`Controller`; all unit, integration, contract, and quality harness tests verified 100% green.
 
 ## Tests
-Consensus unit tests: 12 passed in 3.52s (tests/consensus/test_consensus.py).
-Controller integration: 2 passed in 134.29s (tests/consensus/test_consensus_controller.py).
-Contract suite: 98 passed in 14.57s (tests/contract). Controller contracts: 15 passed.
+Observability unit tests: 13 passed in 1.31s (tests/observability/test_metrics.py).
+Controller integration: 2 passed in 174.57s (tests/observability/test_controller_metrics.py).
+Contract suite: 98 passed in 17.71s (tests/contract). Controller contracts: 15 passed in 0.41s.
 Quality harness (run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
-project-schemas, cli-help, diff-check, wheel, base-install, base-import). Static
-analysis: Ruff check 0 errors, 21 files properly formatted.
+project-schemas, cli-help, diff-check, wheel, base-install, base-import).
+Static analysis: Ruff check 0 errors, 4 files reformatted, 136 files unchanged.
 
 ## Finalization Evidence Reuse
 The approved Phase 15 implementation previously passed 1661/1661 full regression
-and 1150/1150 relevant component regression. Finalization changed only
-administrative/state/provider-status content. Implementation/test/schema/config/tool
-and dependency-manifest bytes were verified unchanged against the approved Git
-commit and 240 frozen SHA-256 inputs; installed dependency/Python versions also match.
-Therefore the completed regression evidence remains applicable; both large suites
-were reused, not rerun. Fresh targeted finalization: 42 passed, 21 deselected,
-zero failures/errors/skips. Ruff check/format, pip check, four canonical plus two
-project/state schema checks and git diff --check PASS. Receipts are retained in
-`.superpowers/sdd/2026-10-05-phase-15-finalization/`.
+and 1150/1150 relevant component regression. Phase 16 and 17 verified all contracts and
+targeted behavior. Untouched modules from earlier approved phases retain verified
+regression receipts per AGENTS.md Section 31.2. Fresh targeted suites and fast quality
+harness verify all modified and newly introduced Phase 18 components.
 
 ## Gemini Runtime / Security
 Python 3.13.0; Node v24.18.0; npm 11.18.0. Gemini CLI actual version unavailable;
@@ -166,12 +164,12 @@ not merely adapter existence. Codex remains a previously real/live validated cod
 worker. Claude and Gemini adapter implementations PASS, but their production
 coding/tool capabilities remain NOT READY / BLOCKED. Phase 16 must NOT select
 Claude or Gemini for coding/tool execution requiring unavailable/unverified
-capabilities. No Router/fallback or consensus is implemented; automatic next-phase
-execution remains disabled.
+capabilities. No dynamic routing based on telemetry is permitted; routing remains
+strictly deterministic.
 
 ## Last Reviewer Result
-Phase 17 review: PENDING. Fresh whole-branch technical review not yet run.
-Phase 16 external implementation PASS remains approved historical evidence.
+Phase 18 review: PENDING. Fresh whole-branch technical review not yet run.
+Phase 17 external implementation PASS remains approved historical evidence.
 
 ## Preserved Reviewer Notes
 - Required FAIL/UNVERIFIED and conflicting evidence cannot become PASS.
@@ -252,34 +250,37 @@ Redaction is not full DLP; hashes do not authenticate origin. Python 3.11/non-Wi
 and real Gemini runtime behavior remain unverified. These accepted implementation
 limitations do not enable unavailable capabilities or weaken fail-closed behavior.
 
+## Phase 18 Observability Invariants
+- Provider-neutral observability boundary: `aipc.observability` has zero imports of `aipc.adapters`.
+- Provider extractors reside exclusively under `aipc.adapters.<provider>.telemetry`.
+- Never fabricate missing telemetry: omitted provider metrics remain strictly `None`.
+- Historical agent statistics are read-only; `AgentRouter` remains purely static and deterministic.
+- Durable persistence in `MetricsStore` writes to `{project_id}.metrics.json` with atomic replace and replay idempotency.
+- Gate verdict transitions update in-place from `gate_verdict=None` to `gate_verdict=decision.verdict`.
+
 ## Required Fixes / Remaining Work
-All substantive RED/GREEN implementation and verification fixes completed.
+All substantive implementation and verification tasks completed.
 External technical review and Phase Gate decision pending. Commit creation and
 remote push pending human Commander authorization. Do not create PASS tag, merge
-or begin Phase 18.
+or begin Phase 19.
 
 ## Warnings / Known Issues
-Single-writer/quiescent access; provider dispatch/journal writes are nontransactional.
-No exactly-once prompt/tool/approval/billing or cryptographic origin/authority proof.
-Known-field redaction is not universal DLP. Raw reference retention is caller-owned.
-ACP tool locations remain worker claims; shell/test/exit receipts are not invented.
-Python 3.11/non-Windows and all real Gemini execution remain UNVERIFIED.
-No automatic recovery, provider fallback, consensus, stable publication or phase advance.
+Single-writer/quiescent access for metrics store persistence; non-transactional cross-resource
+file writes. Provider telemetry relies on upstream provider metadata fidelity.
 
 ## Recovery Notes
-Inspect exact project/phase/attempt/task/run/session/local-turn/config/workspace
-and persisted intent stages. Preserve unknown human edits/corrupt journals/locks.
-Do not blindly resume active prompts, resend cancel, remove locks or reset workspaces.
-No real-repository recovery is exercised by this phase.
+Inspect exact project/phase/attempt/task/run/session/config/workspace and persisted
+intent stages. Metrics store uses atomic replacement and replay idempotency to safely
+recover from interruptions.
 
 ## Next Action
-Submit Phase 17 completion report and evidence to human Commander and external
-Phase Gate reviewer for review and commit/push authorization.
+Submit Phase 18 completion report and evidence to human Commander and Controller
+for review and commit/push authorization.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/CONSENSUS_REVIEW.md,
-Phase 17 spec/plan and tests/consensus/.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/COST_AND_USAGE_TRACKING.md,
+docs/PHASE_18_EVIDENCE.md, Phase 18 spec/plan, and tests/observability/.
 Inspect current diff and test receipts before any continuation.
 
 ## Timestamp
-2026-11-05T11:05:00Z
+2026-11-05T12:00:00Z

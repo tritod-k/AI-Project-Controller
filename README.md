@@ -233,8 +233,20 @@ Gemini production coding capabilities remain blocked. See
 ## Phase 17 Multi-Reviewer / Consensus
 
 Multi-Reviewer Consensus enables multi-model and multi-evaluator review orchestration
-under four configurable modes (single, primary_with_veto, ll_required, majority).
+under four configurable modes (single, primary_with_veto, all_required, majority).
 Reviewer isolation and worker self-review prohibition fail closed. Infrastructure errors
 and context blockers take strict precedence over majority votes. Aggregated reviews satisfy
 canonical ReviewResult contracts and Phase Gate criteria evaluation without schema changes.
 See [consensus review contracts](docs/CONSENSUS_REVIEW.md).
+
+## Phase 18 Cost, Usage, and Performance Tracking
+
+Phase 18 introduces provider-neutral observability (`src/aipc/observability`) for tracking
+token usage (input, output, cached), wall time, agent turns, tool calls, and model costs.
+Telemetry extraction occurs exclusively within provider adapters (`aipc/adapters/<provider>/telemetry.py`),
+preserving strict provider-neutrality in core logic. Telemetry never fabricates missing metrics;
+unreported values remain strictly `None`. Durable atomic persistence via `MetricsStore` writes
+to `{project_id}.metrics.json` with idempotent replay matching and in-place gate finalization.
+`AgentStatistics` exposes read-only historical metrics with an explicit `sufficient_historical_data`
+boundary (default 10 runs) ensuring `AgentRouter` remains purely deterministic and static.
+See [cost and usage tracking contracts](docs/COST_AND_USAGE_TRACKING.md).

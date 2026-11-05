@@ -35,6 +35,7 @@ from aipc.domain.errors import (
     NormalizationError,
     PromptError,
     StateError,
+    TelemetryError,
     UnknownRunError,
 )
 from aipc.domain.models import AgentResult, ApprovalRequest, TaskRequest
@@ -43,6 +44,7 @@ from aipc.evidence.models import EvidenceContext
 from aipc.evidence.paths import authorized_root
 from aipc.normalization.base import AgentResultNormalizer
 from aipc.normalization.context import NormalizationContext
+from aipc.observability.metrics import MetricsTracker
 from aipc.project.models import ProjectDefinition
 from aipc.project.state_manager import StateManager
 from aipc.project.state_models import ProjectState
@@ -86,6 +88,7 @@ class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
         routing_policy: RoutingPolicy | None = None,
         routing_requirements: TaskRequirements | None = None,
         worker_bindings: dict[str, WorkerBinding] | None = None,
+        metrics_tracker: MetricsTracker | None = None,
     ) -> None:
         if not provider.strip() or not review_authority.strip():
             raise ControllerError("explicit provider identity and reviewer authority required")
@@ -121,6 +124,14 @@ class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
                 if audit.is_relative_to(root) or root.is_relative_to(audit):
                     raise ControllerError(
                         "approval audit root must be disjoint from execution/evidence roots"
+                    )
+        self.metrics_tracker = metrics_tracker
+        if metrics_tracker is not None:
+            metrics_root = metrics_tracker.store.root
+            for root in (versions.repository, versions.worktree_root, self.evidence_destination):
+                if metrics_root.is_relative_to(root) or root.is_relative_to(metrics_root):
+                    raise ControllerError(
+                        "metrics store root must be disjoint from execution/evidence roots"
                     )
         self._active = None
         self._cancellations = {}
@@ -176,6 +187,8 @@ class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
                     for k, v in sorted(self.worker_bindings.items())
                 },
             )
+        if self.metrics_tracker is not None:
+            config["metrics"] = dict(root=str(self.metrics_tracker.store.root))
         return fingerprint(config)
 
     def _write(self, journal, record, stage=None, **changes):
@@ -625,6 +638,7 @@ class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
                 ReviewContextError,
                 PhaseGateError,
                 PromptError,
+                TelemetryError,
                 ValidationError,
                 OSError,
             ) as exc:
@@ -761,6 +775,13 @@ class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
                     self._live(project, record)
                     self.state.transition(project, "CANCELLED")
                     record = self._attempt(journal, record, result=result)
+                    if self.metrics_tracker is not None:
+                        self.metrics_tracker.record_attempt(
+                            TaskRequest.model_validate(a.task),
+                            AgentResult.model_validate(result),
+                            run_id=record.run_id,
+                            gate_verdict=None,
+                        )
                     return self._outcome(journal, record, "CANCELLED")
                 self._live(project, record)
                 head = self.versions.git.clean(Path(a.workspace.path)).head
@@ -768,6 +789,13 @@ class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
                     journal, record, "NORMALIZED", result=result, completed_head=head
                 )
                 a = record.attempts[-1]
+                if self.metrics_tracker is not None:
+                    self.metrics_tracker.record_attempt(
+                        TaskRequest.model_validate(a.task),
+                        AgentResult.model_validate(a.result),
+                        run_id=record.run_id,
+                        gate_verdict=None,
+                    )
             if record.stage in ("NORMALIZED", "CHECKPOINT_INTENT"):
                 self._live(project, record)
                 self.recovery.record_heartbeat()
@@ -834,6 +862,13 @@ class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
                 decision = self.gate.evaluate(a.review, a.context)
                 record = self._attempt(journal, record, "GATED", gate=decision)
                 a = record.attempts[-1]
+                if self.metrics_tracker is not None:
+                    self.metrics_tracker.record_attempt(
+                        TaskRequest.model_validate(a.task),
+                        AgentResult.model_validate(a.result),
+                        run_id=record.run_id,
+                        gate_verdict=decision.verdict,
+                    )
             if record.stage in ("GATED", "STABLE_INTENT", "STABLE_PUBLISHED", "STATE_INTENT"):
                 if a.gate.verdict == "PASS":
                     return self._publish_pass(project, journal, record)

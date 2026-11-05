@@ -134,3 +134,37 @@ no Claude branches. Approval policy stays in Phase 11; native permissions never
 authorize AIPC actions. The official bridge remains capability false/tools denied
 pending real-runtime proof, and native Windows sandbox absence blocks live runs.
 See [Claude lifecycle and explicit limits](CLAUDE_ADAPTER.md).
+
+## Phase 15 provider boundary
+
+GeminiAdapter -> GeminiTransport -> ACP JSON-RPC client supplies provider-local
+turns; GeminiRawResult -> GeminiNormalizer -> validated AgentResult uses the unchanged
+Controller/Evidence/Reviewer/Gate pipeline. Core imports contain no Gemini branches.
+Default transport denies production coding until qualified on host; native CLI/auth
+absence blocks live execution without compromising isolation. See [Gemini boundary](GEMINI_ADAPTER.md).
+
+## Phase 16 deterministic routing and fallback
+
+`aipc.agents.router` evaluates registered adapters against static capability and
+qualification requirements without runtime provider branching. Optional Controller
+routing journals explicit selection events and restricts fallback attempts to terminal
+no-effect failures cleared by RecoveryManager. Approvals, cancellations, and reviews
+never trigger provider fallback. See [Agent Router contracts](AGENT_ROUTER.md).
+
+## Phase 17 multi-reviewer consensus
+
+`aipc.review.consensus` provides multi-model evaluation under four modes (single,
+primary_with_veto, all_required, majority). Reviewer isolation is enforced via deep
+copying; worker self-review is strictly prohibited. Infrastructure errors and context
+blockers take strict fail-closed precedence. Aggregation emits standard canonical
+`ReviewResult` models compatible with Phase Gate evaluation. See [consensus review](CONSENSUS_REVIEW.md).
+
+## Phase 18 observability and cost tracking
+
+`aipc.observability` coordinates execution metrics and usage auditing without provider
+coupling. Provider-specific telemetry extractors reside strictly in `aipc.adapters.<provider>.telemetry`
+and project raw metadata into canonical `ProviderTelemetry`. Missing provider metrics are
+never fabricated (unreported fields remain `None`). `MetricsStore` manages atomic,
+idempotent persistence in `{project_id}.metrics.json` with gate verdict finalization.
+Performance statistics are strictly read-only; `AgentRouter` remains purely static and
+deterministic. See [cost and usage tracking](COST_AND_USAGE_TRACKING.md).
