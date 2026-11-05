@@ -2904,6 +2904,8 @@ The dashboard must call Controller APIs.
 
 It must not contain orchestration business logic.
 
+See [Dashboard & REST API documentation](docs/DASHBOARD_API.md).
+
 ---
 
 # Phase 20 — MCP / Shared Tool Layer

@@ -93,3 +93,11 @@ class TelemetryError(Exception):
     """Invalid telemetry records, conflicting idempotent replays, malformed provider telemetry
     metadata, or invalid cost policies.
     """
+
+
+class DashboardError(Exception):
+    """Base error for dashboard and read-only API operations."""
+
+
+class ProjectNotFoundError(DashboardError):
+    """The requested project is not registered in the dashboard service."""

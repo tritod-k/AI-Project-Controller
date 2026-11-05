@@ -250,3 +250,15 @@ to `{project_id}.metrics.json` with idempotent replay matching and in-place gate
 `AgentStatistics` exposes read-only historical metrics with an explicit `sufficient_historical_data`
 boundary (default 10 runs) ensuring `AgentRouter` remains purely deterministic and static.
 See [cost and usage tracking contracts](docs/COST_AND_USAGE_TRACKING.md).
+
+## Phase 19 Dashboard/API
+
+Phase 19 adds a provider-neutral, real-time HTTP Dashboard and REST API (`src/aipc/dashboard`)
+for observing project status, phase progression, active worker and reviewer states, approval
+queues, test execution status, event timelines, retry counts, cost/usage summaries, structured
+logs, and historical phase outcomes. Built strictly with the Python standard library
+(`http.server`, `urllib.parse`, `html`, `json`) with zero new runtime dependencies. The dashboard
+is strictly read-only: all non-`GET` requests are rejected with `405 Method Not Allowed`, and
+orchestration business logic is completely isolated. Automatic secret redaction (`[REDACTED]`)
+and strict HTML escaping ensure diagnostic safety without credential leaks or XSS vulnerabilities.
+See [Dashboard & REST API contracts](docs/DASHBOARD_API.md).

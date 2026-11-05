@@ -168,3 +168,13 @@ never fabricated (unreported fields remain `None`). `MetricsStore` manages atomi
 idempotent persistence in `{project_id}.metrics.json` with gate verdict finalization.
 Performance statistics are strictly read-only; `AgentRouter` remains purely static and
 deterministic. See [cost and usage tracking](COST_AND_USAGE_TRACKING.md).
+
+## Phase 19 dashboard and read-only api
+
+`aipc.dashboard` exposes real-time project state, agent runs, phase progression, approvals,
+consensus decisions, and cost metrics through semantic HTML5 and REST JSON endpoints.
+Implemented entirely using the Python standard library (`http.server`) with zero new runtime
+dependencies. Operates strictly as a read-only observer over `StateManager`, `ControllerJournal`,
+and `MetricsStore`. Non-`GET` requests are rejected with `405 Method Not Allowed`. All dynamic
+text passes through automated secret scrubbing (`[REDACTED]`) and HTML5 XSS escaping. Core
+orchestration and adapters remain completely decoupled. See [Dashboard & REST API](DASHBOARD_API.md).
