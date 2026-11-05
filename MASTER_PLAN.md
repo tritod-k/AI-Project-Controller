@@ -2787,6 +2787,10 @@ Provider replacement is configuration-only from the controller perspective.
 
 # Phase 16 — Agent Router + Fallback
 
+Phase 16 contracts: [Agent Router and Safe Fallback](docs/AGENT_ROUTER.md).
+Routing consumes proven provider qualification; adapter existence is not eligibility.
+Controller owns execution; ambiguous effects require Recovery/human inspection.
+
 ## Goal
 
 Select agent based on task requirements.

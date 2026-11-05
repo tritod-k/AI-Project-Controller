@@ -7,36 +7,30 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 15 — Gemini Adapter
+Phase 16 — Agent Router + Fallback
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-15-pass` — the containing Phase 15 PASS-state commit.
+`aipc-phase-15-pass` — `ca593556583287716b61a6fb81a7ec8e9807d3b8`.
 Previous `aipc-phase-14-pass` — `a895b03fae2b322fa550469008fee7ada07f5ebb`.
-All previous PASS tags remain unchanged. The manual external-review workflow
-authorizes this checkpoint and history-preserving integration into master.
-The actual PASS-state SHA is recorded in the finalization handoff receipt/report;
-a containing commit cannot embed its own hash.
+All existing PASS tags and master remain unchanged.
 
 ## Current Branch / Worktree
-Stable handoff: `master`, `H:/000ProjectCode/AI_Project_Controller`.
-Finalization authored on `codex/phase-15-attempt-01`, then fast-forwarded into master.
+`codex/phase-16-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
+Created from the approved Phase 15 stable tag; no master integration or new PASS tag.
 
 ## Last Commit
-Approved Phase 15 implementation/handoff: `fa29bea9e285c67c7c21adac47e2e59fd4b0f7c7`.
-Message: `AIPC Phase 15 attempt 01 - gemini adapter`.
-Phase 15 containing PASS-state commit: `AIPC Phase 15 PASS - gemini adapter`.
-Its exact SHA is supplied after publication in the finalization report and
-`.superpowers/sdd/2026-10-05-phase-15-finalization/handoff.json`.
-Approved Phase 14 stable target: `a895b03fae2b322fa550469008fee7ada07f5ebb`.
+Starting approved HEAD: `ca593556583287716b61a6fb81a7ec8e9807d3b8`.
+Phase 15 approved implementation/handoff: `fa29bea9e285c67c7c21adac47e2e59fd4b0f7c7`.
+Phase 16 implementation is in progress; no attempt commit yet.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -60,34 +54,34 @@ Approved Phase 14 stable target: `a895b03fae2b322fa550469008fee7ada07f5ebb`.
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 15 lightweight finalization only, explicitly authorized by the human.
-No Phase 16 implementation occurs in this session.
+Phase 16 — Agent Router + Fallback, Attempt 01 only, explicitly authorized
+by the human-supplied implementation blueprint.
 
 ## Next Authorized Phase
-Phase 16 — Agent Router + Fallback
+None. Phase 17 requires separate human/controller authorization after review.
 
 ## Phase 15 Status
 PASS (implementation; external review). OFFLINE contracts PASS; production
 coding/runtime NOT READY / BLOCKED. This does not authorize Gemini production use.
 
 ## Phase 16 Status
-NOT_STARTED. No Agent Router or fallback is implemented or executed.
+AWAITING_REVIEW. Worker routing and bounded no-effect fallback completed; pending external review.
 
 ## Current Work
-Provider-local GeminiAdapter, typed config/raw/operational errors, bounded ACP
-JSON-RPC and normalization use existing AgentAdapter contracts. Original mutable
-tasks and exact workspace/repository/session/turn identities are revalidated.
-Atomic intent journals preserve ambiguous effects and terminal replay. No core,
-canonical/schema or prior-provider implementation changed. Controller integration
-uses disposable repositories; missing evidence yields REVISE_REQUIRED, never PASS.
+Implementation completed for provider-neutral pure Registry-backed AgentRouter,
+typed capability observations, deterministic explicit/policy routing, Controller
+dispatch flow, and no-effects fallback. Completed minimal targeted fix and
+validation for corrupt journal detection (enforcing routed: StrictBool = False on
+RunRecord and ControllerJournal). All RED/GREEN tasks finished; handoff
+documentation and evidence compiled for review.
 
 ## Tests
-Full: 1661 passed; explicit components: 1150 passed. Zero failures/errors/skips; frozen input verification and exact receipts retained under .superpowers/sdd/2026-10-04-phase-15/.
-Development followed targeted RED -> GREEN. One fresh read-only technical review
-found four Important issues; eight RED regressions reproduced them, then 48 related
-tests passed. No Critical/Minor finding reported. Final suites run once each after
-source freeze. Ruff/format, CLI help, pip check, all six schema drift checks and
-wheel/base imports are verified and receipts retained. Ordinary tests are offline.
+Routing targeted test suite: 59 passed, 0 failed (tests/routing). Contract suite:
+98 passed, 0 failed (tests/contract). Controller contracts: 15 passed, 0 failed.
+Legacy non-routed Controller lifecycle smoke: 1 passed in 77.3s. Quality harness
+(run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
+project-schemas, cli-help, diff-check, wheel, base-install, base-import). Static
+analysis: Ruff check 0 errors, 21 files properly formatted.
 
 ## Finalization Evidence Reuse
 The approved Phase 15 implementation previously passed 1661/1661 full regression
@@ -176,11 +170,8 @@ capabilities. No Router/fallback or consensus is implemented; automatic next-pha
 execution remains disabled.
 
 ## Last Reviewer Result
-PASS
-Phase 15 external implementation approval received for exact commit
-`fa29bea9e285c67c7c21adac47e2e59fd4b0f7c7`. Offline contract acceptance does not
-qualify production Gemini runtime. The four prior Important technical findings
-were fixed before source freeze; accepted runtime/security limitations remain.
+Phase 16 external review: PENDING. Fresh whole-branch technical review not yet run.
+Phase 15 external implementation PASS remains approved historical evidence.
 
 ## Preserved Reviewer Notes
 - Required FAIL/UNVERIFIED and conflicting evidence cannot become PASS.
@@ -262,11 +253,10 @@ and real Gemini runtime behavior remain unverified. These accepted implementatio
 limitations do not enable unavailable capabilities or weaken fail-closed behavior.
 
 ## Required Fixes / Remaining Work
-No implementation fixes required by external Phase 15 review.
-Real Gemini official process launch/effective settings audit, sandbox/native DENY
-proof and safe native replay barrier remain unimplemented/unqualified on this host.
-Do not weaken authority to obtain live proof. Claude restrictions remain unchanged.
-Phase 16 is authorized as the next phase but remains NOT_STARTED.
+All substantive RED/GREEN implementation and verification fixes completed.
+External technical review and Phase Gate decision pending. Commit creation and
+remote push pending human Commander authorization. Do not create PASS tag, merge
+or begin Phase 17.
 
 ## Warnings / Known Issues
 Single-writer/quiescent access; provider dispatch/journal writes are nontransactional.
@@ -283,13 +273,13 @@ Do not blindly resume active prompts, resend cancel, remove locks or reset works
 No real-repository recovery is exercised by this phase.
 
 ## Next Action
-Await a separate implementation instruction for Phase 16 — Agent Router + Fallback
-from aligned master. Respect proven capabilities and blocked provider qualifications.
-Stop after this Phase 15 finalization; do not create a Phase 16 branch.
+Submit Phase 16 completion report and evidence to human Commander and external
+Phase Gate reviewer for review and commit/push authorization.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/GEMINI_ADAPTER.md,
-docs/PHASE_15_EVIDENCE.md and Phase 15 spec/plan/progress/frozen receipts.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/AGENT_ROUTER.md,
+Phase 16 spec/plan and .superpowers/sdd/2026-10-05-phase-16/progress.md.
+Inspect current diff and test receipts before any continuation.
 
 ## Timestamp
-2026-10-04T22:09:07.827443+00:00
+2026-11-05T10:35:00Z

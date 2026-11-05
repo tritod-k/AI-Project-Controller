@@ -219,3 +219,13 @@ require no Node/Gemini runtime. The default transport cannot launch Gemini until
 effective policy/sandbox and real denial behavior are qualified; all production
 tool/approval capabilities remain false. This host lacks Gemini CLI/authentication.
 No routing/fallback is added. See [Gemini boundary and readiness](docs/GEMINI_ADAPTER.md).
+
+## Phase 16 Agent Router + Fallback
+
+The deterministic Router filters existing Registry agents by required static support,
+proven capability status and runtime readiness before configured priority/preferences.
+Optional Controller integration journals exact assignments and bounded fallback only
+after terminal no-effect start failure and Recovery clearance. Approval denial,
+cancellation, review failure and ambiguous effects never switch providers. Claude and
+Gemini production coding capabilities remain blocked. See
+[routing, policy and restart contracts](docs/AGENT_ROUTER.md).

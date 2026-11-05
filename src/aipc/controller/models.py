@@ -5,7 +5,9 @@ from typing import Literal, Self
 from pydantic import StrictBool, model_validator
 
 from aipc.agents.models import AgentRunHandle
+from aipc.agents.routing_models import RoutingDecision, digest
 from aipc.approvals.models import ApprovalRoutingDecision
+from aipc.controller.routing_models import WorkerRoutingEvent, assignment_for, checked_history
 from aipc.domain.models import (
     AgentResult,
     CanonicalRecord,
@@ -144,6 +146,7 @@ class RunRecord(CanonicalRecord):
     phase_id: Identifier
     worker_id: NonBlank
     provider: NonBlank
+    routed: StrictBool = False
     definition_digest: NonBlank
     configuration_digest: NonBlank
     policy: ControllerPolicy
@@ -155,10 +158,30 @@ class RunRecord(CanonicalRecord):
     attempts: tuple[AttemptRecord, ...]
     events: tuple[ControllerEvent, ...] = ()
     approval_events: tuple[ControllerApprovalEvent, ...] = ()
+    routing_events: tuple[WorkerRoutingEvent, ...] = ()
+    routing_outcomes: tuple[RoutingDecision, ...] = ()
     outcome: ControllerResult | None = None
 
     @model_validator(mode="after")
     def identity(self) -> Self:
+        if not self.routed and (self.routing_events or self.routing_outcomes):
+            raise ValueError("unrouted run contains routing history")
+        checked_history(self.routing_events)
+        for decision in (
+            *self.routing_outcomes,
+            *(event.decision for event in self.routing_events),
+        ):
+            request = decision.request
+            attempt = next((a for a in self.attempts if a.attempt == request.attempt), None)
+            if (
+                attempt is None
+                or attempt.task is None
+                or (request.project_id, request.run_id, request.phase_id, request.task_id)
+                != (self.project_id, self.run_id, self.phase_id, attempt.task.task_id)
+            ):
+                raise ValueError("routing event belongs to another task/run/attempt")
+            if request.task_digest != digest(attempt.task):
+                raise ValueError("routing task digest differs from canonical task")
         if self.policy.authorized_phase != self.phase_id:
             raise ValueError("policy phase differs")
         if (self.initial_state.project_id, self.initial_state.run_id) != (
@@ -245,6 +268,22 @@ class RunRecord(CanonicalRecord):
         ):
             raise ValueError("approval stage lacks durable response evidence")
         for a in self.attempts:
+            assignment = assignment_for(self, a.attempt)
+            if (
+                self.routed
+                and assignment is None
+                and (
+                    a.started_at is not None
+                    or a.handle is not None
+                    or a.result is not None
+                    or a.checkpoint is not None
+                )
+            ):
+                raise ValueError("routed attempt lacks routing assignment")
+            worker_id = (
+                self.worker_id if assignment is None else assignment.decision.selected_agent_id
+            )
+            provider = self.provider if assignment is None else assignment.provider
             if a.task is not None and (a.task.project_id, a.task.phase_id, a.task.attempt) != (
                 self.project_id,
                 self.phase_id,
@@ -253,10 +292,16 @@ class RunRecord(CanonicalRecord):
                 raise ValueError("task identity differs")
             if a.handle is not None and (a.task is None or a.handle.task_id != a.task.task_id):
                 raise ValueError("handle task differs")
-            if a.handle is not None and a.handle.agent_id != self.worker_id:
+            if a.handle is not None and a.handle.agent_id != worker_id:
                 raise ValueError("handle agent differs")
+            if (
+                a.handle is not None
+                and assignment is not None
+                and (assignment.state != "STARTED" or assignment.handle != a.handle)
+            ):
+                raise ValueError("handle differs from acknowledged routing session")
             if a.result is not None and (
-                a.result.agent_id != self.worker_id or a.result.provider != self.provider
+                a.result.agent_id != worker_id or a.result.provider != provider
             ):
                 raise ValueError("canonical agent/provider differs")
             if a.result is not None and (a.task is None or a.result.task_id != a.task.task_id):

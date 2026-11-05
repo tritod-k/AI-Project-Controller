@@ -870,3 +870,55 @@ They are foundational.
 The durable product is the **Controller**, not the individual AI provider.
 
 Code accordingly.
+
+
+---
+
+# 31. Two-Chat Controller/Worker Execution & Cross-Provider Handoff
+
+To maintain architectural rigor, eliminate self-advancement, and enable seamless multi-provider execution (OpenAI Codex Desktop, Google Gemini Antigravity, Anthropic Claude), the repository operates under a Two-Chat orchestration model.
+
+## 31.1 Architecture: Controller Chat vs. Worker Subagent
+
+1. **Controller Chat (Parent)**:
+   - Owns workflow orchestration, phase planning, model tier selection, and independent review.
+   - Manages approval flows, interacts with the human Commander, and authorizes checkpoints.
+   - Delegates bounded tasks to the worker subagent and sleeps reactively without polling.
+   - Sole authority (alongside human Commander) to mark phase gate outcomes.
+
+2. **Worker Chat (`aipc-worker` Subagent)**:
+   - Executes strictly bounded coding, testing, and evidence collection tasks assigned by the parent Controller.
+   - Operates under strict sandbox discipline: never self-advances, never marks Phase Gate PASS.
+   - Communicates via `send_message` with structured reports (exit codes, test counts, diff summaries).
+   - Reactive wakeup: when the subagent completes or sends a message, the parent Controller is automatically resumed without polling loops.
+
+## 31.2 Windows Git-Worktree Test Optimization & Evidence Reuse
+
+1. **Windows PowerShell Environment**:
+   - Always invoke python and test runners via the project virtual environment: `.venv\Scripts\python.exe -m pytest`.
+   - Never chain commands with `&&` in PowerShell; use `;` instead.
+   - Avoid slow Windows process creation loops where possible.
+
+2. **Targeted Verification & Fast-First Sequence**:
+   - Run pure unit and contract tests first (e.g. `tests/routing/test_router.py`, `tests/contract`, `tests/controller/test_contracts.py` — execute in < 2 seconds).
+   - Run the fast check harness (`.venv\Scripts\python.exe .superpowers/sdd/<phase>/run_fast.py` or repository fast checks) for lint, format, schema validation, and git diff checks.
+   - For integration tests involving disposable Git worktrees (`target` fixture), use `-k` or specific test paths to target the critical behavior without repeatedly running 90-minute full suites.
+
+3. **Evidence Reuse Policy**:
+   - Untouched modules from earlier approved phases (e.g. Phase 00–15) retain their previously verified and accepted regression receipts.
+   - Do not re-run slow 90-minute suites merely for documentation updates or trivial handoff changes when input hashes of untouched components are verified unchanged.
+   - Modified and new phase modules must always be verified with fresh targeted test suites and static analysis.
+
+## 31.3 Multi-Provider Remote Continuity (GitHub Private Repository)
+
+1. **Upstream Remote**:
+   - Official remote: `origin` -> `https://github.com/tritod-k/AI-Project-Controller.git` (private repository).
+2. **Cross-Provider Handoff**:
+   - Development sessions may span across different coding platforms:
+     - OpenAI Codex Desktop
+     - Google Gemini (Antigravity)
+     - Anthropic Claude
+   - To transition work safely:
+     - Commit coherent attempt progress on a dedicated branch (`codex/phase-<id>-attempt-<nn>`).
+     - Push to `origin` when authorized by the human Commander.
+     - On the receiving agent/platform: fetch and checkout the attempt branch, inspect `CURRENT_STATE.md`, `git diff`, and recent commits, and resume execution without starting from scratch.

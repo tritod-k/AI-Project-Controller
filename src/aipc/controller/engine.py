@@ -9,6 +9,9 @@ from pydantic import ValidationError
 
 from aipc.agents.models import AgentRunHandle, RawAgentResult, RunStatus
 from aipc.agents.registry import AgentRegistry
+from aipc.agents.router import AgentRouter
+from aipc.agents.routing_errors import RoutingError, RoutingProviderError
+from aipc.agents.routing_models import RoutingPolicy, TaskRequirements
 from aipc.approvals.errors import ApprovalRouterError
 from aipc.approvals.models import ActionFacts, ApprovalPolicy
 from aipc.approvals.router import ApprovalRouter
@@ -23,6 +26,8 @@ from aipc.controller.models import (
     RunRecord,
 )
 from aipc.controller.publication import PublicationFlow
+from aipc.controller.routing_flow import WorkerRoutingFlow
+from aipc.controller.routing_models import WorkerBinding
 from aipc.domain.errors import (
     AgentError,
     AgentTimeoutError,
@@ -53,7 +58,7 @@ from aipc.version.errors import VersionManagerError
 from aipc.version.manager import VersionManager
 
 
-class Controller(ApprovalFlow, PublicationFlow):
+class Controller(ApprovalFlow, PublicationFlow, WorkerRoutingFlow):
     def __init__(
         self,
         *,
@@ -77,6 +82,10 @@ class Controller(ApprovalFlow, PublicationFlow):
         approval_router: ApprovalRouter | None = None,
         approval_policy: ApprovalPolicy | None = None,
         approval_facts: Callable[[ApprovalRequest, TaskRequest], ActionFacts] | None = None,
+        worker_router: AgentRouter | None = None,
+        routing_policy: RoutingPolicy | None = None,
+        routing_requirements: TaskRequirements | None = None,
+        worker_bindings: dict[str, WorkerBinding] | None = None,
     ) -> None:
         if not provider.strip() or not review_authority.strip():
             raise ControllerError("explicit provider identity and reviewer authority required")
@@ -115,9 +124,35 @@ class Controller(ApprovalFlow, PublicationFlow):
                     )
         self._active = None
         self._cancellations = {}
+        self.worker_router = worker_router
+        self.routing_policy = RoutingPolicy.model_validate(
+            routing_policy or RoutingPolicy()
+        ).model_copy(deep=True)
+        self.routing_requirements = TaskRequirements.model_validate(
+            routing_requirements or TaskRequirements()
+        ).model_copy(deep=True)
+        self.worker_bindings = dict(worker_bindings or {})
+        if worker_router is None and any(
+            v is not None for v in (routing_policy, routing_requirements, worker_bindings)
+        ):
+            raise ControllerError("worker routing configuration requires a Router")
+        if worker_router is not None and worker_router.registry is not agents:
+            raise ControllerError("Router must use the owning AgentRegistry")
+        if any(
+            not isinstance(b, WorkerBinding)
+            or not b.provider.strip()
+            or not isinstance(b.normalizer, AgentResultNormalizer)
+            for b in self.worker_bindings.values()
+        ):
+            raise ControllerError("invalid selected worker normalization binding")
 
     def journal(self, run_id: str, phase_id: str) -> ControllerJournal:
-        return ControllerJournal(self.versions.metadata_root / "controller", run_id, phase_id)
+        return ControllerJournal(
+            self.versions.metadata_root / "controller",
+            run_id,
+            phase_id,
+            routed=self.worker_router is not None,
+        )
 
     def _configuration(self):
         config = dict(
@@ -131,6 +166,15 @@ class Controller(ApprovalFlow, PublicationFlow):
             config["approvals"] = dict(
                 root=str(self.approval_router.store.root),
                 policy=self.approval_policy.model_dump(mode="json"),
+            )
+        if self.worker_router is not None:
+            config["worker_routing"] = dict(
+                policy=self.routing_policy.model_dump(mode="json"),
+                requirements=self.routing_requirements.model_dump(mode="json"),
+                bindings={
+                    k: (v.provider, type(v.normalizer).__module__, type(v.normalizer).__qualname__)
+                    for k, v in sorted(self.worker_bindings.items())
+                },
             )
         return fingerprint(config)
 
@@ -390,7 +434,7 @@ class Controller(ApprovalFlow, PublicationFlow):
             raise ControllerError("unknown phase")
         state = self.state.load(project)
         EvidenceContext(run_id=state.run_id)
-        adapter = self.agents.get(project.agents.worker)
+        adapter = self.agents.get(project.agents.worker) if self.worker_router is None else None
         journal = self.journal(state.run_id, phase_id)
         with journal.lease():
             existing = journal.path.exists()
@@ -434,6 +478,7 @@ class Controller(ApprovalFlow, PublicationFlow):
                     phase_id=phase_id,
                     worker_id=project.agents.worker,
                     provider=self.provider,
+                    routed=self.worker_router is not None,
                     definition_digest=fingerprint(project),
                     configuration_digest=self._configuration(),
                     policy=policy,
@@ -446,6 +491,8 @@ class Controller(ApprovalFlow, PublicationFlow):
                 journal.save(record)
             self._active = (project, journal)
             try:
+                if self.worker_router is not None and record.attempts[-1].handle is not None:
+                    adapter = self.agents.get(self._worker_identity(record))
                 if record.outcome is not None and record.stage == "STOPPED":
                     if record.outcome.outcome == "PASS":
                         self._verify_finished(project, record)
@@ -556,7 +603,13 @@ class Controller(ApprovalFlow, PublicationFlow):
                     "Version operation requires inspection: " + type(exc).__name__ + recovery_note,
                     stage=latest.stage,
                 )
-            except (ControllerError, RecoveryError, StateError, ApprovalRouterError) as exc:
+            except (
+                ControllerError,
+                RecoveryError,
+                StateError,
+                ApprovalRouterError,
+                RoutingError,
+            ) as exc:
                 latest = journal.load()
                 return self._outcome(
                     journal,
@@ -593,18 +646,41 @@ class Controller(ApprovalFlow, PublicationFlow):
             if record.stage == "READY":
                 self._live(project, record)
                 self.versions.git.clean(Path(a.workspace.path))
-                record = self._attempt(journal, record, "START_INTENT", started_at=self.clock())
+                record = self._routing_ready(project, journal, record)
+                if isinstance(record, ControllerResult):
+                    return record
+                adapter = self.agents.get(self._worker_identity(record))
+                self._routing_validate(record)
+                if self.worker_router is not None:
+                    record = self._routing_transition(journal, record, "INTENT")
+                record = self._attempt(
+                    journal, record, "START_INTENT", started_at=a.started_at or self.clock()
+                )
                 self._live(project, record)
+                self._routing_validate(record)
                 if self.versions.git.clean(Path(a.workspace.path)).head != a.workspace.git_commit:
                     raise ControllerError("undispatched workspace HEAD changed")
                 try:
                     handle = AgentRunHandle.model_validate(
                         await adapter.start(TaskRequest.model_validate(a.task))
                     )
+                except RoutingProviderError as exc:
+                    stopped = self._routing_failed_start(project, journal, record, exc.failure)
+                    if isinstance(stopped, ControllerResult):
+                        return stopped
+                    record = stopped
+                    continue
                 except (AgentTimeoutError, UnknownRunError, ProviderInterruption) as exc:
                     return self._worker_interruption(project, journal, record, exc)
-                if handle.task_id != a.task.task_id or handle.agent_id != project.agents.worker:
+                latest = journal.load()
+                if latest.stage == "STOPPED":
+                    return latest.outcome
+                if handle.task_id != a.task.task_id or handle.agent_id != self._worker_identity(
+                    record
+                ):
                     raise ControllerError("adapter start handle identity differs")
+                if self.worker_router is not None:
+                    record = self._routing_transition(journal, record, "STARTED", handle=handle)
                 record = self._attempt(journal, record, "WAITING_WORKER", handle=handle)
                 a = record.attempts[-1]
             if record.stage == "APPROVAL_RESPONDED":
@@ -661,13 +737,14 @@ class Controller(ApprovalFlow, PublicationFlow):
                         stage=record.stage,
                     )
                 raw_ref = None if self.raw_retainer is None else self.raw_retainer(raw, a.task)
+                provider, normalizer = self._worker_binding(record)
                 result = AgentResult.model_validate(
-                    self.normalizer.normalize(
+                    normalizer.normalize(
                         raw,
                         NormalizationContext(
                             task_id=a.task.task_id,
                             agent_id=a.handle.agent_id,
-                            provider=self.provider,
+                            provider=provider,
                             started_at=a.started_at,
                             completed_at=self.clock(),
                             raw_output_ref=raw_ref,
@@ -677,7 +754,7 @@ class Controller(ApprovalFlow, PublicationFlow):
                 if (result.task_id, result.agent_id, result.provider) != (
                     a.task.task_id,
                     a.handle.agent_id,
-                    self.provider,
+                    provider,
                 ):
                     raise ControllerError("normalizer result association differs")
                 if result.status == "CANCELLED":
@@ -807,6 +884,13 @@ class Controller(ApprovalFlow, PublicationFlow):
         project = ProjectDefinition.model_validate(project)
         state = self.state.load(project)
         journal = self.journal(state.run_id, phase_id)
+        if self.worker_router is not None:
+            record = journal.load()
+            if record.attempts[-1].handle is None and record.stage in ("READY", "START_INTENT"):
+                if self._active is not None and self._active[1].path == journal.path:
+                    return self._cancel_unstarted_route(project, journal)
+                with journal.lease():
+                    return self._cancel_unstarted_route(project, journal)
         if self._active is not None and self._active[1].path == journal.path:
             return await self._cancel(project, journal)
         with journal.lease():
@@ -823,7 +907,7 @@ class Controller(ApprovalFlow, PublicationFlow):
         a = record.attempts[-1]
         if record.stage not in ("WAITING_WORKER", "WAITING_APPROVAL") or a.handle is None:
             raise ControllerError("cancellation requires the exact active run")
-        if a.handle.agent_id != project.agents.worker or a.handle.task_id != a.task.task_id:
+        if a.handle.agent_id != self._worker_identity(record) or a.handle.task_id != a.task.task_id:
             raise ControllerError("cancel handle differs")
         pending = asyncio.get_running_loop().create_future()
         self._cancellations[journal.path] = pending
@@ -832,7 +916,7 @@ class Controller(ApprovalFlow, PublicationFlow):
             current = self._live(project, record, running=False)
             if current.status not in ("RUNNING", "WAITING_APPROVAL"):
                 raise ControllerError("cancellation lifecycle authority changed")
-            await self.agents.get(project.agents.worker).cancel(a.handle)
+            await self.agents.get(self._worker_identity(record)).cancel(a.handle)
             self._live(project, record, running=False)
             self._invalidate_pending(record, "CANCELLED")
             state = self.state.load(project)

@@ -221,7 +221,7 @@ class ApprovalFlow:
                     "Response intent/receipt requires inspection; no replay.",
                     stage=record.stage,
                 )
-            adapter = self.agents.get(project.agents.worker)
+            adapter = self.agents.get(self._worker_identity(record))
             self._active = (project, journal)
             try:
                 result = await self._route_approval(project, journal, record, adapter, human)

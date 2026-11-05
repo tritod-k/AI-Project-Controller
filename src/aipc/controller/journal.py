@@ -24,8 +24,9 @@ def fingerprint(value) -> str:
 
 
 class ControllerJournal:
-    def __init__(self, root: Path, run_id: str, phase_id: str):
+    def __init__(self, root: Path, run_id: str, phase_id: str, *, routed: bool = False):
         self.run_id, self.phase_id = run_id, phase_id
+        self.routed = routed
         key = fingerprint([run_id, phase_id])
         self.path = Path(root) / (key + ".json")
         self.lock = Path(root) / (key + ".lease")
@@ -44,6 +45,8 @@ class ControllerJournal:
             value = RunRecord.model_validate(load_json(self.path))
             if (value.run_id, value.phase_id) != (self.run_id, self.phase_id):
                 raise ControllerJournalError("journal identity differs")
+            if self.routed and not value.routed:
+                raise ControllerJournalError("controller journal unavailable/corrupt")
             return value
         except (StateError, OSError, ValidationError) as exc:
             raise ControllerJournalError("controller journal unavailable/corrupt") from exc
@@ -65,6 +68,7 @@ class ControllerJournal:
                 "primary_branch",
                 "worker_id",
                 "provider",
+                "routed",
             )
             if any(getattr(value, k) != getattr(previous, k) for k in immutable):
                 raise ControllerJournalError("journal binding changed")
@@ -72,6 +76,13 @@ class ControllerJournal:
                 raise ControllerJournalError("audit history cannot be removed")
             if value.approval_events[: len(previous.approval_events)] != previous.approval_events:
                 raise ControllerJournalError("approval response history cannot be removed")
+            if value.routing_events[: len(previous.routing_events)] != previous.routing_events:
+                raise ControllerJournalError("routing dispatch history cannot be removed")
+            if (
+                value.routing_outcomes[: len(previous.routing_outcomes)]
+                != previous.routing_outcomes
+            ):
+                raise ControllerJournalError("routing outcome history cannot be removed")
             count = (
                 len(previous.attempts)
                 if len(value.attempts) > len(previous.attempts)
