@@ -2,6 +2,8 @@
 
 Stable starting point: `aipc-phase-18-pass` / `4cc0c24bf91f6dd56579c4896ff49b186ee858bb`.
 Attempt branch: `codex/phase-19-attempt-01`.
+Attempt 01 commit: `2942d6c1426b5fc9b5cf9c9709c5d7fd9137e8ed`.
+Phase Gate Decision: PASS (under Commander-delegated Controller and Phase Gate authority).
 
 ---
 
@@ -41,7 +43,7 @@ Phase 19 implements the provider-neutral, read-only Dashboard and REST API (`src
 
 Targeted test execution verified Phase 19 functional boundaries and Controller integration without requiring a redundant 90-minute full suite run.
 
-### 2.1 Targeted Phase 19 Dashboard Unit Suite (7/7 PASS)
+### 2.1 Targeted Phase 19 Dashboard Unit Suite (10/10 PASS)
 Executed via `.venv\Scripts\python.exe -m pytest tests/dashboard/test_dashboard.py -v`:
 - `test_provider_neutrality_no_adapter_imports`: Confirms zero `aipc.adapters` imports across the entire dashboard package.
 - `test_secret_redaction`: Verifies regex scrubbing of `sk-`, `AIza`, Bearer tokens, and key-value credential patterns.
@@ -50,8 +52,11 @@ Executed via `.venv\Scripts\python.exe -m pytest tests/dashboard/test_dashboard.
 - `test_readonly_enforcement_405`: Verifies `POST`, `PUT`, `DELETE`, `PATCH` requests receive `405 Method Not Allowed` with `Allow: GET`.
 - `test_html_rendering_and_xss_escaping`: Confirms HTML index and project dashboard render correctly with escaped malicious script payloads (`<script>alert('xss')</script>`).
 - `test_live_dashboard_http_server`: Verifies `DashboardHttpServer` runs live on an ephemeral port, answers real HTTP requests via `urllib.request`, and shuts down cleanly.
+- `test_approval_events_in_snapshot_and_api`: Verifies `ApprovalRoutingDecision` mapping and approval events in snapshot and REST API.
+- `test_subroute_extra_segments_returns_404`: Verifies extra path segments on subroutes return 404.
+- `test_corrupt_journal_raises_dashboard_error`: Verifies corrupt controller journals on disk raise `DashboardError` and return 500.
 
-Result: **7 passed in 1.15s**
+Result: **10 passed in 1.24s**
 
 ### 2.2 Controller Integration Test (1/1 PASS)
 Executed via `.venv\Scripts\python.exe -m pytest tests/dashboard/test_controller_dashboard.py -v`:
