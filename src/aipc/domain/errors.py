@@ -141,3 +141,19 @@ class EventReplayError(HardeningError):
 
 class SecretExposureError(HardeningError):
     """Unredacted sensitive credential or secret detected."""
+
+
+class AIPCError(Exception):
+    """Base error for all AIPC operations."""
+
+
+class PluginError(AIPCError):
+    """Base error for plugin and super-app extension operations."""
+
+
+class PluginRegistrationError(PluginError):
+    """Plugin registration failure due to duplicate ID, conflicting provider, or invalid state."""
+
+
+class PluginContractError(PluginError):
+    """Plugin contract verification failure."""

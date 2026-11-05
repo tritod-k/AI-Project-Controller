@@ -287,3 +287,16 @@ without data corruption. Schema migration manages version transformations while 
 automatic log redaction scrubs secrets from log messages and context fields, and deep secret scanning
 blocks credential leakage. Production CI validates builds across Python versions.
 See [Production Hardening documentation](docs/PRODUCTION_HARDENING.md).
+
+## Phase 22 Plugin / Super-App Extension Model
+
+Phase 22 implements the final roadmap phase: a predictable, provider-neutral Plugin and Super-App
+Extension Model (`src/aipc/plugins`). Adding a 3rd-party or future AI provider requires primarily a
+self-contained `ProviderPluginPackage` comprising adapter, normalizer, capability declarations,
+`ProviderPluginManifest` with configuration schema, optional telemetry extractors, and optional
+custom MCP tools. `verify_provider_plugin` enforces protocol conformance, async coroutine lifecycle
+methods, manifest identity alignment, and probe normalization. `PluginRegistry` supplies composition
+bridges into `AgentRegistry`, `AgentRouter` qualifications, `MetricsTracker`, and `SharedToolRegistry`.
+Registering or operating plugins requires zero edits to core orchestration (`phase_manager.py`,
+`phase_gate.py`, `state_manager.py`) or the canonical domain schemas.
+See [Plugin Extension Model documentation](docs/PLUGIN_EXTENSION_MODEL.md).

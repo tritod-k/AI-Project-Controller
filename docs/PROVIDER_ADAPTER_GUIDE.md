@@ -60,3 +60,17 @@ established on a supported sandbox host. See [Claude adapter](CLAUDE_ADAPTER.md)
 and GeminiNormalizer without core/schema changes. Production launch/tools/approvals
 remain blocked pending effective configuration/sandbox and live DENY qualification;
 offline protocol proof cannot enable native authority. See [Gemini adapter](GEMINI_ADAPTER.md).
+
+## Phase 22 Plugin / Super-App Extension Model
+
+Phase 22 formalizes the predictable provider extension model under `aipc.plugins`.
+A new provider requires only:
+- `adapter`: Implements `AgentAdapter` protocol.
+- `normalizer`: Implements `AgentResultNormalizer` protocol.
+- `capabilities`: Declared `AgentCapabilities`.
+- `qualification`: `ProviderCapabilityQualification`.
+- `manifest`: `ProviderPluginManifest` with configuration schema.
+- Optional `telemetry_extractor`: Implements `TelemetryExtractor`.
+- Optional `mcp_tools`: Tuple of `(ToolDescriptor, ToolHandler)` pairs.
+
+Registering a plugin via `PluginRegistry.register` verifies all contracts and probe normalization without requiring edits to `phase_manager.py`, `phase_gate.py`, `state_manager.py`, or the canonical `AgentResult` schema. See [Plugin Extension Model](PLUGIN_EXTENSION_MODEL.md).

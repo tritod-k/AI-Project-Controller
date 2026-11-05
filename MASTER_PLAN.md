@@ -2992,6 +2992,8 @@ core AgentResult schema
 
 unless a genuine core feature is being added.
 
+See [Plugin Extension Model documentation](docs/PLUGIN_EXTENSION_MODEL.md).
+
 ---
 
 # 30. Recommended MVP Boundary

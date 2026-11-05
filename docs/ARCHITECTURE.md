@@ -201,3 +201,14 @@ forced process termination during worker execution, normalization, review, appro
 without data corruption. Deep secret scanning and stdlib-only automatic log redaction scrub sensitive
 credentials, and GitHub Actions CI validates builds across supported Python versions. Core logic
 remains strictly provider-neutral. See [Production Hardening](PRODUCTION_HARDENING.md).
+
+## Phase 22 plugin and super-app extension model
+
+`aipc.plugins` establishes a predictable provider and super-app extension architecture.
+Third-party and future AI providers register as self-contained `ProviderPluginPackage` bundles
+comprising manifest, adapter, normalizer, capability declarations, optional telemetry extractors,
+and optional MCP tools. `verify_provider_plugin` enforces protocol conformance, async lifecycle
+methods, manifest identity alignment, and probe normalization. `PluginRegistry` supplies composition
+bridges into `AgentRegistry`, `AgentRouter` qualifications, `MetricsTracker`, and `SharedToolRegistry`.
+Registering or operating plugins requires zero edits to core orchestration (`phase_manager.py`,
+`phase_gate.py`, `state_manager.py`) or the canonical domain schemas. See [Plugin Extension Model](PLUGIN_EXTENSION_MODEL.md).
