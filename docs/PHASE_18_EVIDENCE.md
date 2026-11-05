@@ -1,9 +1,9 @@
 # Phase 18 Evidence — Cost, Usage, and Performance Tracking
 
 Stable starting point: `aipc-phase-17-pass` / `74bb4974c826cdb00b44259a4af71509d3d56dcf`.
-Attempt branch: `codex/phase-18-attempt-01`. No stable promotion, merge, or Phase 19 work.
-
-Implementation and completion report belong to the containing attempt commit; the actual commit SHA will be recorded upon commit creation. A containing commit cannot embed its own hash.
+Attempt branch: `codex/phase-18-attempt-01`.
+Attempt 01 commit: `497bdd32368d65915fc70437f12314205424c70f`.
+Phase Gate Decision: PASS (under Commander-delegated Controller and Phase Gate authority).
 
 ---
 

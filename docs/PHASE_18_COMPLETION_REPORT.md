@@ -4,8 +4,8 @@
 Phase 18 — Cost, Usage, and Performance Tracking
 
 ## Status
-COMPLETED (Implementation & Targeted Verification).
-External review pending. This report does not mark Phase 18 PASS.
+COMPLETED (Implementation & Verification PASS).
+Reviewed and promoted to PASS under Commander-delegated Controller and Phase Gate authority.
 
 ## Summary
 Implemented provider-neutral Cost, Usage, and Performance Tracking (`src/aipc/observability`) for collecting token counts, wall time, agent turns, tool calls, and model execution costs. Provider-specific telemetry extractors reside strictly in provider adapter modules, ensuring core observability logic has zero provider branching or adapter imports. Missing provider telemetry fields remain strictly `None` and are never fabricated. Historical metrics are exposed as read-only audit statistics with an explicit `sufficient_historical_data` boundary (default 10 runs), ensuring `AgentRouter` remains strictly static and deterministic. Durable atomic persistence is managed via `MetricsStore` with exact-match replay idempotency and in-place gate verdict finalization. Controller integration enables optional end-to-end metrics tracking with disjoint root path enforcement.
@@ -97,14 +97,14 @@ Implemented provider-neutral Cost, Usage, and Performance Tracking (`src/aipc/ob
 
 ## Git Handoff
 - Branch / worktree: `codex/phase-18-attempt-01` at `H:/000ProjectCode/AI_Project_Controller`.
-- Commit hash: [PENDING Commander commit authorization]
-- Commit message: `AIPC Phase 18 attempt 01 - cost, usage, and performance tracking`
+- Attempt 01 commit: `497bdd32368d65915fc70437f12314205424c70f`.
+- Commit message: `AIPC Phase 18 attempt 01 - cost usage and performance tracking`.
 - Last stable checkpoint: `aipc-phase-17-pass` (`74bb4974c826cdb00b44259a4af71509d3d56dcf`).
 
 ## CURRENT_STATE.md
 - Updated: yes
-- Status: AWAITING_REVIEW
-- Phase Gate: PENDING
+- Status: PASS
+- Phase Gate: PASS
 
 ## Warnings
 - Single-writer assumption for metrics store persistence.

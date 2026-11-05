@@ -10,23 +10,24 @@ AI Project Controller
 Phase 18 — Cost, Usage, and Performance Tracking
 
 ## Status
-AWAITING_REVIEW
+PASS
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PENDING
+PASS
 
 ## Last Stable Checkpoint
-`aipc-phase-17-pass` (`74bb4974c826cdb00b44259a4af71509d3d56dcf`).
+`aipc-phase-18-pass` (containing PASS commit; previous `aipc-phase-17-pass` — `74bb4974c826cdb00b44259a4af71509d3d56dcf`).
 All previous PASS tags and master remain unchanged.
 
 ## Current Branch / Worktree
 `codex/phase-18-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
+Ready for fast-forward merge into master.
 
 ## Last Commit
-`74bb4974c826cdb00b44259a4af71509d3d56dcf` (`AIPC Phase 17 PASS - multi-reviewer consensus`).
+Approved Phase 18 attempt: `497bdd32368d65915fc70437f12314205424c70f`.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -47,15 +48,16 @@ All previous PASS tags and master remain unchanged.
 - Phase 15 — Gemini Adapter: PASS (external implementation approval; production runtime BLOCKED).
 - Phase 16 — Agent Router + Fallback: PASS (external/controller approval).
 - Phase 17 — Multi-Reviewer / Consensus: PASS (external/controller approval).
+- Phase 18 — Cost, Usage, and Performance Tracking: PASS (external/controller approval).
 
 ## Documentation Alignment
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 18 — Cost, Usage, and Performance Tracking.
+Phase 18 — Cost, Usage, and Performance Tracking: PASS.
 
 ## Next Authorized Phase
-Phase 19 — Dashboard/API (PENDING Phase 18 external review and Phase Gate PASS).
+Phase 19 — Dashboard/API
 
 ## Phase 15 Status
 PASS (implementation; external review). OFFLINE contracts PASS; production
@@ -68,8 +70,7 @@ PASS. Worker routing and bounded no-effect fallback completed and approved.
 PASS. Provider-neutral Multi-Reviewer Consensus completed, verified, and approved.
 
 ## Phase 18 Status
-AWAITING_REVIEW. Attempt 01 implementation & targeted verification complete.
-Phase Gate: PENDING.
+PASS. Provider-neutral Cost, Usage, and Performance Tracking completed, verified, and approved.
 
 ## Current Work
 Phase 18 implementation completed: provider-neutral observability, extractors for Codex,
@@ -79,12 +80,12 @@ Claude, Gemini, Mock; durable atomic persistence in `MetricsStore` (`MetricsLedg
 `Controller`; all unit, integration, contract, and quality harness tests verified 100% green.
 
 ## Tests
-Observability unit tests: 13 passed in 1.31s (tests/observability/test_metrics.py).
+Observability unit tests: 13 passed in 1.13s (tests/observability/test_metrics.py).
 Controller integration: 2 passed in 174.57s (tests/observability/test_controller_metrics.py).
 Contract suite: 98 passed in 17.71s (tests/contract). Controller contracts: 15 passed in 0.41s.
 Quality harness (run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
 project-schemas, cli-help, diff-check, wheel, base-install, base-import).
-Static analysis: Ruff check 0 errors, 4 files reformatted, 136 files unchanged.
+Static analysis: Ruff check 0 errors, 140 files properly formatted.
 
 ## Finalization Evidence Reuse
 The approved Phase 15 implementation previously passed 1661/1661 full regression
@@ -168,7 +169,7 @@ capabilities. No dynamic routing based on telemetry is permitted; routing remain
 strictly deterministic.
 
 ## Last Reviewer Result
-Phase 18 review: PENDING. Fresh whole-branch technical review not yet run.
+Phase 18 review: PASS (under Commander-delegated Controller and Phase Gate authority).
 Phase 17 external implementation PASS remains approved historical evidence.
 
 ## Preserved Reviewer Notes
@@ -259,10 +260,8 @@ limitations do not enable unavailable capabilities or weaken fail-closed behavio
 - Gate verdict transitions update in-place from `gate_verdict=None` to `gate_verdict=decision.verdict`.
 
 ## Required Fixes / Remaining Work
-All substantive implementation and verification tasks completed.
-External technical review and Phase Gate decision pending. Commit creation and
-remote push pending human Commander authorization. Do not create PASS tag, merge
-or begin Phase 19.
+All substantive implementation, hardening, and verification tasks completed and approved.
+Phase 18 marked PASS.
 
 ## Warnings / Known Issues
 Single-writer/quiescent access for metrics store persistence; non-transactional cross-resource
@@ -274,8 +273,7 @@ intent stages. Metrics store uses atomic replacement and replay idempotency to s
 recover from interruptions.
 
 ## Next Action
-Submit Phase 18 completion report and evidence to human Commander and Controller
-for review and commit/push authorization.
+Authorize and execute Phase 19 planning and implementation.
 
 ## Files to Read on Resume
 AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/COST_AND_USAGE_TRACKING.md,
