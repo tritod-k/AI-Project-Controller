@@ -1,0 +1,60 @@
+name: AIPC Continuous Integration
+
+on:
+  push:
+    branches:
+      - master
+      - 'codex/**'
+      - 'claude/**'
+      - 'gemini/**'
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-checks-and-tests:
+    name: Fast Checks & Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff Lint Check
+        run: ruff check .
+
+      - name: Ruff Format Check
+        run: ruff format --check .
+
+      - name: Verify Domain and Project JSON Schemas
+        run: |
+          python -m aipc.domain.schemas --check
+          python -m aipc.project.schemas --check
+
+      - name: Build Wheel & Verify Isolation
+        run: |
+          python -m pip install build
+          python -m build --wheel
+
+      - name: Run Fast Unit, Contract & Hardening Test Suites
+        run: |
+          pytest tests/unit tests/contract tests/routing tests/consensus tests/observability tests/dashboard tests/mcp tests/hardening -q

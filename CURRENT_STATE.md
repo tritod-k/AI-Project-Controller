@@ -7,26 +7,27 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 20 — MCP / Shared Tool Layer
+Phase 21 — Production Hardening
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-20-pass`.
+`aipc-phase-20-pass` (`2cb78221ff9cbc879b586f3fbdbfaad9ba7c8b15`).
 All previous PASS tags and master remain unchanged.
 
 ## Current Branch / Worktree
-`codex/phase-20-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
+`codex/phase-21-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-Approved Phase 20 attempt: `f9b3547fe4e5d89aab1184a6e9dd1cdd42504ed1`.
+Approved Phase 20 attempt: `2cb78221ff9cbc879b586f3fbdbfaad9ba7c8b15`.
+Phase 21 changes uncommitted, pending Controller / Commander authorization.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -55,11 +56,10 @@ Approved Phase 20 attempt: `f9b3547fe4e5d89aab1184a6e9dd1cdd42504ed1`.
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 20 — MCP / Shared Tool Layer: PASS.
+Phase 21 — Production Hardening: AWAITING_REVIEW.
 
 ## Next Authorized Phase
-Phase 21 — Production Hardening.
-Phase 21 remains NOT_STARTED; no automatic phase advancement.
+None until Phase 21 is reviewed and approved.
 
 ## Phase 15 Status
 PASS (implementation; external review). OFFLINE contracts PASS; production
@@ -80,32 +80,33 @@ PASS. Provider-neutral Dashboard & REST API completed, verified, and approved.
 ## Phase 20 Status
 PASS. Provider-neutral MCP / Shared Tool Layer completed, verified, and approved under Commander-delegated Controller authority.
 
+## Phase 21 Status
+AWAITING_REVIEW. Implementation, unit & contract tests, and fast check harness 100% complete and passing.
+
 ## Current Work
-Phase 20 MCP / Shared Tool Layer implementation and finalization complete:
-- Zero new runtime dependencies (standard library + canonical records).
-- Provider-neutrality boundary enforced (zero `aipc.adapters` imports).
-- Invariant validation: sensitive, live-production, and HIGH/CRITICAL tools default_enabled=False.
-- Live production tools (e.g. `mt5.live_order`) strictly require verified human approval.
-- Built-in catalog covers all 7 canonical categories: git, github, browser, docs, db sandbox, mt5 bridge, test runner.
-- Workspace path containment blocks path traversal, `.git`, and `.env` access (case-insensitive and prefix check).
-- Database sandbox rejects mutating SQL statements on read-only sandbox and logs `VALIDATION_FAILED`.
-- Standard JSON-RPC 2.0 `initialize`, `tools/list`, `tools/call` roundtrips verified, with `-32602` error handling for invalid params.
-- Secret scrubbing via `redact_secrets()` on all tool outputs and audit logs.
-- Complete invocation audit trail recorded in `ToolInvocationAuditRecord`.
+Phase 21 Production Hardening implementation complete:
+- Owner-aware file locking with PID, hostname, owner release tokens, and TTL staleness breaking.
+- Deterministic append-only event replay engine with duplicate suppression, regression rejection, and completed-once enforcement.
+- Pre-phase state backups with SHA-256 integrity checksums and corrupted state recovery with orphan `.tmp` cleanup.
+- State schema migration chain execution with version downgrade rejection.
+- Task timeout guard with heartbeat expiration and provider circuit breaker with outage tracking.
+- Forced termination recovery coordinator verifying all 5 mandatory exit criteria stages (worker execution, normalization, review, approval wait, and state write).
+- Deep secret scanner and stdlib-only automatic log scrubbing.
+- Production CI pipeline in `.github/workflows/ci.yml`.
 
 ## Tests
-MCP unit & safety tests: 13 passed in 1.26s (tests/mcp/test_mcp_tools.py).
-Contract suite: 113 passed in 18.26s (tests/contract and tests/controller/test_contracts.py).
+Hardening & logging tests: 15 passed in 1.22s (tests/hardening/test_production_hardening.py and tests/unit/test_logging.py).
+Contract suite: 113 passed in 15.64s (tests/contract and tests/controller/test_contracts.py).
 Quality harness (run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
 project-schemas, cli-help, diff-check, wheel, base-install, base-import).
-Static analysis: Ruff check 0 errors, 152 files properly formatted.
+Static analysis: Ruff check 0 errors, 160 files properly formatted.
 
 ## Finalization Evidence Reuse
 The approved Phase 15 implementation previously passed 1661/1661 full regression
-and 1150/1150 relevant component regression. Phases 16, 17, 18, and 19 verified all contracts and
+and 1150/1150 relevant component regression. Phases 16, 17, 18, 19, and 20 verified all contracts and
 targeted behavior. Untouched modules from earlier approved phases retain verified
 regression receipts per AGENTS.md Section 31.2. Fresh targeted suites and fast quality
-harness verify all modified and newly introduced Phase 20 components.
+harness verify all modified and newly introduced Phase 21 components.
 
 ## Gemini Runtime / Security
 Python 3.13.0; Node v24.18.0; npm 11.18.0. Gemini CLI actual version unavailable;
@@ -184,6 +185,7 @@ strictly deterministic.
 ## Last Reviewer Result
 Phase 19 review: PASS (under Commander-delegated Controller and Phase Gate authority).
 Phase 20 review: PASS (under Commander-delegated Controller and Phase Gate authority).
+Phase 21 review: PENDING (awaiting Controller / Commander review).
 
 ## Preserved Reviewer Notes
 - Required FAIL/UNVERIFIED and conflicting evidence cannot become PASS.
@@ -217,19 +219,19 @@ Phase 20 review: PASS (under Commander-delegated Controller and Phase Gate autho
 - Exactly-once real-provider approval response is not guaranteed; session/idempotency behavior remains Phase 12 work.
 - Structured caller facts remain trusted inputs; full command-semantic secret detection/DLP is not implemented.
 
-## Phase 20 MCP Invariants
+## Phase 21 Hardening Invariants
 - Zero new runtime dependencies: Python standard library + existing canonical records.
-- Provider-neutrality boundary: zero `aipc.adapters` imports.
-- Never expose sensitive or live-production tools by default: `default_enabled=False` strictly enforced.
-- Live production tools require `environment="production"`, `sensitive=True`, and HIGH/CRITICAL risk.
-- Calling sensitive, live-production, or HIGH/CRITICAL tools requires verified human approval (`human_approved=True` and `approval_id`).
-- Workspace path containment blocks path traversal (`..`), access to `.git` or `.env`, and out-of-workspace paths.
-- Database sandbox query rejects mutating SQL statements (`DROP`, `DELETE`, `TRUNCATE`, `ALTER`, etc.).
-- Output text is scrubbed via `redact_secrets()`.
-- Every call is recorded in `ToolInvocationAuditRecord`.
+- Provider-neutrality boundary: zero `aipc.adapters` imports in `src/aipc/hardening/`.
+- Concurrency locks enforce owner token validation and TTL staleness checks.
+- Event replay engine guarantees idempotency, duplicate suppression, and completed-once semantics.
+- Forced termination recovery coordinator satisfies all 5 exit criteria stages without data corruption.
+- State backup manager computes SHA-256 integrity digests and restores corrupted live state.
+- Schema migration executes version chains and blocks version downgrades.
+- Automatic log scrubbing and deep secret scanning active across diagnostic outputs.
 
 ## Required Fixes / Remaining Work
-None. Phase 20 promoted to PASS. Phase 21 not started.
+All substantive implementation, safety invariant validation, and verification tasks for Phase 21 completed.
+Awaiting Controller / Commander review and authorization.
 
 ## Warnings / Known Issues
 None.
@@ -238,13 +240,12 @@ None.
 Inspect exact project/phase/attempt/task/run/session/config/workspace and persisted intent stages.
 
 ## Next Action
-Authorize Phase 21 — Production Hardening.
-Phase 21 remains NOT_STARTED; no automatic phase advancement.
+Independent technical review of Phase 21 Attempt 01 by Controller / Commander.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/MCP_TOOL_LAYER.md,
-docs/PHASE_20_EVIDENCE.md, docs/PHASE_20_FINALIZATION.md, and tests/mcp/.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/PRODUCTION_HARDENING.md,
+docs/PHASE_21_EVIDENCE.md, Phase 21 spec/plan, and tests/hardening/.
 Inspect current diff and test receipts before any continuation.
 
 ## Timestamp
-2026-11-05T13:25:00Z
+2026-11-05T13:45:00Z

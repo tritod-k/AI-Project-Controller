@@ -2961,6 +2961,8 @@ The controller can recover from forced termination during:
 
 without corrupting project state.
 
+See [Production Hardening documentation](docs/PRODUCTION_HARDENING.md).
+
 ---
 
 # Phase 22 — Plugin / Super-App Extension Model

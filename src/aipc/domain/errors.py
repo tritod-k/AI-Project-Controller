@@ -117,3 +117,27 @@ class MCPApprovalRequiredError(MCPToolError):
 
 class MCPValidationError(MCPToolError):
     """Tool input validation or workspace path containment failure."""
+
+
+class HardeningError(Exception):
+    """Base error for production hardening subsystem operations."""
+
+
+class FileLockError(HardeningError):
+    """File lock acquisition, release, or staleness violation."""
+
+
+class StateCorruptionError(HardeningError):
+    """Project state or backup manifest is corrupted or tampered."""
+
+
+class SchemaMigrationError(HardeningError):
+    """State schema migration failure or forbidden version downgrade."""
+
+
+class EventReplayError(HardeningError):
+    """Deterministic event replay failure, ordering regression, or conflicting duplicate."""
+
+
+class SecretExposureError(HardeningError):
+    """Unredacted sensitive credential or secret detected."""

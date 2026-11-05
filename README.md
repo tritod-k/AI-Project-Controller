@@ -273,3 +273,17 @@ or production actions (such as `mt5.live_order`) strictly require verified human
 and valid `approval_id`). Workspace path containment ensures tools cannot traverse outside authorized workspaces
 or read `.git` / `.env` files. Outputs are automatically scrubbed via `redact_secrets()`, and all calls
 are immutably logged to an audit trail. See [MCP Tool Layer contracts](docs/MCP_TOOL_LAYER.md).
+
+## Phase 21 Production Hardening
+
+Phase 21 hardens the controller for production operation with enterprise resilience, concurrency,
+and recovery controls (`src/aipc/hardening`). Concurrency protection is provided by owner-aware,
+directory-based file locks with PID, hostname, owner release tokens, and TTL staleness breaking.
+Deterministic append-only event journals and replay engines provide idempotent duplicate suppression,
+ordering regression detection, and completed-once phase guarantees. Pre-phase state backups compute
+cryptographic SHA-256 digests, and `ForcedTerminationRecoveryCoordinator` recovers project state from
+forced process crashes during worker execution, normalization, review, approval wait, and state write
+without data corruption. Schema migration manages version transformations while blocking downgrades,
+automatic log redaction scrubs secrets from log messages and context fields, and deep secret scanning
+blocks credential leakage. Production CI validates builds across Python versions.
+See [Production Hardening documentation](docs/PRODUCTION_HARDENING.md).

@@ -189,3 +189,15 @@ by default. Live financial and production actions require verified human approva
 path containment prevents traversal and access to `.git` or `.env`. Output text is scrubbed
 via `redact_secrets()`, and every invocation is audited. Core orchestration remains decoupled.
 See [MCP Tool Layer contracts](MCP_TOOL_LAYER.md).
+
+## Phase 21 production hardening
+
+`aipc.hardening` provides production resilience, concurrency control, and crash recovery.
+Owner-aware directory file locks enforce atomic mutual exclusion with TTL staleness checks and
+owner-bound release tokens. Append-only event journals and deterministic replay engines guarantee
+idempotency, duplicate event suppression, and completed-once semantics. Atomic state backups compute
+SHA-256 integrity checksums, and `ForcedTerminationRecoveryCoordinator` recovers project state from
+forced process termination during worker execution, normalization, review, approval wait, and state write
+without data corruption. Deep secret scanning and stdlib-only automatic log redaction scrub sensitive
+credentials, and GitHub Actions CI validates builds across supported Python versions. Core logic
+remains strictly provider-neutral. See [Production Hardening](PRODUCTION_HARDENING.md).
