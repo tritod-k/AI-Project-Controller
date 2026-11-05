@@ -101,3 +101,19 @@ class DashboardError(Exception):
 
 class ProjectNotFoundError(DashboardError):
     """The requested project is not registered in the dashboard service."""
+
+
+class MCPToolError(Exception):
+    """Base error for MCP and shared tool layer operations."""
+
+
+class MCPAuthorizationError(MCPToolError):
+    """Tool invocation denied due to unexposed tool, task mismatch, or capability lack."""
+
+
+class MCPApprovalRequiredError(MCPToolError):
+    """Tool invocation requires human approval for sensitive/live-production/high-risk action."""
+
+
+class MCPValidationError(MCPToolError):
+    """Tool input validation or workspace path containment failure."""

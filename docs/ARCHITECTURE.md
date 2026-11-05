@@ -178,3 +178,14 @@ dependencies. Operates strictly as a read-only observer over `StateManager`, `Co
 and `MetricsStore`. Non-`GET` requests are rejected with `405 Method Not Allowed`. All dynamic
 text passes through automated secret scrubbing (`[REDACTED]`) and HTML5 XSS escaping. Core
 orchestration and adapters remain completely decoupled. See [Dashboard & REST API](DASHBOARD_API.md).
+
+## Phase 20 mcp and shared tool layer
+
+`aipc.mcp` provides a provider-neutral Model Context Protocol (MCP) and Shared Tool Layer.
+Compatible agents discover and invoke vetted tools via standard JSON-RPC 2.0 messages or typed
+Python methods. Implemented with zero new runtime dependencies. Security boundaries enforce
+least privilege: sensitive, live-production, and high/critical-risk tools can never be enabled
+by default. Live financial and production actions require verified human approval. Workspace
+path containment prevents traversal and access to `.git` or `.env`. Output text is scrubbed
+via `redact_secrets()`, and every invocation is audited. Core orchestration remains decoupled.
+See [MCP Tool Layer contracts](MCP_TOOL_LAYER.md).

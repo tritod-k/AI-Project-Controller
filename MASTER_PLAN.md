@@ -2926,6 +2926,8 @@ Potential tools:
 
 Do not expose sensitive or live-production tools by default.
 
+See [MCP Tool Layer documentation](docs/MCP_TOOL_LAYER.md).
+
 ---
 
 # Phase 21 — Production Hardening

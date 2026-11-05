@@ -262,3 +262,14 @@ is strictly read-only: all non-`GET` requests are rejected with `405 Method Not 
 orchestration business logic is completely isolated. Automatic secret redaction (`[REDACTED]`)
 and strict HTML escaping ensure diagnostic safety without credential leaks or XSS vulnerabilities.
 See [Dashboard & REST API contracts](docs/DASHBOARD_API.md).
+
+## Phase 20 MCP / Shared Tool Layer
+
+Phase 20 introduces a provider-neutral Model Context Protocol (MCP) and Shared Tool Layer (`src/aipc/mcp`)
+for exposing vetted tools to compatible worker agents. Implemented with zero new runtime dependencies
+using Python standard library and canonical contracts. Enforces least-privilege security boundaries:
+sensitive, live-production, and high/critical-risk tools can never be enabled by default. Live financial
+or production actions (such as `mt5.live_order`) strictly require verified human approval (`human_approved=True`
+and valid `approval_id`). Workspace path containment ensures tools cannot traverse outside authorized workspaces
+or read `.git` / `.env` files. Outputs are automatically scrubbed via `redact_secrets()`, and all calls
+are immutably logged to an audit trail. See [MCP Tool Layer contracts](docs/MCP_TOOL_LAYER.md).

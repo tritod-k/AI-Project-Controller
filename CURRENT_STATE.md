@@ -7,27 +7,27 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 19 — Dashboard/API
+Phase 20 — MCP / Shared Tool Layer
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
 Attempt 01
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-19-pass` (containing PASS commit; previous `aipc-phase-18-pass` — `4cc0c24bf91f6dd56579c4896ff49b186ee858bb`).
+`aipc-phase-19-pass` (`ede6f17b34e305a1f0b2f293b40ef7edf132ab01`).
 All previous PASS tags and master remain unchanged.
 
 ## Current Branch / Worktree
-`codex/phase-19-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
-Ready for fast-forward merge into master.
+`codex/phase-20-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-Approved Phase 19 attempt: `2942d6c1426b5fc9b5cf9c9709c5d7fd9137e8ed`.
+Approved Phase 19 attempt: `ede6f17b34e305a1f0b2f293b40ef7edf132ab01`.
+Phase 20 changes uncommitted, pending Controller / Commander authorization.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -55,10 +55,10 @@ Approved Phase 19 attempt: `2942d6c1426b5fc9b5cf9c9709c5d7fd9137e8ed`.
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 19 — Dashboard/API: PASS.
+Phase 20 — MCP / Shared Tool Layer: AWAITING_REVIEW.
 
 ## Next Authorized Phase
-Phase 20 — MCP / Shared Tool Layer
+None until Phase 20 is reviewed and approved.
 
 ## Phase 15 Status
 PASS (implementation; external review). OFFLINE contracts PASS; production
@@ -76,30 +76,35 @@ PASS. Provider-neutral Cost, Usage, and Performance Tracking completed, verified
 ## Phase 19 Status
 PASS. Provider-neutral Dashboard & REST API completed, verified, and approved.
 
+## Phase 20 Status
+AWAITING_REVIEW. Implementation, unit & contract tests, and fast check harness 100% complete and passing.
+
 ## Current Work
-Phase 19 implementation complete:
-- Zero new runtime dependencies (standard library `http.server`, `urllib.parse`, `html`, `json`).
-- Strictly read-only observation boundary: non-`GET` methods rejected with `405 Method Not Allowed`.
-- All 11 required sections populated from state, journal, and metrics store.
-- Automatic secret redaction (`[REDACTED]`) across logs and dynamic strings.
-- XSS defense via `html.escape(..., quote=True)` on all HTML view components.
-- Threaded non-blocking HTTP server on ephemeral or configured ports.
-- Verified with 10 unit tests (1.24s), 1 real Controller integration test (84.61s), 113 contract tests (13.70s), and 10/10 quality harness checks.
+Phase 20 MCP / Shared Tool Layer implementation complete:
+- Zero new runtime dependencies (standard library + canonical records).
+- Provider-neutrality boundary enforced (zero `aipc.adapters` imports).
+- Invariant validation: sensitive, live-production, and HIGH/CRITICAL tools default_enabled=False.
+- Live production tools (e.g. `mt5.live_order`) strictly require verified human approval.
+- Built-in catalog covers all 7 canonical categories: git, github, browser, docs, db sandbox, mt5 bridge, test runner.
+- Workspace path containment blocks path traversal, `.git`, and `.env` access.
+- Database sandbox rejects mutating SQL statements on read-only sandbox.
+- Standard JSON-RPC 2.0 `initialize`, `tools/list`, `tools/call` roundtrips verified.
+- Secret scrubbing via `redact_secrets()` on all tool outputs.
+- Complete invocation audit trail recorded in `ToolInvocationAuditRecord`.
 
 ## Tests
-Dashboard unit tests: 10 passed in 1.24s (tests/dashboard/test_dashboard.py).
-Controller integration: 1 passed in 84.61s (tests/dashboard/test_controller_dashboard.py).
-Contract suite: 113 passed in 13.70s (tests/contract and tests/controller/test_contracts.py).
+MCP unit & safety tests: 13 passed in 1.26s (tests/mcp/test_mcp_tools.py).
+Contract suite: 113 passed in 18.26s (tests/contract and tests/controller/test_contracts.py).
 Quality harness (run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
 project-schemas, cli-help, diff-check, wheel, base-install, base-import).
-Static analysis: Ruff check 0 errors, 146 files properly formatted.
+Static analysis: Ruff check 0 errors, 152 files properly formatted.
 
 ## Finalization Evidence Reuse
 The approved Phase 15 implementation previously passed 1661/1661 full regression
-and 1150/1150 relevant component regression. Phases 16, 17, and 18 verified all contracts and
+and 1150/1150 relevant component regression. Phases 16, 17, 18, and 19 verified all contracts and
 targeted behavior. Untouched modules from earlier approved phases retain verified
 regression receipts per AGENTS.md Section 31.2. Fresh targeted suites and fast quality
-harness verify all modified and newly introduced Phase 19 components.
+harness verify all modified and newly introduced Phase 20 components.
 
 ## Gemini Runtime / Security
 Python 3.13.0; Node v24.18.0; npm 11.18.0. Gemini CLI actual version unavailable;
@@ -176,8 +181,8 @@ capabilities. No dynamic routing based on telemetry is permitted; routing remain
 strictly deterministic.
 
 ## Last Reviewer Result
-Phase 18 review: PASS (under Commander-delegated Controller and Phase Gate authority).
 Phase 19 review: PASS (under Commander-delegated Controller and Phase Gate authority).
+Phase 20 review: PENDING (awaiting Controller / Commander review).
 
 ## Preserved Reviewer Notes
 - Required FAIL/UNVERIFIED and conflicting evidence cannot become PASS.
@@ -211,32 +216,34 @@ Phase 19 review: PASS (under Commander-delegated Controller and Phase Gate autho
 - Exactly-once real-provider approval response is not guaranteed; session/idempotency behavior remains Phase 12 work.
 - Structured caller facts remain trusted inputs; full command-semantic secret detection/DLP is not implemented.
 
-## Phase 19 Dashboard Invariants
-- Zero new runtime dependencies: Python standard library only (`http.server`, `urllib.parse`, `html`, `json`).
-- Strictly read-only observer: non-GET methods fail closed with 405 Method Not Allowed; zero orchestration business logic.
-- Secret redaction: tokens, keys, credentials sanitized via `redact_secrets()`.
-- XSS defense: strict HTML entity escaping with `quote=True`.
-- Provider neutrality: zero imports of `aipc.adapters`.
+## Phase 20 MCP Invariants
+- Zero new runtime dependencies: Python standard library + existing canonical records.
+- Provider-neutrality boundary: zero `aipc.adapters` imports.
+- Never expose sensitive or live-production tools by default: `default_enabled=False` strictly enforced.
+- Live production tools require `environment="production"`, `sensitive=True`, and HIGH/CRITICAL risk.
+- Calling sensitive, live-production, or HIGH/CRITICAL tools requires verified human approval (`human_approved=True` and `approval_id`).
+- Workspace path containment blocks path traversal (`..`), access to `.git` or `.env`, and out-of-workspace paths.
+- Database sandbox query rejects mutating SQL statements (`DROP`, `DELETE`, `TRUNCATE`, `ALTER`, etc.).
+- Output text is scrubbed via `redact_secrets()`.
+- Every call is recorded in `ToolInvocationAuditRecord`.
 
 ## Required Fixes / Remaining Work
-All substantive implementation, review findings, hardening, and verification tasks for Phase 19
-completed and approved. Phase 19 marked PASS.
+All substantive implementation, safety invariant validation, and verification tasks for Phase 20 completed.
+Awaiting Controller / Commander review and authorization to commit.
 
 ## Warnings / Known Issues
-Single-writer/quiescent access for state and metrics; non-transactional cross-resource file reads.
-Dashboard server runs on background daemon thread and binds to localhost.
+None.
 
 ## Recovery Notes
-Inspect exact project/phase/attempt/task/run/session/config/workspace and persisted
-intent stages.
+Inspect exact project/phase/attempt/task/run/session/config/workspace and persisted intent stages.
 
 ## Next Action
-Authorize and execute Phase 20 planning and implementation.
+Independent technical review of Phase 20 Attempt 01 by Controller / Commander.
 
 ## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/DASHBOARD_API.md,
-docs/PHASE_19_EVIDENCE.md, Phase 19 spec/plan, and tests/dashboard/.
+AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/MCP_TOOL_LAYER.md,
+docs/PHASE_20_EVIDENCE.md, Phase 20 spec/plan, and tests/mcp/.
 Inspect current diff and test receipts before any continuation.
 
 ## Timestamp
-2026-11-05T12:45:00Z
+2026-11-05T13:15:00Z
