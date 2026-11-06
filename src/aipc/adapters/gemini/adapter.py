@@ -47,6 +47,12 @@ class GeminiAdapter:
     @property
     def capabilities(self):
         facts = AgentCapabilities.model_validate(self.transport.capabilities)
+        if getattr(self.transport, "_aipc_qualified_antigravity_filesystem", False) is True:
+            return AgentCapabilities(
+                filesystem=facts.filesystem,
+                streaming_events=facts.streaming_events,
+                resume_session=False,
+            )
         # No transport-provided flag can enable a nonexistent AIPC permission bridge.
         return AgentCapabilities(
             streaming_events=facts.streaming_events, resume_session=facts.resume_session
@@ -81,7 +87,10 @@ class GeminiAdapter:
             workspace, identity = self._identity(checked.workspace)
             if workspace != authorized_root(Path(self.authorize_workspace(checked))):
                 raise ValueError("exact attempt workspace not authorized")
-            if not set(checked.allowed_tools).issubset({"filesystem", "shell", "git"}):
+            if getattr(self.transport, "_aipc_qualified_antigravity_filesystem", False) is True:
+                if not set(checked.allowed_tools).issubset({"filesystem"}):
+                    raise ValueError("Antigravity CLI only qualifies isolated filesystem tools")
+            elif not set(checked.allowed_tools).issubset({"filesystem", "shell", "git"}):
                 raise ValueError("unsupported tools")
             return checked, workspace, identity
         except (ValueError, TypeError, OSError, EvidencePathError):

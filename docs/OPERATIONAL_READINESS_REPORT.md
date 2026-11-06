@@ -8,73 +8,105 @@ Architectural completion of Phases 00–22 is explicitly separated from operatio
 
 ---
 
-## 1. Main Operational Status Matrix (Section 10)
+## 1. Main Operational Status Matrix
 
 | Component | Offline | Live | Status | Evidence |
 |---|---|---|---|---|
-| T1 Operational CLI | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` (Local CLI + Mock Controller) | `IMPLEMENTED` / `OFFLINE_VERIFIED` | `src/aipc/cli.py` (`--help`, `--validate`, `--status`, `--initialize`, `--providers`, `--inspect-recovery`, `--run-mock-phase`); `tests/integration/test_cli.py` (4/4 PASS) + `tests/e2e/test_full_mock_e2e.py::test_t1_operational_cli_lifecycle` (exit 0). |
-| T2 Mock E2E | `OFFLINE_VERIFIED` | `N/A` (Deterministic Mock Pipeline) | `OFFLINE_VERIFIED` | `tests/e2e/test_full_mock_e2e.py` (8/8 PASS, exit 0): Cases A (Success), B (Bounded Repair), C (Review Rejection), D (Interruption), E (Restart Idempotency), F (Duplicate Event Replay), G (Human Edit Protection). |
-| T3 Codex Adapter | `OFFLINE_VERIFIED` | `HISTORICAL_LIVE_VERIFIED` / `DEFERRED` (New Live) | `PARTIAL` (Quota-Deferred) | Phase 12 live receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` (`openai-codex==0.160.0`); current offline suite `tests/e2e/test_provider_qualification_and_fallback.py` (6/6 T3 tests PASS, exit 0). New live runs `DEFERRED` due to weekly subscription usage limit. |
-| T4 Gemini / Antigravity Adapter | `OFFLINE_VERIFIED` | `BLOCKED` (`LIVE_RUNTIME_BLOCKED`) | `BLOCKED` (Live Runtime) | `src/aipc/adapters/gemini/doctor.py` (`runtime_info()`, `antigravity_runtime_info()`), `tests/gemini/` (90/90 PASS), `tests/e2e/test_provider_qualification_and_fallback.py` (3/3 T4 tests PASS). `gemini` CLI and `agy` CLI are absent from host `PATH`; `Antigravity.exe` has no headless CLI hook; `google-antigravity` SDK requires separate API/Vertex billing. |
-| T5 Agent Fallback | `OFFLINE_VERIFIED` | `DEFERRED` (Live Handoff) | `PARTIAL` (`MOCK_FALLBACK`: `OFFLINE_VERIFIED`; `REAL_GEMINI_ROUTING`: `BLOCKED`; `LIVE_CODEX_TO_GEMINI_HANDOFF`: `DEFERRED`) | `tests/e2e/test_provider_qualification_and_fallback.py` (`test_case_5a`, `test_case_5b`, `test_case_5c` PASS, exit 0): verified pre-start `QUOTA_EXHAUSTED` fallback in `Controller.run_phase` and fail-closed `NO_SAFE_FALLBACK` refusal when real Gemini is `BLOCKED`. |
-| Website Development | `OFFLINE_VERIFIED` | `MANUAL_ANTIGRAVITY_EXECUTION` (AIPC Controller + Local Worker) | `IMPLEMENTED` / `OFFLINE_VERIFIED` | `H:\000ProjectCode\Test_AI_CONTROLLER_me` orchestrated via `tools/run_portfolio_demo.py` across Phases `WEB-01`..`WEB-05`; `tests/test_website.py` (11/11 PASS, exit 0). Explicitly classified as `MANUAL_ANTIGRAVITY_EXECUTION` (not `AIPC_LIVE_AGENT_EXECUTION`). |
-| GitHub Publication | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` | `LIVE_VERIFIED` | Pushed `main` (`5e65e6fe5f54397155b01a9611aa6e58597dba07`) and 15 AIPC phase tags to `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`; GitHub Actions Run `42227925342` `conclusion=success`. GitHub Pages left disabled pending explicit human authorization. |
+| **T1 Operational CLI** | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` (Local CLI + Mock Controller) | `IMPLEMENTED` / `OFFLINE_VERIFIED` | `src/aipc/cli.py` (`--help`, `--validate`, `--status`, `--initialize`, `--providers`, `--inspect-recovery`, `--run-mock-phase`); `tests/integration/test_cli.py` (4/4 PASS) + `tests/e2e/test_full_mock_e2e.py::test_t1_operational_cli_lifecycle` (exit 0). |
+| **T2 Mock E2E** | `OFFLINE_VERIFIED` | `N/A` (Deterministic Mock Pipeline) | `OFFLINE_VERIFIED` | `tests/e2e/test_full_mock_e2e.py` (8/8 PASS, exit 0): Cases A (Success), B (Bounded Repair), C (Review Rejection), D (Interruption), E (Restart Idempotency), F (Duplicate Event Replay), G (Human Edit Protection). |
+| **T3 Codex Adapter** | `OFFLINE_VERIFIED` | `HISTORICAL_LIVE_VERIFIED` / `DEFERRED` (New Live) | `PARTIAL` (Quota-Deferred) | Phase 12 live receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` (`openai-codex==0.160.0`); current offline suite `tests/e2e/test_provider_qualification_and_fallback.py` (6/6 T3 tests PASS, exit 0). New live runs `DEFERRED` due to weekly subscription usage limit. |
+| **T4 Gemini / Antigravity Adapter** | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` (`QUALIFIED_FILESYSTEM_ONLY`) | `LIVE_VERIFIED` | `AntigravityCliTransport` & `AntigravityNormalizer` with `agy.exe` (v1.5.2) at `C:\Users\Administrator\AppData\Local\agy\bin\agy.exe`. Reuses personal subscription OAuth session (`~/.gemini/antigravity`). Passed Section 8 live coding turn, Section 9 fallback, and Section 10 portfolio live enhancement. |
+| **T5 Agent Fallback** | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` (`SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI`) | `LIVE_VERIFIED` | `Controller.run_phase` handles pre-start `QUOTA_EXHAUSTED` on `codex-worker`, verifies clean attempt worktree via `RecoveryManager`, selects `gemini-antigravity`, executes turn with headless `agy.exe`, and achieves `PASS`. |
+| **Website Development** | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` (`MANUAL_ANTIGRAVITY_EXECUTION` + `AIPC_LIVE_AGENT_EXECUTION`) | `LIVE_VERIFIED` | `H:\000ProjectCode\Test_AI_CONTROLLER_me`: Phases `WEB-01`..`WEB-05` completed via AIPC controller; Phase `WEB-06` completed via live `agy.exe` on `feature/antigravity-live-enhancement` (`12/12` pytest PASS, exit 0). |
+| **GitHub Publication** | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` | `LIVE_VERIFIED` | Pushed `main` (`5e65e6fe5f54397155b01a9611aa6e58597dba07`) and 15 AIPC phase tags to `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`; GitHub Actions Run `42227925342` `conclusion=success`. |
 
 ---
 
-## 2. Operational Readiness Gap Matrix (Section 3)
+## 2. Operational Readiness Gap Matrix
 
 | Subsystem / Capability | Readiness State | Verified Evidence & Operational Notes |
 |---|---|---|
 | **Core Domain Models & Schemas (Phase 01–02)** | `OFFLINE_VERIFIED` | 6 JSON Schemas validated via `aipc.domain.schemas --check` and `aipc.project.schemas --check` (exit 0). |
-| **Operational CLI (`src/aipc/cli.py`)** | `IMPLEMENTED` / `OFFLINE_VERIFIED` | Upgraded from 16-line help-only stub to full operational entrypoint delegating to `load_project`, `StateManager`, `RecoveryManager`, and `Controller.run_phase`. |
+| **Operational CLI (`src/aipc/cli.py`)** | `IMPLEMENTED` / `OFFLINE_VERIFIED` | Upgraded to full operational entrypoint delegating to `load_project`, `StateManager`, `RecoveryManager`, and `Controller.run_phase`. |
 | **Controller, VersionManager, RecoveryManager, Reviewer & PhaseGate (Phase 05–11)** | `OFFLINE_VERIFIED` | Verified end-to-end across isolated Git worktrees in `tests/e2e/test_full_mock_e2e.py` (Cases A–G) and `tools/run_portfolio_demo.py` (`WEB-01`..`WEB-05`). |
-| **Codex Adapter (`aipc.adapters.codex`)** | `OFFLINE_VERIFIED` / Historical `LIVE_VERIFIED` / Current `DEFERRED` | `openai-codex==0.160.0` installed. Offline contract, timeout, `QUOTA_EXHAUSTED`, cancellation, session loss, and task reuse verified. Live calls deferred until weekly quota resets. |
+| **Codex Adapter (`aipc.adapters.codex`)** | `OFFLINE_VERIFIED` / Historical `LIVE_VERIFIED` / Current `DEFERRED` | `openai-codex==0.160.0` installed. Offline contracts pass. Live calls deferred until weekly quota resets. |
 | **Claude Adapter (`aipc.adapters.claude`)** | `OFFLINE_VERIFIED` / Live `BLOCKED` | `claude-agent-sdk==0.2.159` installed. Offline contracts pass; live execution `BLOCKED` (no Claude subscription; native Windows lacks required Bash sandbox). |
-| **Gemini / Antigravity Adapter (`aipc.adapters.gemini`)** | `OFFLINE_VERIFIED` / Live `BLOCKED` | Offline ACP JSON-RPC framing and permission denial pass (`90/90` tests). Live execution `BLOCKED` (`gemini` and `agy` CLIs absent on host; Windows effective sandbox/approval interception unverified). |
-| **Agent Router & Fallback (`aipc.agents.router`)** | `OFFLINE_VERIFIED` | `MOCK_FALLBACK`: `OFFLINE_VERIFIED`. `REAL_GEMINI_ROUTING`: `BLOCKED` (correctly rejected with `NO_SAFE_FALLBACK`). `LIVE_CODEX_TO_GEMINI_HANDOFF`: `DEFERRED`. |
-| **Consensus, Observability, Dashboard, MCP, Hardening, Plugins (Phase 17–22)** | `OFFLINE_VERIFIED` | All 860 fast unit/contract/subsystem tests pass in GitHub Actions CI (Python 3.12 & 3.13) and local `.venv`. |
+| **Gemini / Antigravity Adapter (`aipc.adapters.gemini`)** | `LIVE_VERIFIED` (`QUALIFIED_FILESYSTEM_ONLY`) | `agy.exe` (1.5.2) installed, OAuth session verified, headless execution via `stream-json` + sandbox verified. Live coding (`sec8`), fallback (`sec9`), and portfolio enhancement (`sec10`) all returned `PASS`. |
+| **Agent Router & Fallback (`aipc.agents.router`)** | `LIVE_VERIFIED` | `MOCK_FALLBACK`: `OFFLINE_VERIFIED`. `REAL_GEMINI_ROUTING`: `QUALIFIED_FILESYSTEM_ONLY`. `CODEX_TO_GEMINI_HANDOFF`: `LIVE_VERIFIED` (`SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI`). |
+| **Consensus, Observability, Dashboard, MCP, Hardening, Plugins (Phase 17–22)** | `OFFLINE_VERIFIED` | Fast unit/contract/subsystem tests pass in local `.venv` and GitHub Actions CI. |
 
 ---
 
-## 3. Execution Records (Section 10)
+## 3. Section 12 Operational Readiness States Table
+
+| Verification Gate / State | Status | Concrete Evidence / Notes |
+|---|---|---|
+| **1. Antigravity CLI Installed** | `PASS` | `C:\Users\Administrator\AppData\Local\agy\bin\agy.exe` v1.5.2 verified. |
+| **2. Subscription OAuth Verified** | `PASS` | Reuses personal cached session (`~/.gemini/antigravity`), zero API keys, zero Vertex billing. |
+| **3. Antigravity Headless Smoke Test** | `PASS` | Non-mutating prompt executed with `--output-format json` (exit code `0`). |
+| **4. Antigravity Security Qualification** | `PASS (QUALIFIED_FILESYSTEM_ONLY)` | `filesystem_write: AVAILABLE`; `shell`, `git`, `network`, `approval_events: BLOCKED`. |
+| **5. Real Gemini Coding Task via AIPC** | `PASS` | `live-agy-coding` phase-01 modified `index.html`, 1 test passed in 31.8s, checkpoint `refs/tags/aipc/live-agy-coding/phase-01/pass`. |
+| **6. Codex -> Gemini Quota Fallback** | `PASS (SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI)` | Simulated `QUOTA_EXHAUSTED` -> routed to `gemini-antigravity` via `agy.exe`, phase passed in 40.8s, checkpoint `refs/tags/aipc/live-agy-fallback/phase-01/pass`. |
+| **7. Portfolio Project Live Enhancement** | `PASS` | `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me` updated by `agy.exe`, 12/12 pytest pass, commit `01940359dd181e75b426462b93aa61d5157cef84`, main untouched. |
+| **8. Codex Live Execution** | `DEFERRED` | Weekly subscription limit reached; historical receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` preserved. |
+
+---
+
+## 4. Execution Records
 
 ### Record 1 — TEST 1 Operational CLI & TEST 2 Full Mock E2E
-- **Source Commit**: `1f5b379` -> `a2dabd3559795ff3765108d3844fe2a76f27230b` (`validation/operational-readiness`)
 - **Runtime**: Python `3.13.0`, `pytest 9.1.1` on Windows (`H:\000ProjectCode\AI_Project_Controller`)
-- **Execution Command**:
-  `.venv\Scripts\python.exe -m pytest tests/integration/test_cli.py tests/e2e/test_full_mock_e2e.py -v`
-- **Execution Timestamp**: `2026-11-06T14:02:50Z`
-- **Test Exit Code**: `0` (`12 passed` — 4 in `test_cli.py`, 8 in `test_full_mock_e2e.py`)
+- **Execution Command**: `.venv\Scripts\python.exe -m pytest tests/integration/test_cli.py tests/e2e/test_full_mock_e2e.py -v`
+- **Test Exit Code**: `0` (`12 passed`)
 - **Changed Files**: `src/aipc/cli.py`, `tests/e2e/test_full_mock_e2e.py`
-- **Git Diff Reference**: `git diff 41db10a..a2dabd3 -- src/aipc/cli.py tests/e2e/test_full_mock_e2e.py`
-- **Provider Identity**: `mock-provider` (`_CliMockWorker`, `_E2EWorker`)
-- **Review & Gate Result**: `PASS` on valid evidence (`test_case_a`, `test_case_b`); `REVISE_REQUIRED` on missing evidence (`test_case_c`).
-- **Remaining Blockers**: None for offline/mock CLI orchestration.
+- **Review & Gate Result**: `PASS`.
 
-### Record 2 — TEST 3 Codex Offline, TEST 4 Gemini/Antigravity Runtime & TEST 5 Router Fallback
-- **Source Commit**: `a2dabd3559795ff3765108d3844fe2a76f27230b` (`validation/operational-readiness`)
+### Record 2 — TEST 3 Codex Offline, TEST 4 Gemini/Antigravity & TEST 5 Router Fallback
 - **Runtime**: Python `3.13.0`, `openai-codex 0.160.0`, Node `v24.18.0`, npm `11.18.0`
-- **Execution Command**:
-  `.venv\Scripts\python.exe -m pytest tests/e2e/test_provider_qualification_and_fallback.py tests/gemini -v`
-- **Execution Timestamp**: `2026-11-06T14:05:00Z`
-- **Test Exit Code**: `0` (`12 passed` in `test_provider_qualification_and_fallback.py`, `90 passed` in `tests/gemini`)
-- **Changed Files**: `src/aipc/adapters/gemini/doctor.py`, `src/aipc/adapters/gemini/__init__.py`, `src/aipc/controller/routing_models.py`, `tests/e2e/test_provider_qualification_and_fallback.py`
-- **Git Diff Reference**: `git diff 41db10a..a2dabd3 -- src/aipc/adapters/gemini tests/e2e/test_provider_qualification_and_fallback.py`
-- **Provider Identity**: Offline `CodexAdapter` (`CodexFakeTransport`), `OfficialGeminiTransport`, `ACPGeminiTransport`, and `AgentRouter` with `_QuotaFailingWorker` / `_SuccessMockWorker`.
-- **Review & Gate Result**: `PASS` in Scenario 5B (`codex-worker` pre-start `QUOTA_EXHAUSTED` -> automatic fallback to `gemini-mock-worker`); `WAITING_PROVIDER` (`NO_SAFE_FALLBACK`) in Scenario 5C when real Gemini is `BLOCKED`.
-- **Remaining Blockers**:
-  1. Codex weekly subscription quota exhausted (`DEFERRED`).
-  2. `agy` and `gemini` CLIs not installed on host; native Windows sandbox/interception unverified (`BLOCKED`).
+- **Execution Command**: `.venv\Scripts\python.exe -m pytest tests/e2e/test_provider_qualification_and_fallback.py tests/gemini -v`
+- **Test Exit Code**: `0` (`13 passed` in `test_provider_qualification_and_fallback.py`, `90 passed` in `tests/gemini`)
+- **Review & Gate Result**: `PASS`.
 
-### Record 3 — Real-World Demonstration Website (`Test_AI_CONTROLLER_me`)
-- **Source Commit (AIPC)**: `a2dabd3559795ff3765108d3844fe2a76f27230b` (`tools/run_portfolio_demo.py`)
+### Record 3 — Real-World Demonstration Website Base Build (`Test_AI_CONTROLLER_me`)
 - **Target Website Commit**: `5e65e6fe5f54397155b01a9611aa6e58597dba07` (`main` on `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`)
-- **Execution Commands**:
-  - `.venv\Scripts\python.exe tools/run_portfolio_demo.py`
-  - `.venv\Scripts\python.exe -m pytest H:\000ProjectCode\Test_AI_CONTROLLER_me\tests\test_website.py -v`
-- **Execution Timestamp**: `2026-11-06T13:55:00Z`
+- **Execution Commands**: `.venv\Scripts\python.exe tools/run_portfolio_demo.py`
 - **Test Exit Code**: `0` (`5/5` phases `PASS`, `11/11` website tests `PASS`, GitHub Actions Run `42227925342` `conclusion=success`)
-- **Evidence Location**: `H:\000ProjectCode\Test_AI_CONTROLLER_me\AIPC_EXECUTION_RECEIPT.json` and Git tags `aipc/k-tritod-portfolio/phase-web-01/pass` .. `phase-web-05/pass`
-- **Provider Identity**: `MANUAL_ANTIGRAVITY_EXECUTION` (`antigravity-manual-worker` orchestrated through AIPC `Controller`, `VersionManager`, `EvidenceCollector`, `DeterministicReviewer`, `PhaseGate`, and `StateManager`).
-- **Remaining Blockers**: Live external LLM CLI execution (`AIPC_LIVE_AGENT_EXECUTION`) remains blocked/deferred as documented above; GitHub Pages deployment awaits explicit human authorization.
+- **Provider Identity**: `MANUAL_ANTIGRAVITY_EXECUTION`.
+
+### Record 4 — Section 8 Real Coding Test via AIPC (`live-agy-coding`)
+- **Runtime**: Python `3.13.0`, Antigravity CLI `1.5.2` (`gemini-3.8-flash-medium`)
+- **Execution Command**: `$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe run_live_sec8_sec9.py`
+- **Execution Duration**: `31,829 ms`
+- **Tokens**: `45,424` input, `3,290` output, `0` cached.
+- **Session / Turn ID**: `agy-77b32231-6d7f-475c-a8dc-7a086ddc3be0` / `f432d5bc-26a1-4acb-bf37-4ad9e2b1909a`
+- **Test Exit Code**: `0` (`1 passed`)
+- **Review & Gate Result**: `PASS` / `PASS`
+- **Checkpoint Tags**: `refs/tags/aipc/live-agy-coding/phase-01/pass`
+- **Receipt**: `scratch/live_sec8_sec9/sec8_summary.json`.
+
+### Record 5 — Section 9 Live Quota Fallback (`SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI`)
+- **Runtime**: Python `3.13.0`, Antigravity CLI `1.5.2` (`gemini-3.8-flash-medium`)
+- **Execution Command**: `$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe run_live_sec8_sec9.py`
+- **Execution Duration**: `40,884 ms`
+- **Tokens**: `53,483` input, `3,758` output, `0` cached.
+- **Session / Turn ID**: `agy-fa7d6303-45fe-4351-b1dc-fbcc549bbc41` / `fb18aabf-4ba5-44a3-a4cd-17b3a98a749b`
+- **Routing Events**: `codex-worker` (FAILED_NO_EFFECTS) -> `gemini-antigravity` (SELECTED -> STARTED -> COMPLETED)
+- **Review & Gate Result**: `PASS` / `PASS`
+- **Checkpoint Tags**: `refs/tags/aipc/live-agy-fallback/phase-01/pass`
+- **Receipt**: `scratch/live_sec8_sec9/sec9_summary.json`.
+
+### Record 6 — Section 10 Portfolio Live Enhancement (`feature/antigravity-live-enhancement`)
+- **Runtime**: Python `3.13.0`, Antigravity CLI `1.5.2` (`gemini-3.8-flash-medium`)
+- **Execution Command**: `$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe run_live_sec10_portfolio.py`
+- **Target Repository**: `H:\000ProjectCode\Test_AI_CONTROLLER_me`
+- **Branch**: `feature/antigravity-live-enhancement` (isolated attempt worktree)
+- **Execution Duration**: `50,185 ms`
+- **Tokens**: `90,722` input, `4,944` output, `0` cached.
+- **Session / Turn ID**: `agy-ac1ab09c-c8ae-4112-9761-fc24bf5a79ed` / `20c1f486-dafe-4f89-8964-a79bbfad3c6f`
+- **Files Changed**: `index.html`, `tests/test_website.py`
+- **Test Exit Code**: `0` (`12/12 passed` in pytest)
+- **Review & Gate Result**: `PASS` / `PASS`
+- **Attempt Commit SHA**: `01940359dd181e75b426462b93aa61d5157cef84` merged into `feature/antigravity-live-enhancement`
+- **Main Branch Protection**: `main` remained completely untouched at `5e65e6fe5f54397155b01a9611aa6e58597dba07`
+- **Checkpoint Tags**: `refs/tags/aipc/k-tritod-portfolio-sec10/phase-web-06/pass`
+- **Receipt**: `scratch/live_sec8_sec9/sec10_summary.json`.

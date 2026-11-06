@@ -7,8 +7,10 @@ Covering:
 """
 
 import asyncio
+import json
 import os
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,6 +24,12 @@ from aipc.adapters.codex.errors import (
     CodexTransportError,
 )
 from aipc.adapters.codex.normalizer import CodexNormalizer
+from aipc.adapters.gemini import (
+    AntigravityCliTransport,
+    AntigravityNormalizer,
+    GeminiAdapter,
+    GeminiAdapterConfig,
+)
 from aipc.adapters.gemini.doctor import (
     antigravity_runtime_info,
 )
@@ -331,7 +339,9 @@ def test_t3_codex_task_id_reuse_restrictions(tmp_path: Path) -> None:
 # ==============================================================================
 
 
-def test_t4_gemini_and_antigravity_doctor_reporting() -> None:
+def test_t4_gemini_and_antigravity_doctor_reporting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Doctor runtime reporting returns presence facts and fails closed for live runtime."""
     # 1. Gemini runtime_info
     g_info = gemini_runtime_info()
@@ -339,21 +349,203 @@ def test_t4_gemini_and_antigravity_doctor_reporting() -> None:
     assert "node_present" in g_info
     assert "authentication_present" in g_info
 
-    # 2. Antigravity runtime_info
-    a_info = antigravity_runtime_info()
-    assert "agy_cli_present" in a_info
-    assert "antigravity_desktop_present" in a_info
-    assert "headless_supported_by_desktop" in a_info
-    assert "effective_security_verified" in a_info
-    assert "sandbox_verified" in a_info
-    assert "live_status" in a_info
-    assert "blocker_reason" in a_info
+    # 2. Antigravity runtime_info when agy is absent
+    monkeypatch.setattr("aipc.adapters.gemini.doctor.find_agy_executable", lambda: None)
+    a_info_absent = antigravity_runtime_info()
+    assert a_info_absent["agy_cli_present"] is False
+    assert a_info_absent["effective_security_verified"] is False
+    assert a_info_absent["live_status"] == "LIVE_RUNTIME_BLOCKED"
+    assert (
+        "not present" in str(a_info_absent["blocker_reason"]).lower()
+        or "blocked" in str(a_info_absent["live_status"]).lower()
+    )
 
-    assert a_info["headless_supported_by_desktop"] is False
-    assert a_info["effective_security_verified"] is False
-    assert a_info["sandbox_verified"] is False
-    assert a_info["live_status"] == "LIVE_RUNTIME_BLOCKED"
-    assert "headless" in a_info["blocker_reason"].lower()
+    # 3. Antigravity runtime_info when agy is present with valid OAuth session
+    fake_oauth = tmp_path / ".gemini" / "antigravity"
+    fake_oauth.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "aipc.adapters.gemini.doctor.find_agy_executable",
+        lambda: Path("C:/fake/bin/agy.exe" if os.name == "nt" else "/fake/bin/agy"),
+    )
+    a_info_present = antigravity_runtime_info()
+    assert a_info_present["agy_cli_present"] is True
+    assert a_info_present["effective_security_verified"] is True
+    assert a_info_present["live_status"] == "QUALIFIED_FILESYSTEM_ONLY"
+    assert a_info_present["qualified_capabilities"]["filesystem"] == "AVAILABLE"
+    assert a_info_present["qualified_capabilities"]["shell"] == "BLOCKED"
+
+
+def test_t4_antigravity_cli_transport_contract_and_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify AntigravityCliTransport & AntigravityNormalizer contract under router fallback."""
+    from tests.gemini.test_antigravity_transport import FakeProcess
+
+    repo = tmp_path / "repo_t4_fallback"
+    _setup_repo(repo)
+    (repo / "test_check.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add verification test")
+    project = _make_fallback_project(repo, worker="codex-worker")
+
+    state = StateManager(tmp_path / "state_t4.json")
+    state.initialize(project, "run-t4-fallback")
+    versions = VersionManager(repo, project.project.id, worktree_root=tmp_path / "worktrees_t4")
+    recovery = RecoveryManager(project, state, versions)
+
+    codex_w = _StartQuotaFailingWorker("codex-worker")
+
+    primary_ws = tmp_path / "primary_agy"
+    primary_ws.mkdir()
+    cfg = GeminiAdapterConfig(
+        agent_id="gemini-antigravity",
+        primary_workspace=primary_ws,
+        state_root=tmp_path / "gemini_state",
+        model="gemini-3.8-flash-medium",
+    )
+
+    async def fake_runner(*args, **kwargs):
+        if "--version" in args:
+            return FakeProcess(["1.5.2"])
+        cwd = kwargs.get("cwd")
+        if cwd:
+            target = Path(cwd) / "index.html"
+            target.write_text("<!DOCTYPE html><h1>AIPC Fallback Test</h1>\n", encoding="utf-8")
+        stream = [
+            json.dumps(
+                {
+                    "event": "init",
+                    "conversation_id": "conv-t4-fallback",
+                    "init": {"model": "gemini-3.8-flash-medium", "cwd": str(cwd or "")},
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": "conv-t4-fallback",
+                        "step_index": 1,
+                        "state": "DONE",
+                        "step_type": "tool",
+                        "tool_name": "write_file",
+                        "tool_info": {
+                            "name": "write_file",
+                            "parameters": {"Path": "index.html"},
+                        },
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "result",
+                    "result": {
+                        "conversation_id": "conv-t4-fallback",
+                        "status": "SUCCESS",
+                        "response": "Created index.html",
+                        "duration_seconds": 1.0,
+                        "num_turns": 1,
+                        "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+                    },
+                }
+            ),
+        ]
+        return FakeProcess(stream)
+
+    fake_exe = tmp_path / "agy.exe"
+    fake_exe.write_text("dummy", encoding="utf-8")
+
+    transport = AntigravityCliTransport(
+        cfg,
+        executable=fake_exe,
+        runner=fake_runner,
+        verify_command=(sys.executable, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
+        auto_commit_attempt=True,
+    )
+    gemini_norm = AntigravityNormalizer(transport)
+    gemini_w = GeminiAdapter(
+        cfg,
+        transport=transport,
+        authorize_workspace=lambda task: (
+            versions.inspect_worktree(f"phase-{task.phase_id}-attempt-{task.attempt:02d}").path
+        ),
+    )
+
+    registry = AgentRegistry()
+    registry.register(codex_w)
+    registry.register(gemini_w)
+
+    qualifications = [
+        AgentQualification(
+            agent_id="codex-worker",
+            observation_id="obs-codex",
+            runtime="AVAILABLE",
+            capabilities={"filesystem": "AVAILABLE", "shell": "AVAILABLE", "git": "AVAILABLE"},
+        ),
+        AgentQualification(
+            agent_id="gemini-antigravity",
+            observation_id="obs-gemini-agy",
+            runtime="AVAILABLE",
+            capabilities={"filesystem": "AVAILABLE", "shell": "BLOCKED", "git": "BLOCKED"},
+        ),
+    ]
+    router = AgentRouter(registry, qualifications=lambda: tuple(qualifications))
+    routing_policy = RoutingPolicy(
+        mode="POLICY",
+        priorities={"codex-worker": 100, "gemini-antigravity": 80},
+        fallback={
+            "enabled": True,
+            "max_fallbacks": 1,
+            "allowed_failures": ("QUOTA_EXHAUSTED", "SERVICE_UNAVAILABLE"),
+        },
+    )
+
+    rules = [CriterionRule(criterion_id="AC-1", kind="tests", minimum_passed=1)]
+
+    ctrl = Controller(
+        state=state,
+        prompts=PromptEngine(),
+        agents=registry,
+        normalizer=MockNormalizer(),
+        versions=versions,
+        recovery=recovery,
+        reviewer=DeterministicReviewer(),
+        gate=PhaseGate(),
+        provider="openai",
+        review_authority="deterministic-reviewer",
+        evidence_destination=tmp_path / "evidence_t4",
+        rules=rules,
+        worker_router=router,
+        routing_policy=routing_policy,
+        routing_requirements=TaskRequirements(required=("filesystem",)),
+        worker_bindings={
+            "codex-worker": WorkerBinding(provider="openai", normalizer=MockNormalizer()),
+            "gemini-antigravity": WorkerBinding(provider="google", normalizer=gemini_norm),
+        },
+    )
+
+    policy = ControllerPolicy(
+        authorized_phase="01",
+        allowed_tools=("filesystem",),
+        timeout_seconds=30,
+    )
+
+    async def _run():
+        try:
+            return await ctrl.run_phase(project, "01", policy=policy)
+        finally:
+            await gemini_w.close()
+
+    res = asyncio.run(_run())
+    assert res.outcome == "PASS"
+    assert res.review_verdict == "PASS"
+    assert res.gate_decision is not None
+    assert res.gate_decision.verdict == "PASS"
+
+    record = ctrl.journal("run-t4-fallback", "01").load()
+    assert len(record.routing_events) >= 3
+    assert record.routing_events[2].failure.kind == "QUOTA_EXHAUSTED"
+    assert record.attempts[0].result.provider == "google"
 
 
 def test_t4_official_gemini_transport_fails_closed(tmp_path: Path) -> None:
