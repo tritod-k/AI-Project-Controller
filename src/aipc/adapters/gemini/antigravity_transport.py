@@ -372,7 +372,9 @@ class AntigravityCliTransport:
             return True
         if qual.version is not None:
             return False
-        return self._explicit_executable is not None and self.runner != asyncio.create_subprocess_exec
+        return (
+            self._explicit_executable is not None and self.runner != asyncio.create_subprocess_exec
+        )
 
     @property
     def _aipc_qualified_antigravity_filesystem(self) -> bool:
