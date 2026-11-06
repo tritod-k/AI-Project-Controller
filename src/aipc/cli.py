@@ -109,19 +109,16 @@ class _CliMockNormalizer(MockNormalizer):
             data["worker_claimed_complete"] = True
             data["tests"] = dict(total=1, passed=1, failed=0, skipped=0)
             data["evidence"]["test_log_path"] = "test.log"
-            data["files_changed"] = [f"phase_{context.phase_id}_artifact.txt", "test.log"]
         elif self.cli_scenario == "revise":
             data["status"] = "COMPLETED"
             data["worker_claimed_complete"] = True
             data["tests"] = dict(total=1, passed=0, failed=1, skipped=0)
             data["evidence"]["test_log_path"] = "test.log"
-            data["files_changed"] = [f"phase_{context.phase_id}_artifact.txt", "test.log"]
         elif self.cli_scenario == "claim-without-evidence":
             data["status"] = "COMPLETED"
             data["worker_claimed_complete"] = True
             data["tests"] = None
             data["evidence"]["test_log_path"] = None
-            data["files_changed"] = []
         return AgentResult.model_validate(data)
 
 
@@ -283,7 +280,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 1
 
-        state = state_mgr.load()
+        state = state_mgr.load(project)
         payload = {
             "project_id": state.project_id,
             "run_id": state.run_id,
@@ -324,24 +321,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         versions = VersionManager(repo_root, project.project.id, worktree_root=worktree_root)
         recovery = RecoveryManager(project, state_mgr, versions)
 
+        current_state = state_mgr.load(project)
         decision = recovery.inspect(
             RecoveryRequest(
                 recovery_id="cli-inspect",
                 classification=FailureClassification.CONTROLLER_RESTART,
             )
         )
+        phase_id = (
+            decision.continuation.phase_id if decision.continuation else current_state.current_phase
+        )
+        attempt = (
+            decision.continuation.attempt
+            if decision.continuation
+            else current_state.current_attempt
+        )
+        reason = decision.reasons[0] if decision.reasons else None
         payload = {
             "decision": (
                 decision.action.value if hasattr(decision.action, "value") else str(decision.action)
             ),
             "classification": (
                 decision.classification.value
-                if hasattr(decision.classification, "value")
+                if decision.classification and hasattr(decision.classification, "value")
                 else str(decision.classification)
+                if decision.classification
+                else None
             ),
-            "phase_id": decision.phase_id,
-            "attempt": decision.attempt,
-            "reason": decision.reason,
+            "phase_id": phase_id,
+            "attempt": attempt,
+            "reason": reason,
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -411,17 +420,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout_seconds=60,
         )
 
+        existing_state = state_mgr.load(project)
+        if existing_state.completed_phases:
+            last_completed = existing_state.completed_phases[-1]
+            try:
+                prior_stable = versions.inspect_checkpoint(f"phase-{last_completed}-pass")
+                subprocess.run(
+                    ["git", "-C", str(repo_root), "merge", "--ff-only", prior_stable.git_commit],
+                    check=False,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
+
         result = asyncio.run(controller_engine.run_phase(project, phase_id, policy=policy))
-        current_state = state_mgr.load()
+        current_state = state_mgr.load(project)
+
+        if result.outcome == "PASS" and result.stable_checkpoint:
+            try:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repo_root),
+                        "merge",
+                        "--ff-only",
+                        result.stable_checkpoint.git_commit,
+                    ],
+                    check=False,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
 
         gate_action = None
         if result.gate_decision and result.gate_decision.actions:
             gate_action = result.gate_decision.actions[0].value
 
         stable_ckpt = (
-            result.stable_checkpoint.tag
-            if result.stable_checkpoint and result.stable_checkpoint.tag
-            else result.stable_checkpoint.checkpoint_id
+            getattr(result.stable_checkpoint, "git_ref", None)
+            or getattr(result.stable_checkpoint, "checkpoint_id", None)
             if result.stable_checkpoint
             else None
         )
