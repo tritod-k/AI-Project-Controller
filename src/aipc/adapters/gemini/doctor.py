@@ -1,9 +1,32 @@
-"""Presence-only readiness, no login, credential contents or CLI execution."""
+"""Presence and dynamic runtime qualification for Gemini and Antigravity CLI."""
 
 import importlib.util
 import os
 import shutil
+import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+
+QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2"})
+REQUIRED_AGY_FLAGS: tuple[str, ...] = (
+    "--sandbox",
+    "--mode",
+    "--settings",
+    "--output-format",
+    "--disable-slash-commands",
+)
+
+
+@dataclass(frozen=True)
+class AntigravityQualificationResult:
+    """Detailed facts regarding Antigravity CLI runtime security qualification."""
+
+    qualified: bool
+    version: str | None
+    reason: str
+
+
+_qualification_cache: dict[tuple[str, float], AntigravityQualificationResult] = {}
 
 
 def find_agy_executable() -> Path | None:
@@ -22,7 +45,106 @@ def find_agy_executable() -> Path | None:
     return None
 
 
+def qualify_antigravity_runtime(
+    config=None, *, executable: Path | None = None
+) -> AntigravityQualificationResult:
+    """Dynamically verify Antigravity CLI executable, version, security flags, and configuration."""
+    exe = executable or find_agy_executable()
+    if exe is None or not Path(exe).is_file():
+        return AntigravityQualificationResult(
+            qualified=False,
+            version=None,
+            reason="agy CLI executable not found on host",
+        )
+
+    try:
+        mtime = Path(exe).stat().st_mtime
+    except OSError as exc:
+        return AntigravityQualificationResult(
+            qualified=False,
+            version=None,
+            reason=f"cannot stat agy executable: {exc}",
+        )
+
+    cache_key = (str(Path(exe).resolve()), mtime)
+    cached = _qualification_cache.get(cache_key)
+
+    if cached is None:
+        # 1. Verify exact version
+        try:
+            ver_res = subprocess.run(
+                [str(exe), "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            raw_ver = (ver_res.stdout or ver_res.stderr or "").strip().split()
+            version_str = raw_ver[0] if raw_ver else "unknown"
+            if ver_res.returncode != 0 or version_str not in QUALIFIED_AGY_VERSIONS:
+                cached = AntigravityQualificationResult(
+                    qualified=False,
+                    version=version_str,
+                    reason=(
+                        f"unqualified agy version '{version_str}', "
+                        f"expected one of {sorted(QUALIFIED_AGY_VERSIONS)}"
+                    ),
+                )
+            else:
+                # 2. Verify required security flags in help output
+                help_res = subprocess.run(
+                    [str(exe), "-h"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=5,
+                )
+                help_text = (help_res.stdout or "") + (help_res.stderr or "")
+                missing = [flag for flag in REQUIRED_AGY_FLAGS if flag not in help_text]
+                if missing:
+                    cached = AntigravityQualificationResult(
+                        qualified=False,
+                        version=version_str,
+                        reason=f"agy CLI missing required security flags: {missing}",
+                    )
+                else:
+                    cached = AntigravityQualificationResult(
+                        qualified=True,
+                        version=version_str,
+                        reason="qualified",
+                    )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            cached = AntigravityQualificationResult(
+                qualified=False,
+                version=None,
+                reason=f"failed executing agy qualification probe: {exc}",
+            )
+        _qualification_cache[cache_key] = cached
+
+    if not cached.qualified:
+        return cached
+
+    # 3. Verify configuration constraints if config provided
+    if config is not None:
+        mode = getattr(config, "approval_mode", "accept-edits")
+        if mode not in ("plan", "accept-edits"):
+            return AntigravityQualificationResult(
+                qualified=False,
+                version=cached.version,
+                reason=f"unsafe approval_mode '{mode}' (only 'plan' or 'accept-edits' permitted)",
+            )
+        if getattr(config, "disable_slash_commands", True) is False:
+            return AntigravityQualificationResult(
+                qualified=False,
+                version=cached.version,
+                reason="disable_slash_commands must be True",
+            )
+
+    return cached
+
+
 def runtime_info():
+    """Inspect official Gemini ACP runtime readiness."""
     return {
         "node_present": shutil.which("node") is not None,
         "npm_present": shutil.which("npm") is not None,
@@ -40,7 +162,7 @@ def runtime_info():
 
 
 def antigravity_runtime_info() -> dict[str, object]:
-    """Inspect Antigravity presence and readiness without credential or process execution."""
+    """Inspect Antigravity presence and dynamic readiness qualification."""
     local_appdata = os.environ.get("LOCALAPPDATA", "")
     desktop_exe = (
         Path(local_appdata) / "Programs" / "antigravity" / "Antigravity.exe"
@@ -56,7 +178,9 @@ def antigravity_runtime_info() -> dict[str, object]:
     except (ModuleNotFoundError, ValueError):
         sdk_installed = False
 
-    cli_ready = agy_exe is not None and oauth_present
+    qual_result = qualify_antigravity_runtime(executable=agy_exe)
+    cli_ready = qual_result.qualified and oauth_present
+
     return {
         "agy_cli_present": agy_exe is not None,
         "agy_executable": str(agy_exe) if agy_exe is not None else None,
@@ -67,9 +191,10 @@ def antigravity_runtime_info() -> dict[str, object]:
         ).is_file(),
         "sdk_installed": sdk_installed,
         "headless_supported_by_desktop": False,
-        "headless_supported_by_cli": agy_exe is not None,
+        "headless_supported_by_cli": qual_result.qualified,
         "effective_security_verified": cli_ready,
-        "sandbox_verified": False,
+        "sandbox_verified": cli_ready,
+        "runtime_version": qual_result.version,
         "qualified_capabilities": {
             "filesystem": "AVAILABLE" if cli_ready else "UNVERIFIED",
             "filesystem_write": "AVAILABLE" if cli_ready else "UNVERIFIED",
@@ -85,9 +210,19 @@ def antigravity_runtime_info() -> dict[str, object]:
             "shell/git/network tools are blocked via permission deny rules while isolated "
             "workspace filesystem read/write is qualified via AntigravityCliTransport"
             if cli_ready
-            else "agy CLI or Antigravity OAuth session is not present on this host"
+            else qual_result.reason
+            if not qual_result.qualified
+            else "Antigravity OAuth session is not present on this host (~/.gemini/antigravity)"
         ),
     }
 
 
-__all__ = ["find_agy_executable", "runtime_info", "antigravity_runtime_info"]
+__all__ = [
+    "AntigravityQualificationResult",
+    "QUALIFIED_AGY_VERSIONS",
+    "REQUIRED_AGY_FLAGS",
+    "antigravity_runtime_info",
+    "find_agy_executable",
+    "qualify_antigravity_runtime",
+    "runtime_info",
+]

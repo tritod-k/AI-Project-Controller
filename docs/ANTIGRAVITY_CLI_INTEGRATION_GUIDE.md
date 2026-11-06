@@ -76,7 +76,23 @@ Pytest and Python compile `.pyc` and `.pytest_cache` directories during verifica
 To prevent false dirty workspace rejections:
 1. Pytest is invoked with `-p no:cacheprovider` and `sys.dont_write_bytecode = True` (`-B`).
 2. `AntigravityCliTransport._post_turn_host_finalize` sweeps and purges any temporary `__pycache__` and `.pytest_cache` folders before invoking `git add -A`.
-3. Host verification tests are executed. If tests pass, an attempt commit is created with an objective diff and test receipt.
+3. Host verification tests are executed in an isolated process sandbox. If tests pass, an attempt commit is created with an objective diff and test receipt; if verification fails, no Git commit is created and failure logs are preserved.
+
+### 3.3 Isolated Host Verification Sandbox (`_run_isolated_verification`)
+Granting `filesystem_write` to an agent creates the risk that malicious or compromised test code in `tests/*.py` could execute arbitrary host shell commands or access sensitive files (such as `~/.gemini/antigravity` OAuth sessions) when `pytest` runs on the Host. To eliminate this attack surface, AIPC runs host verification in an isolated sandbox:
+1. **Immutable Configuration Guard**:
+   - `snapshot_build_and_hook_configs()` snapshots SHA-256 digests of all workspace build and hook files (`.git/config`, `.git/hooks/*`, `pyproject.toml`, `pytest.ini`, `setup.cfg`, `setup.py`, `tox.ini`, `conftest.py`, `*.pth`).
+   - `check_build_config_mutations()` verifies digests before verification. Any detected modification aborts execution and raises `GeminiProtocolError`.
+2. **Ephemeral Isolated Environment**:
+   - Verification executes with ephemeral `home/` (`USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`) and `tmp/` (`TEMP`, `TMP`, `TMPDIR`) paths.
+   - All Host secrets (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, etc.) are stripped from the environment.
+3. **Python Audit Hook (`sitecustomize.py`)**:
+   - A `sitecustomize.py` file is injected into `PYTHONPATH` before pytest executes, installing an immutable `sys.addaudithook`:
+     - **Blocks Network**: Intercepts `socket.connect`, `socket.bind`, `socket.getaddrinfo`, and `urllib.Request`, raising `PermissionError`.
+     - **Blocks Subprocesses**: Intercepts `subprocess.Popen`, `os.system`, `os.spawn*`, `winreg.*`, and `os.startfile`, raising `PermissionError`.
+     - **Enforces Filesystem Boundary**: Resolves symlinks/reparse points; permits file modifications only within the workspace and ephemeral sandbox; forbids reading user profile directories or host parent paths.
+4. **Git Hook Neutralization**:
+   - Host git operations run with `-c core.hooksPath=/dev/null` and `--no-verify`, ensuring agent-written hooks are completely ignored.
 
 ---
 
@@ -86,10 +102,10 @@ Under AIPC qualification rules (`Stage 4B`), provider capabilities are classifie
 
 | Capability | Status | Implementation & Enforcement Notes |
 |---|---|---|
-| **`filesystem_write`** | **`AVAILABLE`** | Restricted strictly to the active `VersionManager` attempt worktree path. Writes outside the worktree are prohibited. |
-| **`shell`** | **`BLOCKED`** | Agent subprocess is disallowed from spawning arbitrary host shell processes. Test commands and git commands are executed strictly by the AIPC host harness. |
-| **`git`** | **`BLOCKED`** | The agent cannot run raw `git` commands. Branching, tags, and commits are owned exclusively by AIPC `VersionManager`. |
-| **`network`** | **`BLOCKED`** | Outbound network calls from the workspace during execution are blocked. |
+| **`filesystem_write`** | **`AVAILABLE`** | Restricted strictly to the active `VersionManager` attempt worktree path. Writes outside the worktree, `.git`, or `.env*` are prohibited. Symlinks and NTFS junctions pointing outside the workspace are rejected via `scan_workspace_integrity()`. |
+| **`shell`** | **`BLOCKED`** | Agent subprocess is disallowed from spawning arbitrary host shell processes (`run_command` rejected; `allow_shell_commands: false` in settings). Subprocesses in test code are blocked via `sys.addaudithook`. |
+| **`git`** | **`BLOCKED`** | The agent cannot run raw `git` commands. Branching, tags, and commits are owned exclusively by AIPC `VersionManager` with `-c core.hooksPath=/dev/null`. |
+| **`network`** | **`BLOCKED`** | Outbound network calls from the workspace during execution and test verification are blocked via settings and `sys.addaudithook`. |
 | **`approval_events`** | **`BLOCKED`** | Antigravity CLI does not expose an interactive pre-mutation JSON-RPC approval protocol. Failing-safe default applies. |
 | **`streaming_events`**| **`AVAILABLE`** | Real-time token consumption, session ID, turn ID, and event logs are streamed via `stream-json`. |
 

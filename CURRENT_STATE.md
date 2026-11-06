@@ -13,7 +13,7 @@ Operational Readiness Validation (Post-Phase 22 Operational Deployment)
 AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 02 (AWAITING_REVIEW)
+Attempt 03 (AWAITING_REVIEW)
 
 ## Phase Gate
 PENDING
@@ -26,8 +26,8 @@ Branch: validation/operational-readiness.
 validation/operational-readiness, H:/000ProjectCode/AI_Project_Controller.
 
 ## Last Commit
-a2dabd3559795ff3765108d3844fe2a76f27230b (Batch 1: Operational CLI, Full Mock E2E, Provider Qualification Tests).
-Operational validation attempt 02 commit pending on validation/operational-readiness.
+4cb648579f5776f991113a3f2d1fa2b533f60260 (AIPC Phase post-22 attempt 02 - Antigravity CLI live integration and operational verification).
+Attempt 03 pre-merge security hardening verified on validation/operational-readiness.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -126,31 +126,41 @@ None — All 23 architectural phases (Phases 00–22) complete! Operational read
 ---
 
 ## Current Work
-Completed full operational verification and live Antigravity CLI integration:
-1. Created `AntigravityCliTransport` & `AntigravityNormalizer` with streaming JSON telemetry, `--mode accept-edits --sandbox`, and automatic cache purging (`-p no:cacheprovider`).
-2. Updated doctor reporting (`antigravity_runtime_info()`) to handle local present vs absent/CI environments gracefully.
-3. Added end-to-end transport contract and fallback test `test_t4_antigravity_cli_transport_contract_and_fallback`.
-4. Executed Section 8 (Real Coding Test), Section 9 (Live Quota Fallback), and Section 10 (Portfolio Live Enhancement) to 100% PASS.
-5. Documented architecture in `docs/ANTIGRAVITY_CLI_INTEGRATION_GUIDE.md` and updated readiness matrices across all documentation.
+Completed Attempt 03 Independent Pre-Merge Security & Release Readiness Review:
+1. **Priority 1 (Host Verification Execution Security)**:
+   - Implemented `snapshot_build_and_hook_configs()` and `check_build_config_mutations()` in `AntigravityCliTransport` to guard against tampering with `.git/config`, `.git/hooks/*`, `pyproject.toml`, `pytest.ini`, `setup.cfg`, `setup.py`, `tox.ini`, `conftest.py`, and `*.pth`. Any agent mutation triggers `GeminiProtocolError` before host test execution.
+   - Built `_run_isolated_verification()` sandbox with isolated `home/` (`USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`) and `tmp/` (`TEMP`, `TMP`, `TMPDIR`), sanitized environment stripping Host secrets, and a `sitecustomize.py` installing a strict Python `sys.addaudithook`. The audit hook blocks outbound network calls (`socket.*`, `urllib.*`), subprocess/shell execution (`subprocess.Popen`, `os.system`, `os.spawn*`, `winreg.*`), and directory escapes outside the workspace/sandbox.
+2. **Priority 2 (Sandbox & Permission Enforcement)**:
+   - Implemented `scan_workspace_integrity()` to recursively detect and reject reparse points, junctions, and symlinks pointing outside the workspace.
+   - Enforced strict `ALLOWED_AGY_TOOLS` whitelist (`run_command` forbidden; prohibited tool execution triggers `GeminiProtocolError`).
+   - Hardened `--settings` JSON with explicit permission deny list for shell and git commands.
+3. **Priority 3 (Dynamic Capability Qualification)**:
+   - Upgraded `doctor.py` (`qualify_antigravity_runtime()`) to dynamically inspect real `agy.exe` presence, version `1.5.2`, required security flags, and explicitly reject `--yolo` mode.
+4. **Priority 4 (Git & Test Evidence Integrity)**:
+   - Preserved pre-turn dirty files across runs; disabled untrusted git hooks using `-c core.hooksPath=/dev/null` and `--no-verify`.
+   - Guaranteed that host verification failure never creates a Git commit and captures failed test logs directly into the canonical receipt.
+5. **Priority 5 (CI Workflow Coverage)**:
+   - Updated `.github/workflows/ci.yml` fast-test job to validate `tests/gemini`, `test_cli.py`, `test_full_mock_e2e.py`, and `test_provider_qualification_and_fallback.py`.
 
 ## Tests
-- `tests/e2e/test_provider_qualification_and_fallback.py`: 13 passed in 251.12s.
+- `tests/gemini/test_antigravity_transport.py`: 20 passed in 13.31s (including negative security tests for external secret reads, network calls, subprocess spawns, build file tampering, and junction escapes).
+- `tests/e2e/test_provider_qualification_and_fallback.py`: 13 passed in 154.64s.
 - `tests/integration/test_cli.py`: 4 passed in 0.95s.
 - `tests/e2e/test_full_mock_e2e.py`: 8 passed in 10.3s.
-- `tests/gemini/`: 90 passed.
 - `Test_AI_CONTROLLER_me\tests\test_website.py`: 12 passed in 0.17s.
+- Code quality & formatting: `ruff check .` (0 errors), `ruff format --check .` (288 files clean).
 
 ## Required Fixes / Remaining Work
-Awaiting Controller review and Phase Gate evaluation. Worker does NOT self-advance to PASS.
+Awaiting Controller independent review and Phase Gate evaluation. Worker does NOT self-advance to PASS.
 
 ## Warnings / Known Issues
 None.
 
 ## Recovery Notes
-Branch `validation/operational-readiness` is clean and ready for review.
+Branch `validation/operational-readiness` contains verified security hardening, negative test suites, and documentation updates. `master` branch remains clean and protected at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`.
 
 ## Next Action
-Controller review of Phase Completion Report and Operational Readiness Evidence.
+Controller review of Attempt 03 Pre-Merge Security Hardening and Phase Completion Report.
 
 ## Timestamp
-2026-11-06T23:18:00+07:00
+2026-11-07T00:33:00+07:00

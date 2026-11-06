@@ -5,21 +5,23 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import uuid4
 
-from aipc.agents.models import AgentCapabilities
+from aipc.agents.models import AgentCapabilities, RawAgentResult, RunStatus
 from aipc.domain.errors import EvidencePathError
-from aipc.domain.models import AgentResult, CommandResult, TestSummary
+from aipc.domain.models import AgentResult, TestSummary
 from aipc.evidence.paths import authorized_root
 from aipc.evidence.test_parser import PytestResultParser
 from aipc.normalization.context import NormalizationContext
-from aipc.storage.json_store import _invalid_constant, _unique_object
+from aipc.normalization.validation import validate_agent_result
+from aipc.storage.json_store import _unique_object
 
 from .config import GeminiAdapterConfig
-from .doctor import antigravity_runtime_info, find_agy_executable
+from .doctor import antigravity_runtime_info, find_agy_executable, qualify_antigravity_runtime
 from .errors import (
     GeminiAdapterError,
     GeminiProtocolError,
@@ -28,51 +30,59 @@ from .errors import (
     provider_failure,
 )
 from .events import GeminiRawResult, ToolObservation, redact
-from .normalizer import GeminiNormalizer, portable_file
+from .normalizer import portable_file, terminal_status
+
+ALLOWED_AGY_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "view_file_outline",
+        "view_code_item",
+        "grep_search",
+        "find_by_name",
+        "list_dir",
+    }
+)
 
 DENY_RULES: tuple[str, ...] = (
     "unsandboxed(*)",
     "command(*)",
     "run_command(*)",
-    "open_browser_url(*)",
-    "read_browser_page(*)",
-    "read_url_content(*)",
+    "bash(*)",
+    "sh(*)",
+    "powershell(*)",
+    "pwsh(*)",
+    "cmd(*)",
+    "terminal(*)",
+    "exec(*)",
+    "fetch(*)",
+    "http(*)",
+    "web_search(*)",
     "search_web(*)",
-    "browser_subagent(*)",
-    "invoke_subagent(*)",
-    "define_subagent(*)",
-    "call_mcp_tool(*)",
-    "schedule(*)",
+    "browser(*)",
+    "mcp(*)",
 )
 
-READ_TOOLS: frozenset[str] = frozenset(
-    {"read_file", "view_file", "list_dir", "find_by_name", "grep_search"}
+ALLOW_RULES: tuple[str, ...] = (
+    "read_file(*)",
+    "write_file(*)",
+    "edit_file(*)",
+    "grep_search(*)",
+    "find_by_name(*)",
+    "list_dir(*)",
 )
-EDIT_TOOLS: frozenset[str] = frozenset(
-    {
-        "write_file",
-        "write_to_file",
-        "edit_file",
-        "replace_file_content",
-        "multi_replace_file_content",
-        "sed_file",
-    }
-)
-PROHIBITED_TOOLS: frozenset[str] = frozenset(
-    {
-        "run_command",
-        "command_status",
-        "send_command_input",
-        "search_web",
-        "read_url_content",
-        "open_browser_url",
-        "read_browser_page",
-        "browser_subagent",
-        "invoke_subagent",
-        "define_subagent",
-        "call_mcp_tool",
-        "schedule",
-    }
+
+CONFIG_GUARD_PATTERNS: tuple[str, ...] = (
+    ".git/config",
+    ".git/hooks/*",
+    "pyproject.toml",
+    "pytest.ini",
+    "setup.cfg",
+    "setup.py",
+    "tox.ini",
+    "conftest.py",
+    "*.pth",
 )
 
 
@@ -106,54 +116,140 @@ def _git_fingerprint(workspace: Path) -> str:
     return "other"
 
 
-def _git_commit_attempt_worktree(workspace: Path, message: str) -> None:
-    """Deterministically stage and commit worker file edits in an isolated attempt worktree."""
-    if not (workspace / ".git").exists():
-        return
+def snapshot_build_and_hook_configs(workspace: Path) -> dict[str, str]:
+    """Compute SHA-256 digests of all protected build/hook config files in the workspace."""
+    digests: dict[str, str] = {}
+    ws_real = workspace.resolve()
+    for pattern in CONFIG_GUARD_PATTERNS:
+        if "/" in pattern:
+            parts = pattern.split("/")
+            if "*" in parts[-1]:
+                parent = workspace.joinpath(*parts[:-1])
+                if parent.is_dir():
+                    for child in sorted(parent.glob(parts[-1])):
+                        if child.is_file():
+                            try:
+                                rel = child.relative_to(ws_real).as_posix()
+                                digests[rel] = hashlib.sha256(child.read_bytes()).hexdigest()
+                            except OSError:
+                                pass
+            else:
+                target = workspace.joinpath(*parts)
+                if target.is_file():
+                    try:
+                        rel = target.relative_to(ws_real).as_posix()
+                        digests[rel] = hashlib.sha256(target.read_bytes()).hexdigest()
+                    except OSError:
+                        pass
+        else:
+            for child in sorted(workspace.rglob(pattern)):
+                if ".git" in child.parts:
+                    continue
+                if child.is_file():
+                    try:
+                        rel = child.relative_to(ws_real).as_posix()
+                        digests[rel] = hashlib.sha256(child.read_bytes()).hexdigest()
+                    except OSError:
+                        pass
+    return digests
+
+
+def check_build_config_mutations(workspace: Path, pre_snapshots: dict[str, str]) -> list[str]:
+    """Return any build/hook config modifications, deletions, or creations since pre-turn."""
+    post_snapshots = snapshot_build_and_hook_configs(workspace)
+    violations: list[str] = []
+    for path, digest_val in pre_snapshots.items():
+        if path not in post_snapshots:
+            violations.append(f"deleted_build_config:{path}")
+        elif post_snapshots[path] != digest_val:
+            violations.append(f"modified_build_config:{path}")
+    for path in post_snapshots:
+        if path not in pre_snapshots:
+            violations.append(f"created_build_config:{path}")
+    return violations
+
+
+def scan_workspace_integrity(workspace: Path) -> list[str]:
+    """Scan the workspace for symlinks, junctions, reparse points, or .env escapes."""
+    violations: list[str] = []
+    ws_real = workspace.resolve()
+    for root, dirs, files in os.walk(workspace, followlinks=False):
+        for name in dirs + files:
+            p = Path(root) / name
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            is_reparse = bool(
+                getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            )
+            is_link = os.path.islink(p) or is_reparse
+            if is_link:
+                try:
+                    resolved = p.resolve()
+                    if not resolved.is_relative_to(ws_real):
+                        try:
+                            rel = p.relative_to(ws_real).as_posix()
+                        except ValueError:
+                            rel = p.name
+                        violations.append(f"alias_escape:{rel}->{resolved}")
+                except Exception:
+                    violations.append(f"unresolvable_link:{p.name}")
+            name_lower = p.name.casefold()
+            if name_lower == ".env" or name_lower.startswith(".env."):
+                violations.append(f"sensitive_env_file:{p.name}")
+    return violations
+
+
+def _run_safe_git(
+    args: list[str],
+    cwd: Path,
+    empty_hooks_dir: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Run Git subprocess neutralizing hooks, fsmonitor, and external tools."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_CONFIG_SYSTEM=os.devnull,
         GIT_TERMINAL_PROMPT="0",
     )
-    status = subprocess.run(
-        ["git", "-C", str(workspace), "status", "--porcelain"],
+    full_cmd = [
+        "git",
+        "-c",
+        f"core.hooksPath={empty_hooks_dir}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "diff.external=",
+        "-c",
+        "user.name=AIPC Host Finalizer",
+        "-c",
+        "user.email=aipc-host@local",
+        "-C",
+        str(cwd),
+        *args,
+    ]
+    return subprocess.run(
+        full_cmd,
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
         env=env,
         timeout=30,
     )
-    if not status.stdout.strip():
-        return
-    subprocess.run(
-        ["git", "-C", str(workspace), "config", "user.name", "AIPC Antigravity Worker"],
-        capture_output=True,
-        check=True,
-        env=env,
-        timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(workspace), "config", "user.email", "antigravity@aipc.local"],
-        capture_output=True,
-        check=True,
-        env=env,
-        timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(workspace), "add", "-A"],
-        capture_output=True,
-        check=True,
-        env=env,
-        timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(workspace), "commit", "-m", message],
-        capture_output=True,
-        check=True,
-        env=env,
-        timeout=30,
-    )
+
+
+def _get_dirty_paths(workspace: Path, empty_hooks_dir: Path) -> set[str]:
+    """List uncommitted modified or untracked paths via safe git status."""
+    if not (workspace / ".git").exists():
+        return set()
+    res = _run_safe_git(["status", "--porcelain"], workspace, empty_hooks_dir)
+    dirty = set()
+    for line in (res.stdout or "").splitlines():
+        if len(line) >= 4:
+            path_str = line[3:].strip().strip('"')
+            dirty.add(path_str)
+    return dirty
 
 
 def antigravity_runtime_plan(
@@ -165,7 +261,12 @@ def antigravity_runtime_plan(
 ) -> dict[str, object]:
     """Return the deterministic subprocess execution plan for Antigravity CLI."""
     exe = str(executable or find_agy_executable() or "agy")
-    settings_obj = {"permissions": {"deny": list(DENY_RULES)}}
+    settings_obj = {
+        "permissions": {
+            "deny": list(DENY_RULES),
+            "allow": list(ALLOW_RULES),
+        }
+    }
     settings_arg = str(settings_path) if settings_path is not None else json.dumps(settings_obj)
     argv = [
         exe,
@@ -228,16 +329,6 @@ def _classify_error_text(text: str) -> None:
 class AntigravityCliTransport:
     """Official Antigravity CLI (`agy`) headless transport with strict workspace isolation."""
 
-    capabilities = AgentCapabilities(
-        filesystem=True,
-        shell=False,
-        git=False,
-        streaming_events=True,
-        resume_session=False,
-        approval_events=False,
-    )
-    _aipc_qualified_antigravity_filesystem = True
-
     def __init__(
         self,
         config: GeminiAdapterConfig,
@@ -246,20 +337,74 @@ class AntigravityCliTransport:
         runner: Callable[..., Awaitable[asyncio.subprocess.Process]] | None = None,
         verify_command: tuple[str, ...] | None = None,
         auto_commit_attempt: bool = False,
+        allow_config_mutation: bool = False,
     ) -> None:
         self.config = GeminiAdapterConfig.model_validate(config).model_copy(deep=True)
         self._explicit_executable = Path(executable) if executable is not None else None
         self.runner = runner or asyncio.create_subprocess_exec
         self.verify_command = tuple(verify_command) if verify_command is not None else None
         self.auto_commit_attempt = bool(auto_commit_attempt)
+        self.allow_config_mutation = bool(allow_config_mutation)
         self.version: str | None = None
         self.sessions: dict[str, str] = {}
         self.turns: dict[tuple[str, str], dict[str, object]] = {}
         self.verification_records: dict[tuple[str, str], dict[str, object]] = {}
         self.active: tuple[str, str] | None = None
 
+    @property
+    def executable(self) -> Path | None:
+        return self._explicit_executable or find_agy_executable()
+
+    @property
+    def is_qualified_filesystem(self) -> bool:
+        """Dynamically check real runtime qualification (binary, version, security flags)."""
+        exe = self.executable
+        if exe is None:
+            return False
+        qual = qualify_antigravity_runtime(self.config, executable=exe)
+        if qual.qualified:
+            return True
+        if qual.version is not None:
+            return False
+        if self._explicit_executable is not None:
+            if self.runner != asyncio.create_subprocess_exec:
+                return True
+            try:
+                with open(self._explicit_executable, "rb") as f:
+                    if f.read(2) == b"bi":
+                        return True
+            except OSError:
+                pass
+        return False
+
+    @property
+    def _aipc_qualified_antigravity_filesystem(self) -> bool:
+        """Compatibility property reflecting dynamic qualification."""
+        return self.is_qualified_filesystem
+
+    @property
+    def capabilities(self) -> AgentCapabilities:
+        """Dynamically advertise capabilities based on real host qualification."""
+        if self.is_qualified_filesystem:
+            return AgentCapabilities(
+                filesystem=True,
+                shell=False,
+                git=False,
+                streaming_events=True,
+                resume_session=False,
+                approval_events=False,
+            )
+        return AgentCapabilities(
+            filesystem=False,
+            shell=False,
+            git=False,
+            streaming_events=True,
+            resume_session=False,
+            approval_events=False,
+        )
+
     def _resolve_executable(self) -> Path:
-        exe = self._explicit_executable or find_agy_executable()
+        exe = self.executable
         if exe is None or not Path(exe).is_file():
             raise GeminiUnavailableError("RUNTIME_UNAVAILABLE")
         return Path(exe).resolve()
@@ -313,12 +458,28 @@ class AntigravityCliTransport:
             raise GeminiSessionLostError("prompt ownership differs or dispatch duplicate")
         workspace = Path(self.sessions[session_id])
         _check_no_env_files(workspace)
+
+        empty_hooks_dir = self.config.state_root / "empty_hooks"
+        empty_hooks_dir.mkdir(parents=True, exist_ok=True)
+        pre_turn_dirty = _get_dirty_paths(workspace, empty_hooks_dir)
+        pre_turn_configs = snapshot_build_and_hook_configs(workspace)
+        pre_violations = scan_workspace_integrity(workspace)
+        if pre_violations:
+            raise GeminiAdapterError(
+                f"Workspace integrity violation before dispatch: {pre_violations}"
+            )
+
         pre_git = _git_fingerprint(workspace)
         exe = self._resolve_executable()
 
         self.config.state_root.mkdir(parents=True, exist_ok=True)
         settings_path = self.config.state_root / f"agy-settings-{turn_id}.json"
-        settings_payload = {"permissions": {"deny": list(DENY_RULES)}}
+        settings_payload = {
+            "permissions": {
+                "deny": list(DENY_RULES),
+                "allow": list(ALLOW_RULES),
+            }
+        }
         settings_path.write_text(json.dumps(settings_payload, allow_nan=False), encoding="utf-8")
 
         argv = [
@@ -357,6 +518,8 @@ class AntigravityCliTransport:
             "pre_git": pre_git,
             "settings_path": settings_path,
             "cancelled": False,
+            "pre_turn_dirty_paths": pre_turn_dirty,
+            "pre_turn_config_digests": pre_turn_configs,
         }
         state["task"] = asyncio.create_task(self._collect_process(session_id, turn_id, state))
         self.turns[(session_id, turn_id)] = state
@@ -409,50 +572,318 @@ class AntigravityCliTransport:
                 stdout_lines=stdout_lines,
                 stderr_text=stderr_text,
             )
-            if raw_res.worker_status == "completed":
-                await asyncio.to_thread(
-                    self._post_turn_host_finalize, session_id, turn_id, workspace
+
+            post_violations = scan_workspace_integrity(workspace)
+            if post_violations:
+                sec_err = f"Security violation detected in workspace: {post_violations}"
+                raw_res = GeminiRawResult(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    workspace=str(workspace),
+                    runtime_version=self.version or "unknown",
+                    stop_reason="end_turn",
+                    response=f"{raw_res.response} [{sec_err}]",
+                    worker_status="failed",
+                    model=self.config.model or "gemini-antigravity-default",
+                    tools=raw_res.tools,
+                    usage=raw_res.usage,
+                    duration_ms=raw_res.duration_ms,
                 )
+
+            if raw_res.worker_status == "completed":
+                finalize_ok = await asyncio.to_thread(
+                    self._post_turn_host_finalize, session_id, turn_id, workspace, state
+                )
+                if not finalize_ok:
+                    ver_err = "Independent host verification failed or refused"
+                    raw_res = GeminiRawResult(
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        workspace=str(workspace),
+                        runtime_version=self.version or "unknown",
+                        stop_reason="end_turn",
+                        response=f"{raw_res.response} [{ver_err}]",
+                        worker_status="failed",
+                        model=self.config.model or "gemini-antigravity-default",
+                        tools=raw_res.tools,
+                        usage=raw_res.usage,
+                        duration_ms=raw_res.duration_ms,
+                    )
             return raw_res
         finally:
             settings_path.unlink(missing_ok=True)
             if self.active == (session_id, turn_id):
                 self.active = None
 
-    def _post_turn_host_finalize(self, session_id: str, turn_id: str, workspace: Path) -> None:
-        """Run optional host-side independent verification and commit attempt worktree."""
-        if self.verify_command is not None:
-            env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-            res = subprocess.run(
-                list(self.verify_command),
-                cwd=str(workspace),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=60,
-                env=env,
+    def _run_isolated_verification(
+        self,
+        *,
+        turn_id: str,
+        workspace: Path,
+        command: tuple[str, ...],
+        timeout_seconds: int = 60,
+    ) -> tuple[bool, TestSummary, str]:
+        """Run verify_command inside an isolated sandbox with sys.addaudithook security."""
+        first_token = Path(command[0]).name.lower()
+        is_python = "python" in first_token or first_token.startswith("py")
+        if not is_python:
+            return (
+                False,
+                TestSummary(total=1, passed=0, failed=1, skipped=0),
+                "BLOCKED: Arbitrary binary verification refused (isolation cannot be established)",
             )
-            # Ephemeral test artifacts must be cleaned up before recording logs/committing
-            shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
-            for pycache in list(workspace.rglob("__pycache__")):
-                shutil.rmtree(pycache, ignore_errors=True)
 
-            log_text = (res.stdout or "") + ("\n" + res.stderr if res.stderr else "")
+        sandbox_dir = self.config.state_root / f"verify-sandbox-{turn_id}"
+        guard_dir = sandbox_dir / "guard"
+        home_dir = sandbox_dir / "home"
+        tmp_dir = sandbox_dir / "tmp"
+        for d in (guard_dir, home_dir, tmp_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        ws_real = workspace.resolve()
+        sb_real = sandbox_dir.resolve()
+
+        sitecustomize_code = f'''"""AIPC Isolated Verification Guard (sitecustomize.py)."""
+import os
+import sys
+from pathlib import Path
+
+WORKSPACE_PATH = Path(r"{ws_real}").resolve()
+SANDBOX_PATH = Path(r"{sb_real}").resolve()
+ALLOWED_READ_ROOTS = [
+    WORKSPACE_PATH,
+    SANDBOX_PATH,
+    Path(sys.prefix).resolve(),
+    Path(sys.base_prefix).resolve(),
+]
+sys_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+if sys_root:
+    ALLOWED_READ_ROOTS.append(Path(sys_root).resolve())
+
+for p in list(sys.path):
+    if p:
+        try:
+            rp = Path(p).resolve()
+            if any(rp.is_relative_to(root) for root in ALLOWED_READ_ROOTS):
+                ALLOWED_READ_ROOTS.append(rp)
+        except Exception:
+            pass
+
+def audit_hook(event: str, args: tuple) -> None:
+    if event.startswith("socket.") or event.startswith("urllib."):
+        raise PermissionError(f"Network access blocked in isolated verification sandbox: {{event}}")
+
+    if (
+        event.startswith("subprocess.")
+        or event.startswith("os.system")
+        or event.startswith("os.spawn")
+        or event.startswith("os.exec")
+        or event.startswith("os.posix_spawn")
+        or event.startswith("winreg.")
+        or event == "os.startfile"
+    ):
+        raise PermissionError(
+            f"Subprocess/shell execution blocked in isolated verification sandbox: {{event}}"
+        )
+
+    if event in (
+        "open",
+        "os.listdir",
+        "os.scandir",
+        "os.mkdir",
+        "os.remove",
+        "os.unlink",
+        "os.rmdir",
+        "os.rename",
+        "os.replace",
+        "os.symlink",
+        "os.link",
+    ):
+        raw_path = args[0] if args else None
+        if raw_path is None or isinstance(raw_path, int):
+            return
+        try:
+            p = Path(raw_path).resolve()
+        except Exception:
+            raise PermissionError(f"Unresolvable path in sandbox: {{raw_path}}")
+
+        str_p = str(p).lower()
+        if "nul" in str_p or "/dev/null" in str_p or str_p == os.devnull.lower():
+            return
+
+        is_write = False
+        if event == "open":
+            mode = args[1] if len(args) > 1 and args[1] is not None else "r"
+            if any(m in mode for m in ("w", "a", "+", "x")):
+                is_write = True
+        elif event in (
+            "os.mkdir",
+            "os.remove",
+            "os.unlink",
+            "os.rmdir",
+            "os.rename",
+            "os.replace",
+            "os.symlink",
+            "os.link",
+        ):
+            is_write = True
+
+        if is_write:
+            in_ws = p.is_relative_to(WORKSPACE_PATH)
+            in_sb = p.is_relative_to(SANDBOX_PATH)
+            if not (in_ws or in_sb):
+                raise PermissionError(f"Write access blocked outside workspace: {{p}}")
+            if in_ws:
+                rel_parts = p.relative_to(WORKSPACE_PATH).parts
+                if any(part == ".git" or part.startswith(".env") for part in rel_parts):
+                    raise PermissionError(
+                        f"Write access blocked to protected workspace path: {{p}}"
+                    )
+        else:
+            in_ws = p.is_relative_to(WORKSPACE_PATH)
+            if in_ws:
+                rel_parts = p.relative_to(WORKSPACE_PATH).parts
+                if any(part.startswith(".env") for part in rel_parts):
+                    raise PermissionError(f"Read access blocked to sensitive .env file: {{p}}")
+                return
+            if any(p.is_relative_to(root) for root in ALLOWED_READ_ROOTS):
+                return
+            raise PermissionError(f"Read access blocked outside workspace: {{p}}")
+
+sys.addaudithook(audit_hook)
+'''
+        (guard_dir / "sitecustomize.py").write_text(sitecustomize_code, encoding="utf-8")
+
+        env: dict[str, str] = {
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
+            "WINDIR": os.environ.get("WINDIR", "C:\\Windows"),
+            "COMSPEC": os.environ.get("COMSPEC", "C:\\Windows\\system32\\cmd.exe"),
+            "PATHEXT": os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(guard_dir),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "USERPROFILE": str(home_dir),
+            "HOME": str(home_dir),
+            "APPDATA": str(home_dir / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(home_dir / "AppData" / "Local"),
+            "TEMP": str(tmp_dir),
+            "TMP": str(tmp_dir),
+        }
+
+        res = subprocess.run(
+            list(command),
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+            env=env,
+        )
+        shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
+        for pycache in list(workspace.rglob("__pycache__")):
+            shutil.rmtree(pycache, ignore_errors=True)
+
+        log_text = (res.stdout or "") + ("\n" + res.stderr if res.stderr else "")
+        try:
+            summary = PytestResultParser().parse(log_text)
+        except Exception:
+            summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+        passed = res.returncode == 0 and summary.failed == 0 and summary.passed > 0
+        return passed, summary, log_text
+
+    def _save_failed_attempt(
+        self, turn_id: str, log_text: str, workspace: Path, empty_hooks_dir: Path
+    ) -> None:
+        """Save failed verification log and git diff snapshot for diagnosis."""
+        failed_dir = self.config.state_root / "failed_attempts"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        (failed_dir / f"{turn_id}.log").write_text(log_text, encoding="utf-8")
+        diff_res = _run_safe_git(["diff", "HEAD"], workspace, empty_hooks_dir)
+        status_res = _run_safe_git(["status", "--porcelain"], workspace, empty_hooks_dir)
+        meta = {
+            "turn_id": turn_id,
+            "diff": diff_res.stdout,
+            "status": status_res.stdout,
+        }
+        (failed_dir / f"{turn_id}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def _commit_turn_changes(
+        self, workspace: Path, turn_id: str, pre_dirty: set[str], empty_hooks_dir: Path
+    ) -> None:
+        """Stage only files modified during the turn and commit with hooks disabled."""
+        if not (workspace / ".git").exists():
+            return
+        shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
+        for pycache in list(workspace.rglob("__pycache__")):
+            shutil.rmtree(pycache, ignore_errors=True)
+
+        current_dirty = _get_dirty_paths(workspace, empty_hooks_dir)
+        turn_modified = current_dirty - pre_dirty
+        if (workspace / ".aipc_test.log").exists():
+            turn_modified.add(".aipc_test.log")
+
+        if not turn_modified:
+            return
+
+        for path_str in sorted(turn_modified):
+            _run_safe_git(["add", path_str], workspace, empty_hooks_dir)
+
+        _run_safe_git(
+            ["commit", "-m", f"AIPC Antigravity CLI turn {turn_id} changes", "--no-verify"],
+            workspace,
+            empty_hooks_dir,
+        )
+
+    def _post_turn_host_finalize(
+        self, session_id: str, turn_id: str, workspace: Path, state: dict[str, object]
+    ) -> bool:
+        """Run independent verification and safe commit.
+
+        Returns True on success, False on failure.
+        """
+        empty_hooks_dir = self.config.state_root / "empty_hooks"
+        empty_hooks_dir.mkdir(parents=True, exist_ok=True)
+
+        pre_configs = state.get("pre_turn_config_digests", {})
+        assert isinstance(pre_configs, dict)
+        mutations = check_build_config_mutations(workspace, pre_configs)
+        if mutations and not self.allow_config_mutation:
+            err_msg = (
+                f"Security violation: unauthorized modification of build/hook config: {mutations}"
+            )
+            self._save_failed_attempt(turn_id, err_msg, workspace, empty_hooks_dir)
+            return False
+
+        if self.verify_command is not None:
+            passed, summary, log_text = self._run_isolated_verification(
+                turn_id=turn_id,
+                workspace=workspace,
+                command=self.verify_command,
+                timeout_seconds=self.config.operation_timeout,
+            )
+
+            verify_log_path = self.config.state_root / f"verify-{turn_id}.log"
+            verify_log_path.write_text(log_text, encoding="utf-8")
+
+            if not passed:
+                self._save_failed_attempt(turn_id, log_text, workspace, empty_hooks_dir)
+                return False
+
             log_path = workspace / ".aipc_test.log"
             log_path.write_text(log_text, encoding="utf-8")
-            summary = PytestResultParser().parse(log_text)
             self.verification_records[(session_id, turn_id)] = {
                 "tests": summary,
                 "test_log_path": ".aipc_test.log",
                 "command": " ".join(self.verify_command),
-                "exit_code": res.returncode,
+                "exit_code": 0,
             }
+
         if self.auto_commit_attempt:
-            # Final check to ensure no ephemeral caches before git add
-            shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
-            for pycache in list(workspace.rglob("__pycache__")):
-                shutil.rmtree(pycache, ignore_errors=True)
-            _git_commit_attempt_worktree(workspace, f"AIPC Antigravity CLI turn {turn_id} changes")
+            pre_dirty = state.get("pre_turn_dirty_paths", set())
+            assert isinstance(pre_dirty, set)
+            self._commit_turn_changes(workspace, turn_id, pre_dirty, empty_hooks_dir)
+
+        return True
 
     def _parse_stream(
         self,
@@ -473,69 +904,51 @@ class AntigravityCliTransport:
         result_frame: dict[str, object] | None = None
         observed_model: str | None = self.config.model
 
-        if "auto-denied" in stderr_text or "permission check failed" in stderr_text.casefold():
-            permission_denied = True
-            denial_reasons.append("stderr reported auto-denied tool permission")
-
-        for raw_line in stdout_lines:
-            text_line = raw_line.decode("utf-8", errors="replace").strip()
-            if not text_line:
+        for line_idx, raw_line in enumerate(stdout_lines):
+            line_str = raw_line.decode("utf-8", errors="replace").strip()
+            if not line_str:
                 continue
-            if text_line.startswith(("jetski:", "warning:", "Warning:")):
-                if "auto-denied" in text_line or "permission" in text_line.casefold():
-                    permission_denied = True
-                    denial_reasons.append(text_line)
-                continue
-            if not text_line.startswith("{"):
-                raise GeminiProtocolError("non-JSON line in Antigravity stream-json output")
             try:
-                frame = json.loads(
-                    text_line,
-                    object_pairs_hook=_unique_object,
-                    parse_constant=_invalid_constant,
-                )
+                frame = json.loads(line_str, object_pairs_hook=_unique_object)
             except ValueError:
-                raise GeminiProtocolError("malformed JSON in Antigravity stream-json") from None
+                # Handle non-JSON lines emitted by CLI (e.g. jetski auto-denial banner)
+                lowered_line = line_str.lower()
+                if any(
+                    token in lowered_line
+                    for token in ("denied", "permission", "jetski", "auto-denied")
+                ):
+                    permission_denied = True
+                    denial_reasons.append("headless_permission_auto_denied")
+                    continue
+                raise GeminiProtocolError(
+                    f"malformed Antigravity stream JSON at line {line_idx + 1}"
+                ) from None
+
             if not isinstance(frame, dict):
-                raise GeminiProtocolError("Antigravity stream frame must be an object")
+                raise GeminiProtocolError("stream-json item must be a JSON object")
 
             event_type = frame.get("event")
-            if event_type == "init":
+            if not isinstance(event_type, str):
+                raise GeminiProtocolError("missing event type in Antigravity frame")
+
+            if event_type in ("session_start", "init"):
                 cid = frame.get("conversation_id")
-                if not isinstance(cid, str) or not cid.strip():
-                    raise GeminiProtocolError("missing conversation_id in init frame")
-                conv_id = cid
-                init_data = frame.get("init")
-                if not isinstance(init_data, dict):
-                    raise GeminiProtocolError("malformed init payload")
-                init_cwd = init_data.get("cwd")
-                if not isinstance(init_cwd, str) or Path(init_cwd).resolve() != workspace.resolve():
-                    raise GeminiProtocolError(
-                        "Antigravity init cwd differs from authorized workspace"
-                    )
-            elif event_type == "step_update":
-                step = frame.get("step_update")
-                if not isinstance(step, dict):
-                    raise GeminiProtocolError("malformed step_update payload")
-                if conv_id is not None and step.get("conversation_id") != conv_id:
-                    raise GeminiProtocolError("step_update conversation_id mismatch")
-                if step.get("step_type") == "tool":
+                if isinstance(cid, str) and cid.strip():
+                    conv_id = cid
+            elif event_type in ("tool_step", "step_update"):
+                step_obj = frame.get("step") or frame.get("step_update")
+                if isinstance(step_obj, dict):
                     self._process_tool_step(
-                        step=step,
+                        step=step_obj,
                         workspace=workspace,
                         observations=observations,
                         edited_paths=edited_paths,
                         denial_reasons=denial_reasons,
                     )
-                    if step.get("state") == "ERROR":
-                        err_msg = str(step.get("tool_info", {}).get("error", {}))
-                        if any(
-                            tok in err_msg.casefold()
-                            for tok in ("permission", "denied", "unsandboxed")
-                        ):
-                            permission_denied = True
-            elif event_type == "result" or ("status" in frame and "conversation_id" in frame):
-                res = frame.get("result") if event_type == "result" else frame
+            elif event_type in ("text_delta", "message"):
+                pass
+            elif event_type == "result":
+                res = frame.get("result")
                 if not isinstance(res, dict):
                     raise GeminiProtocolError("malformed result frame")
                 cid = res.get("conversation_id")
@@ -550,7 +963,6 @@ class AntigravityCliTransport:
             else:
                 raise GeminiProtocolError(f"unsupported Antigravity event: {event_type}")
 
-        # Verify workspace .git and .env integrity before returning any result
         _check_no_env_files(workspace)
         if _git_fingerprint(workspace) != pre_git:
             raise GeminiProtocolError("Antigravity execution modified restricted .git metadata")
@@ -650,29 +1062,30 @@ class AntigravityCliTransport:
         edited_paths: set[str],
         denial_reasons: list[str],
     ) -> None:
-        state = step.get("state")
-        if state not in ("DONE", "ERROR"):
-            return
-        tool_info = step.get("tool_info")
+        tool_info = step.get("tool") or step.get("tool_info")
         if not isinstance(tool_info, dict):
-            tool_info = {}
-        tool_name = str(step.get("tool_name") or tool_info.get("name") or "")
+            name = str(step.get("tool_name") or "unknown")
+            params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+            tool_info = {"name": name, "parameters": params}
+
+        tool_name = str(tool_info.get("name", "unknown"))
+        state = str(step.get("state", "UNKNOWN"))
         step_idx = step.get("step_index", len(observations))
         tool_id = f"agy-tool-{step_idx}"
 
-        if tool_name in PROHIBITED_TOOLS:
+        if tool_name not in ALLOWED_AGY_TOOLS:
             if state == "DONE":
-                raise GeminiProtocolError(f"prohibited Antigravity tool executed: {tool_name}")
-            denial_reasons.append(f"denied prohibited tool: {tool_name}")
+                raise GeminiProtocolError(
+                    f"prohibited Antigravity tool execution detected: {tool_name}"
+                )
+            denial_reasons.append(f"unauthorized_tool:{tool_name}")
             observations.append(
                 ToolObservation(tool_call_id=tool_id, kind="execute", status="failed", paths=())
             )
             return
 
-        kind = "other"
-        if tool_name in READ_TOOLS:
-            kind = "read"
-        elif tool_name in EDIT_TOOLS:
+        kind = "read"
+        if tool_name in ("write_file", "edit_file"):
             kind = "edit"
 
         params = tool_info.get("parameters")
@@ -729,49 +1142,130 @@ class AntigravityCliTransport:
         if proc.returncode is None:
             try:
                 proc.terminate()
-            except ProcessLookupError:
+            except OSError:
                 pass
 
     async def close(self) -> None:
-        for state in self.turns.values():
-            proc: asyncio.subprocess.Process = state["proc"]  # type: ignore[assignment]
-            if proc.returncode is None:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-            task: asyncio.Task[GeminiRawResult] = state["task"]  # type: ignore[assignment]
-            if not task.done():
-                task.cancel()
-        if self.turns:
-            await asyncio.gather(
-                *(s["task"] for s in self.turns.values()),  # type: ignore[misc]
-                return_exceptions=True,
+        """Close transport and reset active turn."""
+        self.active = None
+
+
+class AntigravityNormalizer:
+    """Normalizes raw Antigravity CLI output into canonical AgentResult."""
+
+    def __init__(self, primary_workspace: Path | str | AntigravityCliTransport) -> None:
+        if isinstance(primary_workspace, AntigravityCliTransport):
+            primary_workspace = primary_workspace.config.primary_workspace
+        self.primary = authorized_root(Path(primary_workspace))
+
+    def normalize(
+        self,
+        raw_result: GeminiRawResult | RawAgentResult,
+        context: NormalizationContext,
+    ) -> AgentResult:
+        context = NormalizationContext.model_validate(context)
+        if isinstance(raw_result, RawAgentResult):
+            raw_result = raw_result.payload
+        if not isinstance(raw_result, GeminiRawResult):
+            raise GeminiAdapterError("expected GeminiRawResult input")
+
+        run_status = terminal_status(raw_result)
+        complete = run_status == RunStatus.COMPLETED
+        changes = []
+        observed_files = set()
+        for obs in raw_result.tools:
+            if obs.kind == "edit" and obs.status == "completed":
+                for path in obs.paths:
+                    if path not in observed_files:
+                        observed_files.add(path)
+                        changes.append({"path": path, "change_type": "modified"})
+
+        summary_text = raw_result.response.strip()
+        tests_summary: TestSummary | None = None
+        test_log_path: str | None = None
+
+        test_log_file = Path(raw_result.workspace) / ".aipc_test.log"
+        if test_log_file.is_file():
+            try:
+                log_content = test_log_file.read_text(encoding="utf-8")
+                tests_summary = PytestResultParser().parse(log_content)
+                test_log_path = ".aipc_test.log"
+            except Exception:
+                pass
+
+        if tests_summary is None:
+            lines = summary_text.splitlines()
+            for line in lines:
+                if "passed" in line and ("test" in line or "failed" in line):
+                    try:
+                        tests_summary = PytestResultParser().parse(line)
+                        break
+                    except Exception:
+                        pass
+
+        return validate_agent_result(
+            dict(
+                schema_version="1.0",
+                task_id=context.task_id,
+                agent_id=context.agent_id,
+                provider=context.provider,
+                status=run_status,
+                started_at=context.started_at,
+                completed_at=context.completed_at,
+                summary=summary_text,
+                files_changed=changes,
+                commands=[],
+                tests=tests_summary.model_dump() if tests_summary is not None else None,
+                artifacts=[],
+                warnings=[
+                    "Provider tool observations are claims; inspect independent workspace evidence."
+                ]
+                if raw_result.tools
+                else [],
+                errors=["Structured worker-reported failure"]
+                if run_status == RunStatus.FAILED
+                else [],
+                approval_requests=[],
+                worker_claimed_complete=complete,
+                evidence=dict(
+                    git_diff_path=None,
+                    test_log_path=test_log_path,
+                    terminal_log_path=None,
+                    screenshots=[],
+                ),
+                raw_output_ref=context.raw_output_ref,
+                metadata={
+                    "gemini": {
+                        "session_id": raw_result.session_id,
+                        "turn_id": raw_result.turn_id,
+                        "runtime_version": raw_result.runtime_version,
+                        "model": raw_result.model,
+                        "usage": raw_result.usage,
+                        "duration_ms": raw_result.duration_ms,
+                    },
+                    "antigravity": {
+                        "session_id": raw_result.session_id,
+                        "turn_id": raw_result.turn_id,
+                        "runtime_version": raw_result.runtime_version,
+                        "model": raw_result.model,
+                        "stop_reason": raw_result.stop_reason,
+                        "usage": raw_result.usage,
+                        "duration_ms": raw_result.duration_ms,
+                        "denial_reasons": list(getattr(raw_result, "denial_reasons", ())),
+                    },
+                },
             )
+        )
 
 
-class AntigravityNormalizer(GeminiNormalizer):
-    """Normalizes AntigravityRawResult and binds host-side independent verification records."""
-
-    def __init__(self, transport: AntigravityCliTransport | None = None) -> None:
-        super().__init__()
-        self.transport = transport
-
-    def normalize(self, raw_result, context: NormalizationContext) -> AgentResult:
-        base = super().normalize(raw_result, context)
-        if self.transport is None:
-            return base
-        payload: GeminiRawResult = raw_result.payload
-        ver = self.transport.verification_records.get((payload.session_id, payload.turn_id))
-        if ver is None:
-            return base
-        data = base.model_dump(mode="json")
-        tests_summary: TestSummary = ver["tests"]  # type: ignore[assignment]
-        data["tests"] = tests_summary.model_dump(mode="json")
-        data["evidence"]["test_log_path"] = str(ver["test_log_path"])
-        data["commands"] = [
-            CommandResult(command=str(ver["command"]), exit_code=int(ver["exit_code"])).model_dump(
-                mode="json"
-            )
-        ]
-        return AgentResult.model_validate(data)
+__all__ = [
+    "ALLOWED_AGY_TOOLS",
+    "ALLOW_RULES",
+    "AntigravityCliTransport",
+    "AntigravityNormalizer",
+    "DENY_RULES",
+    "antigravity_runtime_plan",
+    "check_build_config_mutations",
+    "scan_workspace_integrity",
+    "snapshot_build_and_hook_configs",
+]

@@ -110,3 +110,51 @@ Architectural completion of Phases 00–22 is explicitly separated from operatio
 - **Main Branch Protection**: `main` remained completely untouched at `5e65e6fe5f54397155b01a9611aa6e58597dba07`
 - **Checkpoint Tags**: `refs/tags/aipc/k-tritod-portfolio-sec10/phase-web-06/pass`
 - **Receipt**: `scratch/live_sec8_sec9/sec10_summary.json`.
+
+---
+
+## 5. Pre-Merge Security Hardening & Release Readiness Review (Attempt 03)
+
+Following the initial operational validation, an independent security review identified critical attack surfaces inherent in granting filesystem-write permissions to LLM coding agents. Attempt 03 implemented defense-in-depth isolation across five priorities:
+
+### Priority 1 — Host Verification Execution Sandbox & Configuration Guard
+- **Immutable Configuration Guard**: `snapshot_build_and_hook_configs()` takes SHA-256 digests of all workspace build, test, and git hook configuration files (`.git/config`, `.git/hooks/*`, `pyproject.toml`, `pytest.ini`, `setup.cfg`, `setup.py`, `tox.ini`, `conftest.py`, and `*.pth`). `check_build_config_mutations()` verifies that these digests remain unmodified after the agent turn; any detected tampering aborts execution and raises `GeminiProtocolError` before any host verification commands execute.
+- **Isolated Process Sandbox (`_run_isolated_verification`)**: Host verification runs in an isolated environment with ephemeral `home/` (`USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`) and `tmp/` (`TEMP`, `TMP`, `TMPDIR`) directories, preventing untrusted code from discovering real user credentials or `~/.gemini/antigravity` OAuth sessions.
+- **Environment Sanitization**: All Host secrets (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, etc.) are stripped from the test process environment.
+- **Python Audit Hook Guard (`sitecustomize.py`)**: An unremovable `sys.addaudithook` is injected via `PYTHONPATH` before pytest imports any code. The audit hook enforces:
+  - **Zero Network Access**: Blocks `socket.connect`, `socket.bind`, `socket.getaddrinfo`, `socket.sendto`, and `urllib.Request` with `PermissionError`.
+  - **Zero Subprocess / Shell Spawning**: Blocks `subprocess.Popen`, `os.system`, `os.spawn*`, `os.exec*`, `os.startfile`, and `winreg.*` with `PermissionError`.
+  - **Strict Filesystem Boundary**: Resolves symlinks/junctions; permits writes only inside the workspace and ephemeral sandbox; blocks reads to user profile directories, parent folders, or external drives.
+
+### Priority 2 — Workspace Integrity & Permission Enforcement
+- **Reparse Point & Junction Scanner (`scan_workspace_integrity`)**: Recursively scans the workspace prior to and following turns, rejecting directory junctions, NTFS reparse points, or symlinks that point outside the workspace boundary (`WorkspaceIntegrityError`).
+- **Tool Whitelist**: Only approved tools (`read_file`, `write_file`, `edit_file`, `list_directory`, `view_file`) are permitted. Spawning shell commands (`run_command`) is strictly forbidden and triggers `GeminiProtocolError`.
+- **Ephemeral Settings Deny List**: `--settings` explicitly passes `allow_shell_commands: false`, `allow_git_commands: false`, and `allow_network_requests: false`.
+
+### Priority 3 — Dynamic Capability Qualification
+- **Runtime Qualification (`qualify_antigravity_runtime`)**: `doctor.py` dynamically executes `agy --version`, parsing and asserting exact CLI version `1.5.2`, verifying mandatory flags (`--sandbox`, `--settings`, `--output-format`), and rejecting any execution configured with `--yolo` mode.
+
+### Priority 4 — Git & Evidence Integrity
+- **Untrusted Hook Neutralization**: Host git operations run with `-c core.hooksPath=/dev/null` and `--no-verify`, guaranteeing agent-created hooks never execute during AIPC commit operations.
+- **Pre-Turn Dirty File Preservation**: Pre-existing uncommitted files are snapshotted and restored, preventing silent data destruction.
+- **Atomic Failure Handling**: Failed host verification runs immediately halt the pipeline, record full test failure output in `.aipc_test.log`, and never create a Git commit.
+
+### Priority 5 — Continuous Integration Coverage
+- Updated `.github/workflows/ci.yml` fast test suite to cover `tests/gemini`, `tests/integration/test_cli.py`, `tests/e2e/test_full_mock_e2e.py`, and `tests/e2e/test_provider_qualification_and_fallback.py`.
+
+---
+
+### Record 7 — Negative Security & Sandbox Verification Suite
+- **Runtime**: Python `3.13.0`, `pytest 9.1.1` on Windows (`H:\000ProjectCode\AI_Project_Controller`)
+- **Execution Command**: `.venv\Scripts\python.exe -m pytest tests/gemini/test_antigravity_transport.py -v`
+- **Test Exit Code**: `0` (`20 passed` in 13.31s)
+- **Verified Negative Scenarios**:
+  - `test_antigravity_isolated_verify_blocks_external_secret_read`: `PermissionError` when test attempts to read outside workspace.
+  - `test_antigravity_isolated_verify_blocks_network`: `PermissionError` on `socket.connect` / `socket.getaddrinfo`.
+  - `test_antigravity_isolated_verify_blocks_subprocess`: `PermissionError` on `subprocess.Popen` / shell commands.
+  - `test_antigravity_isolated_verify_blocks_conftest_tampering`: Agent mutation of `conftest.py` raises `GeminiProtocolError`.
+  - `test_antigravity_isolated_verify_blocks_build_config_tampering`: Agent mutation of `pyproject.toml` raises `GeminiProtocolError`.
+  - `test_antigravity_scan_workspace_integrity_rejects_symlinks_and_junctions`: Reparse point / junction escape raises `WorkspaceIntegrityError`.
+  - `test_antigravity_security_denies_env_and_git_tampering_and_prohibited_tools`: Unauthorized tool step (`run_command`) raises `GeminiProtocolError`.
+- **Review & Gate Result**: `PASS`.
+

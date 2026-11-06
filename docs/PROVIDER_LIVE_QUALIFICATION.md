@@ -55,13 +55,17 @@ This report records the concrete technical qualification of all AI providers in 
 | **4. Gemini CLI (`gemini --acp`)** | **Absent** (`shutil.which("gemini") is None`) | Cached OAuth or `GEMINI_API_KEY` | ACP JSON-RPC (`--acp --approval-mode=default --sandbox`) | Offline ACP transport and permission denial verified in `tests/gemini/` | `OFFLINE_VERIFIED` / Live `BLOCKED` |
 
 ### Stage 4B — Security Validation & Sandbox Boundary
-`AntigravityCliTransport` enforces strict boundary controls:
-- **`filesystem_write`**: `AVAILABLE` — strictly bounded to the isolated `VersionManager` attempt worktree path.
-- **`shell`**: `BLOCKED` — agent CLI cannot invoke arbitrary host shell processes.
-- **`git`**: `BLOCKED` — git operations are executed exclusively by the AIPC host harness.
-- **`network`**: `BLOCKED` — outbound network communication from the workspace is prohibited.
+`AntigravityCliTransport` enforces multi-layer defense-in-depth boundary controls:
+- **`filesystem_write`**: `AVAILABLE` — strictly bounded to the isolated `VersionManager` attempt worktree path. Writes outside the worktree or to `.git` / `.env*` are strictly prohibited.
+- **`shell`**: `BLOCKED` — agent CLI cannot invoke arbitrary host shell processes (`run_command` is rejected; `allow_shell_commands: false` in settings).
+- **`git`**: `BLOCKED` — git operations are executed exclusively by the AIPC host harness with `-c core.hooksPath=/dev/null` and `--no-verify`.
+- **`network`**: `BLOCKED` — outbound network communication from the workspace is prohibited both at agent settings level and at the host verification level via `sys.addaudithook`.
 - **`approval_events`**: `BLOCKED` — CLI does not support pre-mutation JSON-RPC approval roundtrips; fails closed by policy.
 - **`streaming_events`**: `AVAILABLE` — parses newline-delimited stream JSON for token telemetry and lifecycle status.
+- **Host Verification Process Isolation**: Verification tests execute under `_run_isolated_verification()` inside an ephemeral sandbox directory with isolated `home/` and `tmp/`, sanitized environment (Host secrets stripped), and an unremovable Python audit hook (`sys.addaudithook`) blocking `socket.*`, `subprocess.*`, and directory escapes.
+- **Immutable Configuration Guard**: SHA-256 digests of `.git/config`, `pyproject.toml`, `conftest.py`, and related build files are snapshotted pre-turn; any modifications trigger immediate abort (`GeminiProtocolError`).
+- **Reparse Point / Junction Scanning**: `scan_workspace_integrity()` recursively scans the workspace before and after turns, aborting if symlinks or NTFS junctions point outside the workspace.
+- **Dynamic Qualification (`doctor.py`)**: `qualify_antigravity_runtime()` verifies exact CLI version `1.5.2`, required security arguments, and explicitly rejects `--yolo` execution.
 - **Effective Security Classification**: `QUALIFIED_FILESYSTEM_ONLY`.
 
 ### Stage 4C — Headless Smoke Test

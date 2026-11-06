@@ -368,6 +368,14 @@ def test_t4_gemini_and_antigravity_doctor_reporting(
         "aipc.adapters.gemini.doctor.find_agy_executable",
         lambda: Path("C:/fake/bin/agy.exe" if os.name == "nt" else "/fake/bin/agy"),
     )
+    from aipc.adapters.gemini.doctor import AntigravityQualificationResult
+
+    monkeypatch.setattr(
+        "aipc.adapters.gemini.doctor.qualify_antigravity_runtime",
+        lambda *args, **kwargs: AntigravityQualificationResult(
+            qualified=True, version="1.5.2", reason="qualified"
+        ),
+    )
     a_info_present = antigravity_runtime_info()
     assert a_info_present["agy_cli_present"] is True
     assert a_info_present["effective_security_verified"] is True
