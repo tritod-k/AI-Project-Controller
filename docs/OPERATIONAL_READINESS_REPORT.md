@@ -2,122 +2,79 @@
 
 ## Executive Summary
 
-This document presents the complete operational validation results for the **AI Project Controller (AIPC)** on branch `validation/operational-readiness`. All testing was conducted on a live Windows host using Python 3.13 (`.venv\Scripts\python.exe`) under the orchestration of the parent Controller agent and the Antigravity subagent (`aipc-worker`).
+This document presents the complete operational validation results for the **AI Project Controller (AIPC)** on branch `validation/operational-readiness` (branched from `master` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`). All testing was conducted on Windows using Python 3.13.0 (`.venv\Scripts\python.exe`) under the Two-Chat Controller + Worker (`aipc-worker`) architecture defined in `AGENTS.md` Section 31.
 
-The objective of this operational validation was to verify that AIPC functions as a true, production-grade orchestrator across CLI operations, mock end-to-end lifecycles, provider fallback semantics under quota limits, real-world multi-phase portfolio website construction, and remote Git publication.
+Architectural completion of Phases 00–22 is explicitly separated from operational production readiness. Every component below is evaluated against actual executable evidence, runtime presence, security qualification, and subscription constraints.
 
 ---
 
-## 1. Operational Verification Summary Table
+## 1. Main Operational Status Matrix (Section 10)
 
 | Component | Offline | Live | Status | Evidence |
-| :--- | :--- | :--- | :--- | :--- |
-| **T1: Operational CLI** | `OFFLINE_VERIFIED` | `OFFLINE_VERIFIED` | `OPERATIONAL` | `python -m aipc.cli --help`, `--version`, `--providers`, `--status`, `--history`. All return exit code `0`. Verified in `tests/integration/test_cli.py`. |
-| **T2: Mock E2E Lifecycle** | `OFFLINE_VERIFIED` | `N/A (Synthetic)` | `OPERATIONAL` | Full multi-phase controller loop (Phases 1 & 2), git worktree isolation, auto-repair retry budget, terminal evidence collection, and state publication. 7/7 tests PASS (`tests/e2e/test_full_mock_e2e.py`). |
-| **T3: Codex Adapter** | `OFFLINE_VERIFIED` | `DEFERRED` | `HISTORICAL_LIVE_VERIFIED` | Phase 12 live receipt verified (`aipc-phase-12-pass`). Current CLI qualification returns `AVAILABLE` with `historical_live_qualification: LIVE_VERIFIED`. New live test runs deferred due to active weekly quota constraints. Tested in `test_case_3_codex_live_qualification_and_quota_deferral`. |
-| **T4: Gemini / Antigravity Adapter** | `OFFLINE_VERIFIED` | `BLOCKED` | `OPERATIONAL_OFFLINE` | Antigravity Desktop runtime detected (`Antigravity.exe`), CLI doctor reports non-interactive subprocess hook unsupported. Tested in `test_case_4_gemini_antigravity_live_qualification_and_diagnosis`. |
-| **T5: Agent Fallback & Routing** | `OFFLINE_VERIFIED` | `OFFLINE_VERIFIED` | `OPERATIONAL` | Real `Controller.run_phase` catches pre-start `RoutingProviderError` (quota exhausted), verifies clean workspace, falls back to secondary worker, records routing journal events (`FAILED_NO_EFFECTS` -> `STARTED`), and passes phase. Also verified fail-closed `WAITING_PROVIDER` when real Gemini worker refuses. Tested in `tests/e2e/test_provider_qualification_and_fallback.py`. |
-| **Website Development** | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` | `OPERATIONAL` | Real-world personal engineering portfolio website (`Test_AI_CONTROLLER_me`) built across 5 distinct phases (`WEB-01` .. `WEB-05`) via `Controller.run_phase` with isolated git worktrees, deterministic review, and phase gate approval. 11/11 tests pass in `test_website.py`. |
-| **GitHub Publication** | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` | `OPERATIONAL` | All 5 phases merged into `main` and tagged (`aipc/k-tritod-portfolio/phase-web-01/pass` .. `phase-web-05/pass`). Pushed to remote repository `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`. Execution receipt committed. |
+|---|---|---|---|---|
+| T1 Operational CLI | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` (Local CLI + Mock Controller) | `IMPLEMENTED` / `OFFLINE_VERIFIED` | `src/aipc/cli.py` (`--help`, `--validate`, `--status`, `--initialize`, `--providers`, `--inspect-recovery`, `--run-mock-phase`); `tests/integration/test_cli.py` (4/4 PASS) + `tests/e2e/test_full_mock_e2e.py::test_t1_operational_cli_lifecycle` (exit 0). |
+| T2 Mock E2E | `OFFLINE_VERIFIED` | `N/A` (Deterministic Mock Pipeline) | `OFFLINE_VERIFIED` | `tests/e2e/test_full_mock_e2e.py` (8/8 PASS, exit 0): Cases A (Success), B (Bounded Repair), C (Review Rejection), D (Interruption), E (Restart Idempotency), F (Duplicate Event Replay), G (Human Edit Protection). |
+| T3 Codex Adapter | `OFFLINE_VERIFIED` | `HISTORICAL_LIVE_VERIFIED` / `DEFERRED` (New Live) | `PARTIAL` (Quota-Deferred) | Phase 12 live receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` (`openai-codex==0.160.0`); current offline suite `tests/e2e/test_provider_qualification_and_fallback.py` (6/6 T3 tests PASS, exit 0). New live runs `DEFERRED` due to weekly subscription usage limit. |
+| T4 Gemini / Antigravity Adapter | `OFFLINE_VERIFIED` | `BLOCKED` (`LIVE_RUNTIME_BLOCKED`) | `BLOCKED` (Live Runtime) | `src/aipc/adapters/gemini/doctor.py` (`runtime_info()`, `antigravity_runtime_info()`), `tests/gemini/` (90/90 PASS), `tests/e2e/test_provider_qualification_and_fallback.py` (3/3 T4 tests PASS). `gemini` CLI and `agy` CLI are absent from host `PATH`; `Antigravity.exe` has no headless CLI hook; `google-antigravity` SDK requires separate API/Vertex billing. |
+| T5 Agent Fallback | `OFFLINE_VERIFIED` | `DEFERRED` (Live Handoff) | `PARTIAL` (`MOCK_FALLBACK`: `OFFLINE_VERIFIED`; `REAL_GEMINI_ROUTING`: `BLOCKED`; `LIVE_CODEX_TO_GEMINI_HANDOFF`: `DEFERRED`) | `tests/e2e/test_provider_qualification_and_fallback.py` (`test_case_5a`, `test_case_5b`, `test_case_5c` PASS, exit 0): verified pre-start `QUOTA_EXHAUSTED` fallback in `Controller.run_phase` and fail-closed `NO_SAFE_FALLBACK` refusal when real Gemini is `BLOCKED`. |
+| Website Development | `OFFLINE_VERIFIED` | `MANUAL_ANTIGRAVITY_EXECUTION` (AIPC Controller + Local Worker) | `IMPLEMENTED` / `OFFLINE_VERIFIED` | `H:\000ProjectCode\Test_AI_CONTROLLER_me` orchestrated via `tools/run_portfolio_demo.py` across Phases `WEB-01`..`WEB-05`; `tests/test_website.py` (11/11 PASS, exit 0). Explicitly classified as `MANUAL_ANTIGRAVITY_EXECUTION` (not `AIPC_LIVE_AGENT_EXECUTION`). |
+| GitHub Publication | `OFFLINE_VERIFIED` | `LIVE_VERIFIED` | `LIVE_VERIFIED` | Pushed `main` (`5e65e6fe5f54397155b01a9611aa6e58597dba07`) and 15 AIPC phase tags to `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`; GitHub Actions Run `42227925342` `conclusion=success`. GitHub Pages left disabled pending explicit human authorization. |
 
 ---
 
-## 2. Operational Readiness Gap Matrix
+## 2. Operational Readiness Gap Matrix (Section 3)
 
-The following matrix categorizes all subsystems according to standardized AIPC readiness classifications:
-
-| Subsystem / Dimension | Classification | Operational Notes & Remediation Path |
-| :--- | :--- | :--- |
-| **CLI & State Inspection** | `IMPLEMENTED` / `OFFLINE_VERIFIED` | Full CLI suite operational with zero dependencies. Outputs clean JSON for machine consumers. |
-| **Domain Models & Normalization** | `IMPLEMENTED` / `OFFLINE_VERIFIED` | Canonical domain models (`TaskRequest`, `AgentResult`, `ReviewResult`, etc.) enforce strict normalization boundaries. Raw provider payloads never leak into controller core. |
-| **Version & Checkpoint Management** | `IMPLEMENTED` / `LIVE_VERIFIED` | Git worktree lifecycle, attempt checkpoints, pre-phase tags, and stable merges verified on both local and remote repositories. Strict worktree cleanliness rules prevent concealing uncommitted or ignored edits. |
-| **Recovery Manager** | `IMPLEMENTED` / `OFFLINE_VERIFIED` | Detects dirty workspaces, session loss, provider timeouts, and partial checkpoint publication. Evaluates safe recovery decisions without data loss. |
-| **Agent Router & Fallback** | `IMPLEMENTED` / `OFFLINE_VERIFIED` | Full integration with `Controller.run_phase`. Automatically switches from primary failing provider (`QUOTA_EXHAUSTED`) to eligible secondary fallback worker, recording immutable provenance. Fails closed (`WAITING_PROVIDER`) if no fallback exists. |
-| **Codex Headless Integration** | `HISTORICAL_LIVE_VERIFIED` / `DEFERRED` | Verified in Phase 12. Headless invocation via `codex exec` is deferred on this host until OpenAI weekly quota reset. Contract and routing behavior fully verified. |
-| **Gemini / Antigravity Headless** | `IMPLEMENTED` / `BLOCKED` | Desktop IDE (`Antigravity.exe`) is present, but lacks a non-interactive headless subprocess execution bridge on this host. AIPC safely diagnoses this and fails closed. Remediation: install headless Gemini CLI or configure API keys. |
-| **Claude Headless Integration** | `IMPLEMENTED` / `BLOCKED` | Adapter and normalizer implemented. Live execution blocked due to lack of subscription and Windows native sandbox isolation. |
-| **Deterministic Reviewer & Gate** | `IMPLEMENTED` / `LIVE_VERIFIED` | Evaluated 5 real phases in the portfolio project. Correctly blocked attempt when a privacy check test failed; correctly passed when all 11 criteria and tests succeeded. |
-| **Real-World Project Delivery** | `LIVE_VERIFIED` | Complete 5-phase portfolio website delivered in `H:\000ProjectCode\Test_AI_CONTROLLER_me` with zero sensitive data leaks, responsive layout, custom SVG assets, and GitHub Actions CI workflow. |
-| **Remote Git Publishing** | `LIVE_VERIFIED` | Successfully pushed `main` branch (commit `5e65e6fe5f54397155b01a9611aa6e58597dba07`) and 15 checkpoint tags to `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`. |
+| Subsystem / Capability | Readiness State | Verified Evidence & Operational Notes |
+|---|---|---|
+| **Core Domain Models & Schemas (Phase 01–02)** | `OFFLINE_VERIFIED` | 6 JSON Schemas validated via `aipc.domain.schemas --check` and `aipc.project.schemas --check` (exit 0). |
+| **Operational CLI (`src/aipc/cli.py`)** | `IMPLEMENTED` / `OFFLINE_VERIFIED` | Upgraded from 16-line help-only stub to full operational entrypoint delegating to `load_project`, `StateManager`, `RecoveryManager`, and `Controller.run_phase`. |
+| **Controller, VersionManager, RecoveryManager, Reviewer & PhaseGate (Phase 05–11)** | `OFFLINE_VERIFIED` | Verified end-to-end across isolated Git worktrees in `tests/e2e/test_full_mock_e2e.py` (Cases A–G) and `tools/run_portfolio_demo.py` (`WEB-01`..`WEB-05`). |
+| **Codex Adapter (`aipc.adapters.codex`)** | `OFFLINE_VERIFIED` / Historical `LIVE_VERIFIED` / Current `DEFERRED` | `openai-codex==0.160.0` installed. Offline contract, timeout, `QUOTA_EXHAUSTED`, cancellation, session loss, and task reuse verified. Live calls deferred until weekly quota resets. |
+| **Claude Adapter (`aipc.adapters.claude`)** | `OFFLINE_VERIFIED` / Live `BLOCKED` | `claude-agent-sdk==0.2.159` installed. Offline contracts pass; live execution `BLOCKED` (no Claude subscription; native Windows lacks required Bash sandbox). |
+| **Gemini / Antigravity Adapter (`aipc.adapters.gemini`)** | `OFFLINE_VERIFIED` / Live `BLOCKED` | Offline ACP JSON-RPC framing and permission denial pass (`90/90` tests). Live execution `BLOCKED` (`gemini` and `agy` CLIs absent on host; Windows effective sandbox/approval interception unverified). |
+| **Agent Router & Fallback (`aipc.agents.router`)** | `OFFLINE_VERIFIED` | `MOCK_FALLBACK`: `OFFLINE_VERIFIED`. `REAL_GEMINI_ROUTING`: `BLOCKED` (correctly rejected with `NO_SAFE_FALLBACK`). `LIVE_CODEX_TO_GEMINI_HANDOFF`: `DEFERRED`. |
+| **Consensus, Observability, Dashboard, MCP, Hardening, Plugins (Phase 17–22)** | `OFFLINE_VERIFIED` | All 860 fast unit/contract/subsystem tests pass in GitHub Actions CI (Python 3.12 & 3.13) and local `.venv`. |
 
 ---
 
-## 3. Detailed Verification Execution Evidence
+## 3. Execution Records (Section 10)
 
-### 3.1 Test 1: Operational CLI (`tests/integration/test_cli.py`)
-- **Command**: `.venv\Scripts\pytest.exe tests/integration/test_cli.py -v`
-- **Exit Code**: `0` (PASS)
-- **Tests**: 11 passed in 1.45s
-- **Evidence**:
-  - `python -m aipc.cli --help` returns usage instructions and commands.
-  - `python -m aipc.cli --version` prints `0.1.0`.
-  - `python -m aipc.cli --providers` outputs JSON with all 4 providers:
-    - `codex`: `available: true`, `qualification: AVAILABLE`, `historical_live_qualification: LIVE_VERIFIED`, `current_live_status: DEFERRED_QUOTA_LIMIT`.
-    - `claude`: `available: false`, `qualification: BLOCKED`.
-    - `gemini`: `available: true`, `qualification: AVAILABLE`, `antigravity_desktop_present: true`, `headless_cli_available: false`.
-    - `mock`: `available: true`, `qualification: AVAILABLE`.
+### Record 1 — TEST 1 Operational CLI & TEST 2 Full Mock E2E
+- **Source Commit**: `1f5b379` -> `a2dabd3559795ff3765108d3844fe2a76f27230b` (`validation/operational-readiness`)
+- **Runtime**: Python `3.13.0`, `pytest 9.1.1` on Windows (`H:\000ProjectCode\AI_Project_Controller`)
+- **Execution Command**:
+  `.venv\Scripts\python.exe -m pytest tests/integration/test_cli.py tests/e2e/test_full_mock_e2e.py -v`
+- **Execution Timestamp**: `2026-11-06T14:02:50Z`
+- **Test Exit Code**: `0` (`12 passed` — 4 in `test_cli.py`, 8 in `test_full_mock_e2e.py`)
+- **Changed Files**: `src/aipc/cli.py`, `tests/e2e/test_full_mock_e2e.py`
+- **Git Diff Reference**: `git diff 41db10a..a2dabd3 -- src/aipc/cli.py tests/e2e/test_full_mock_e2e.py`
+- **Provider Identity**: `mock-provider` (`_CliMockWorker`, `_E2EWorker`)
+- **Review & Gate Result**: `PASS` on valid evidence (`test_case_a`, `test_case_b`); `REVISE_REQUIRED` on missing evidence (`test_case_c`).
+- **Remaining Blockers**: None for offline/mock CLI orchestration.
 
-### 3.2 Test 2: Mock End-to-End (`tests/e2e/test_full_mock_e2e.py`)
-- **Command**: `.venv\Scripts\pytest.exe tests/e2e/test_full_mock_e2e.py -v`
-- **Exit Code**: `0` (PASS)
-- **Tests**: 7 passed in 89.26s
-- **Evidence**:
-  - `test_full_lifecycle_success_two_phases`: Phase 1 and Phase 2 run sequentially in worktrees, tagged `refs/tags/aipc/test-project/phase-01/pass` and `phase-02/pass`.
-  - `test_auto_repair_flow_success`: Attempt 1 fails, Controller detects failure, auto-repairs in Attempt 2, passes.
-  - `test_retry_limit_exhausted`: Controller stops when retry budget exceeded.
-  - `test_missing_evidence_fails_review`: Mock worker claims success without log, deterministic reviewer rejects.
-  - `test_run_cancellation`: Clean phase cancellation via `cancel_phase`.
-  - `test_state_machine_transition_sequence`: Validates state audit trail from `NEW` through `COMPLETED`.
+### Record 2 — TEST 3 Codex Offline, TEST 4 Gemini/Antigravity Runtime & TEST 5 Router Fallback
+- **Source Commit**: `a2dabd3559795ff3765108d3844fe2a76f27230b` (`validation/operational-readiness`)
+- **Runtime**: Python `3.13.0`, `openai-codex 0.160.0`, Node `v24.18.0`, npm `11.18.0`
+- **Execution Command**:
+  `.venv\Scripts\python.exe -m pytest tests/e2e/test_provider_qualification_and_fallback.py tests/gemini -v`
+- **Execution Timestamp**: `2026-11-06T14:05:00Z`
+- **Test Exit Code**: `0` (`12 passed` in `test_provider_qualification_and_fallback.py`, `90 passed` in `tests/gemini`)
+- **Changed Files**: `src/aipc/adapters/gemini/doctor.py`, `src/aipc/adapters/gemini/__init__.py`, `src/aipc/controller/routing_models.py`, `tests/e2e/test_provider_qualification_and_fallback.py`
+- **Git Diff Reference**: `git diff 41db10a..a2dabd3 -- src/aipc/adapters/gemini tests/e2e/test_provider_qualification_and_fallback.py`
+- **Provider Identity**: Offline `CodexAdapter` (`CodexFakeTransport`), `OfficialGeminiTransport`, `ACPGeminiTransport`, and `AgentRouter` with `_QuotaFailingWorker` / `_SuccessMockWorker`.
+- **Review & Gate Result**: `PASS` in Scenario 5B (`codex-worker` pre-start `QUOTA_EXHAUSTED` -> automatic fallback to `gemini-mock-worker`); `WAITING_PROVIDER` (`NO_SAFE_FALLBACK`) in Scenario 5C when real Gemini is `BLOCKED`.
+- **Remaining Blockers**:
+  1. Codex weekly subscription quota exhausted (`DEFERRED`).
+  2. `agy` and `gemini` CLIs not installed on host; native Windows sandbox/interception unverified (`BLOCKED`).
 
-### 3.3 Test 3, 4, 5: Provider Qualification & Routed Fallback (`tests/e2e/test_provider_qualification_and_fallback.py`)
-- **Command**: `.venv\Scripts\pytest.exe tests/e2e/test_provider_qualification_and_fallback.py -v`
-- **Exit Code**: `0` (PASS)
-- **Tests**: 7 passed in 162.25s
-- **Evidence**:
-  - **Case 3**: Codex doctor reflects `historical_live_qualification: LIVE_VERIFIED` and marks live tests deferred due to quota.
-  - **Case 4**: Gemini doctor inspects Antigravity desktop executable and reports missing non-interactive subprocess daemon.
-  - **Case 5A**: Agent router selects secondary provider when primary is marked unavailable.
-  - **Case 5B (Full Controller Loop Fallback)**: `Controller.run_phase` catches `RoutingProviderError` on `codex-worker.start()`, cleans worktree, falls back to `gemini-mock-worker`, publishes `PASS`, and writes immutable journal events (`codex-worker` -> `FAILED_NO_EFFECTS`, `gemini-mock-worker` -> `STARTED`).
-  - **Case 5C (Refusal Fail-Closed)**: `Controller.run_phase` with primary failing and real Gemini refusing returns `WAITING_PROVIDER` with `"no_safe_fallback"`.
-
-### 3.4 Test 6: Real-World Demonstration Website Project
-- **Directory**: `H:\000ProjectCode\Test_AI_CONTROLLER_me`
-- **Remote**: `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`
-- **Phases Executed**:
-  1. `WEB-01` (Project Initialization): Commit `ec12b7261861d2fc87575a3adc902b8ada3ffa0a`
-  2. `WEB-02` (Responsive UI): Commit `38254d786a06a81b5a550c787c0b19ca46740a75`
-  3. `WEB-03` (Profile & Projects): Commit `53563c5fe672024c8fba4f7d34cb54d5b69af9a0`
-  4. `WEB-04` (Functional & Accessibility Tests): Commit `c2e0341b5d64408de974cd0726cc9192b6fcbf64`
-  5. `WEB-05` (GitHub Publication & Final Verification): Commit `0d4431b884c014318a6dbfa0b0f309d79b9c651e`
-- **Standalone Verification**: `.venv\Scripts\python.exe -m pytest H:\000ProjectCode\Test_AI_CONTROLLER_me\tests\test_website.py -v` -> 11 passed in 0.70s.
-- **Git Remote Synchronization**:
-  - Head commit on `main`: `5e65e6fe5f54397155b01a9611aa6e58597dba07`
-  - 15 checkpoint tags pushed (`pre`, `attempt-01`, and `pass` for all 5 phases).
-
----
-
-## 4. Execution Classification: Manual vs. Headless
-
-To maintain complete architectural honesty, execution modes in this validation are strictly classified:
-
-1. **`AIPC_LIVE_AGENT_EXECUTION`**:
-   - Automated, unassisted subprocess spawning where the AIPC adapter directly invokes an external CLI tool or API endpoint (e.g. `codex exec`, Claude headless, or Gemini ACP).
-   - *Status on this host*: Codex historical live verified (new tests deferred by quota); Gemini and Claude blocked due to environment/subscription constraints.
-
-2. **`MANUAL_ANTIGRAVITY_EXECUTION`**:
-   - The interactive Antigravity subagent (`aipc-worker`) acts as the implementation worker, operating under the formal bounds and protocols of `AGENTS.md`.
-   - The subagent writes the files into the worktree assigned by `TaskRequest`, runs the pytest validation commands, and commits changes within the isolated worktree.
-   - The AIPC `Controller` then normalizes the result, creates the attempt checkpoint, collects the evidence bundle, runs the `DeterministicReviewer`, executes the `PhaseGate`, and publishes the stable ref to `main`.
-   - *Status*: 100% operational, fully verified in `Test_AI_CONTROLLER_me`.
-
----
-
-## 5. Conclusion & Operational Recommendation
-
-The AI Project Controller has met all operational readiness requirements for deployment:
-- Core domain models, state machine, version manager, recovery manager, reviewer, and phase gate operate flawlessly under Windows PowerShell and git worktree isolation.
-- Fast checks, linting, formatting, schema validation, and unit/contract suites execute in under 2 seconds.
-- The system gracefully handles provider limitations: quota exhaustion triggers automated fallback to secondary agents, and unsupported provider runtimes fail closed without corrupting repository state.
-- A real, production-ready website was constructed and verified through the controller without manual git intervention, and published to GitHub.
-
-Branch `validation/operational-readiness` is fully verified and ready for merge into `master`.
+### Record 3 — Real-World Demonstration Website (`Test_AI_CONTROLLER_me`)
+- **Source Commit (AIPC)**: `a2dabd3559795ff3765108d3844fe2a76f27230b` (`tools/run_portfolio_demo.py`)
+- **Target Website Commit**: `5e65e6fe5f54397155b01a9611aa6e58597dba07` (`main` on `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`)
+- **Execution Commands**:
+  - `.venv\Scripts\python.exe tools/run_portfolio_demo.py`
+  - `.venv\Scripts\python.exe -m pytest H:\000ProjectCode\Test_AI_CONTROLLER_me\tests\test_website.py -v`
+- **Execution Timestamp**: `2026-11-06T13:55:00Z`
+- **Test Exit Code**: `0` (`5/5` phases `PASS`, `11/11` website tests `PASS`, GitHub Actions Run `42227925342` `conclusion=success`)
+- **Evidence Location**: `H:\000ProjectCode\Test_AI_CONTROLLER_me\AIPC_EXECUTION_RECEIPT.json` and Git tags `aipc/k-tritod-portfolio/phase-web-01/pass` .. `phase-web-05/pass`
+- **Provider Identity**: `MANUAL_ANTIGRAVITY_EXECUTION` (`antigravity-manual-worker` orchestrated through AIPC `Controller`, `VersionManager`, `EvidenceCollector`, `DeterministicReviewer`, `PhaseGate`, and `StateManager`).
+- **Remaining Blockers**: Live external LLM CLI execution (`AIPC_LIVE_AGENT_EXECUTION`) remains blocked/deferred as documented above; GitHub Pages deployment awaits explicit human authorization.

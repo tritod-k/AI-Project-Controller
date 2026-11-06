@@ -2,123 +2,76 @@
 
 ## 1. Executive Summary
 
-As part of the operational readiness validation for **AI Project Controller (AIPC)**, a real-world, complete personal engineering portfolio website was constructed for **K.TRITOD** (TRITOD KRUAWONG) in dedicated repository `H:\000ProjectCode\Test_AI_CONTROLLER_me`.
+To demonstrate that **AI Project Controller (AIPC)** can manage a real multi-phase software engineering workflow, a complete, responsive personal portfolio website for **K.TRITOD (TRITOD KRUAWONG)** was built in `H:\000ProjectCode\Test_AI_CONTROLLER_me` and published to `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`.
 
-The entire project was orchestrated strictly through the real AIPC Controller pipeline (`StateManager`, `VersionManager`, `RecoveryManager`, `PromptEngine`, `DeterministicReviewer`, `PhaseGate`, and `Controller` loop).
+All five phases (`WEB-01` through `WEB-05`) were defined in `H:\000ProjectCode\Test_AI_CONTROLLER_me\PROJECT.yaml` and executed sequentially through the real AIPC `Controller` (`aipc.controller.Controller`) via `tools/run_portfolio_demo.py`, exercising:
+- `StateManager` (`project_state.json` persistence and state transitions),
+- `VersionManager` (isolated per-attempt Git worktrees and immutable `pre`, `attempt-01`, and `pass` tags),
+- `RecoveryManager` (clean workspace and lineage checks),
+- `PromptEngine` (canonical phase prompt rendering),
+- `AgentRouter` (capability and qualification routing),
+- `EvidenceCollector` (capturing `git.diff`, `artifacts/test.log`, and SHA-256 hashed `manifest.json`),
+- `DeterministicReviewer` & `PhaseGate` (objective acceptance criteria verification before `STABLE` promotion), and
+- `MetricsStore` (recording per-phase execution metrics).
 
-All 5 sequential phases (`WEB-01` through `WEB-05`) were planned, executed in isolated Git worktrees, normalized, checkpointed, evidenced, reviewed, and published to `main` without manual git intervention, and successfully pushed to remote repository `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`.
-
----
-
-## 2. Project Metadata & Execution Environment
-
-- **Target Repository Workspace**: `H:\000ProjectCode\Test_AI_CONTROLLER_me`
-- **Remote Repository URL**: `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`
-- **Project ID**: `k-tritod-portfolio`
-- **Project Name**: `Personal Portfolio Website — K.TRITOD`
-- **Orchestration Engine**: AI Project Controller (AIPC)
-- **Execution Mode**: `MANUAL_ANTIGRAVITY_EXECUTION`
-  - *Definition*: An interactive Antigravity coding subagent (`aipc-worker`) acting as the bounded implementation worker inside isolated worktrees, while the AIPC Controller autonomously drives phase lifecycle, recovery, checkpointing, evidence collection, review verification, and gate decisions.
-- **Execution Duration**: 911.27 seconds (~15 minutes across all 5 phases)
-- **Final Head Commit**: `5e65e6fe5f54397155b01a9611aa6e58597dba07`
+### Honest Execution Classification (Section 9)
+- **Classification**: `MANUAL_ANTIGRAVITY_EXECUTION` (orchestrated through AIPC `Controller` using a deterministic local worker adapter `PortfolioBuilderWorker` authored in Google Antigravity).
+- **Why not `AIPC_LIVE_AGENT_EXECUTION`**: As documented in `docs/PROVIDER_LIVE_QUALIFICATION.md`, Codex is currently blocked by its weekly subscription quota (`DEFERRED`) and headless `agy`/`gemini` CLIs are not installed on this Windows host (`BLOCKED`). We therefore strictly record this demonstration as `MANUAL_ANTIGRAVITY_EXECUTION` rather than claiming live external LLM CLI dispatch.
 
 ---
 
-## 3. Phase-by-Phase Execution Audit Trail
+## 2. Phase-by-Phase AIPC Execution Audit Trail
 
-| Phase ID | Phase Name | Task ID | Attempt | Worktree Commit SHA | Checkpoint Ref | Test Results | Review | Gate | Outcome |
-| :--- | :--- | :--- | :---: | :--- | :--- | :---: | :---: | :---: | :---: |
-| **Scaffold** | Project Initialization | N/A | 0 | `c3c9e0c7371cfc7840061b355b4329cf1d949ac0` | `phase-web-01/pre` | N/A | N/A | N/A | `INITIAL` |
-| **WEB-01** | Project Initialization | `task-web-01` | 1 | `ec12b7261861d2fc87575a3adc902b8ada3ffa0a` | `refs/tags/aipc/k-tritod-portfolio/phase-web-01/pass` | 11/11 PASS | `PASS` | `PASS` | `PASS` |
-| **WEB-02** | Responsive UI | `task-web-02` | 1 | `38254d786a06a81b5a550c787c0b19ca46740a75` | `refs/tags/aipc/k-tritod-portfolio/phase-web-02/pass` | 11/11 PASS | `PASS` | `PASS` | `PASS` |
-| **WEB-03** | Profile & Projects | `task-web-03` | 1 | `53563c5fe672024c8fba4f7d34cb54d5b69af9a0` | `refs/tags/aipc/k-tritod-portfolio/phase-web-03/pass` | 11/11 PASS | `PASS` | `PASS` | `PASS` |
-| **WEB-04** | Functional & Accessibility Tests | `task-web-04` | 1 | `c2e0341b5d64408de974cd0726cc9192b6fcbf64` | `refs/tags/aipc/k-tritod-portfolio/phase-web-04/pass` | 11/11 PASS | `PASS` | `PASS` | `PASS` |
-| **WEB-05** | GitHub Publication & Final Verification | `task-web-05` | 1 | `0d4431b884c014318a6dbfa0b0f309d79b9c651e` | `refs/tags/aipc/k-tritod-portfolio/phase-web-05/pass` | 11/11 PASS | `PASS` | `PASS` | `PASS` |
-| **Receipt** | AIPC Receipt Commit | N/A | N/A | `5e65e6fe5f54397155b01a9611aa6e58597dba07` | `main` | N/A | N/A | N/A | `PUBLISHED` |
+- **Target Local Workspace**: `H:\000ProjectCode\Test_AI_CONTROLLER_me`
+- **Target GitHub Repository**: `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git` (`main` branch)
+- **AIPC Runtime Artifacts**: `.superpowers/validation/portfolio_demo/` & `H:\000ProjectCode\Test_AI_CONTROLLER_me\AIPC_EXECUTION_RECEIPT.json`
 
----
-
-## 4. Website Features & Deliverables
-
-The generated website is a complete, modern, responsive static web portfolio adhering strictly to safety, privacy, accessibility, and performance requirements:
-
-### 4.1 Content & Layout (`index.html`)
-- **Semantic HTML5**: Valid DOCTYPE, language declaration (`lang="en"`), and landmark structure (`<header>`, `<nav>`, `<main>`, `<section>`, `<footer>`).
-- **7 Core Sections**:
-  1. `#home`: Hero banner with engineering title, quick contact links, and call-to-action buttons.
-  2. `#about`: Professional summary highlighting electronic engineering background, embedded design, and automation.
-  3. `#engineering-skills`: Technical competence matrix covering IC layout, Python, firmware, and test automation.
-  4. `#software-automation`: Software development tools, frameworks, and CI/CD pipelines.
-  5. `#projects`: Interactive portfolio showcases:
-     - *Custom Analog IC Layout & Verification* (Cadence Virtuoso, DRC/LVS)
-     - *AIPC Multi-Provider AI Controller* (Autonomous orchestration platform)
-     - *Stock & Financial Flow Analysis Platform* (Real-time analytics engine)
-  6. `#contact`: Professional communication channels (contact form placeholder, GitHub, LinkedIn).
-  7. `#github`: Live link to active repositories on `https://github.com/tritod-k`.
-
-### 4.2 Styling & Responsiveness (`css/style.css`)
-- **CSS Custom Properties**: Consistent dark theme (`--bg-primary: #0a0e17`, `--accent-primary: #2563eb`, `--text-primary: #f8fafc`).
-- **Flexible Layouts**: CSS Grid for project cards and skill badges; Flexbox for header and navigation bar.
-- **Responsive Breakpoints**: `@media (max-width: 768px)` rule-set with mobile navigation drawer.
-
-### 4.3 Interactive Navigation (`js/main.js`)
-- **Mobile Toggle**: Accessible button with dynamic `aria-expanded` and `aria-controls` updates.
-- **Keyboard Navigation**: Pressing `Escape` automatically collapses active navigation drawers.
-- **Category Filter**: Buttons to filter projects dynamically by domain (`All`, `IC & Hardware`, `Software & AI`).
-
-### 4.4 Local SVG Assets (`images/`)
-- `images/favicon.svg`: Custom vector browser icon.
-- `images/ic-layout-preview.svg`: Vector diagram representing integrated circuit layout.
-- `images/aipc-architecture.svg`: Vector architecture diagram showing AIPC orchestration layers.
-- `images/stock-flow-preview.svg`: Vector preview of financial analytical dashboards.
-
-### 4.5 Automated Pytest Test Suite (`tests/test_website.py`)
-11 comprehensive automated tests verified by the AIPC Controller during every phase:
-1. `test_html_structure_and_doctype`: HTML5 DOCTYPE, head, body, and title validation.
-2. `test_viewport_meta_tag`: Responsive viewport configuration.
-3. `test_all_required_sections_exist`: Presence of all 7 required section IDs.
-4. `test_internal_anchor_links`: Every `#anchor` link resolves to an existing element ID.
-5. `test_images_exist_and_non_empty`: All referenced images exist on disk and have size > 0.
-6. `test_images_have_alt_attributes`: Accessibility compliance for image tags.
-7. `test_nav_accessibility_attributes`: Mobile toggle button has proper ARIA attributes.
-8. `test_github_links_valid`: External links point to verified `https://github.com/tritod-k` URLs.
-9. `test_css_responsive_rules`: Verification of CSS variables, Grid/Flexbox, and media queries.
-10. `test_privacy_leak_protection`: **Privacy Guard** — scans all files to guarantee zero occurrences of private personal emails, personal photos, phone numbers, or passwords.
-11. `test_nojekyll_and_readme`: Presence of GitHub Pages `.nojekyll` file and comprehensive `README.md`.
+| Phase ID | Phase Name | Attempt | Commit SHA (`main` / `pass`) | Stable Checkpoint Tag | Pytest Results | Review Verdict | Gate Outcome |
+|---|---|---:|---|---|---|---|---|
+| **Init** | Repository & `PROJECT.yaml` Scaffold | 0 | `c3c9e0c7371cfc7840061b355b4329cf1d949ac0` | `aipc/k-tritod-portfolio/phase-web-01/pre` | N/A | N/A | `READY` |
+| **`web-01`** | Project Initialization | 1 | `ec12b7261861d2fc87575a3adc902b8ada3ffa0a` | `aipc/k-tritod-portfolio/phase-web-01/pass` | `11/11 PASS` (exit 0) | `PASS` | `PASS` |
+| **`web-02`** | Responsive UI | 1 | `38254d786a06a81b5a550c787c0b19ca46740a75` | `aipc/k-tritod-portfolio/phase-web-02/pass` | `11/11 PASS` (exit 0) | `PASS` | `PASS` |
+| **`web-03`** | Profile and Projects | 1 | `53563c5fe672024c8fba4f7d34cb54d5b69af9a0` | `aipc/k-tritod-portfolio/phase-web-03/pass` | `11/11 PASS` (exit 0) | `PASS` | `PASS` |
+| **`web-04`** | Functional and Accessibility Tests | 1 | `c2e0341b5d64408de974cd0726cc9192b6fcbf64` | `aipc/k-tritod-portfolio/phase-web-04/pass` | `11/11 PASS` (exit 0) | `PASS` | `PASS` |
+| **`web-05`** | GitHub Publication and Final Verification | 1 | `0d4431b884c014318a6dbfa0b0f309d79b9c651e` | `aipc/k-tritod-portfolio/phase-web-05/pass` | `11/11 PASS` (exit 0) | `PASS` | `PASS` |
+| **Receipt** | Final AIPC Execution Receipt | — | `5e65e6fe5f54397155b01a9611aa6e58597dba07` | `refs/heads/main` | `11/11 PASS` (exit 0) | `PASS` | `COMPLETED` |
 
 ---
 
-## 5. Privacy & Safety Invariant Enforcement
+## 3. Website Architecture, Content & Privacy Controls
 
-In strict compliance with user instructions:
-- **Zero Privacy Leaks**: Personal photos (`joke.jpg`, `carE30.jpg`), personal Hotmail email addresses, personal phone numbers, and credentials were completely excluded and verified by automated static assertions.
-- **Safe Worktree Hygiene**: Pytest execution used external bytecode/cache directories (`PYTHONDONTWRITEBYTECODE=1`), ensuring no uncommitted `__pycache__` or `.pytest_cache` directories remained to violate AIPC worktree cleanliness rules.
-- **GitHub Pages Safety**: GitHub Pages deployment was **NOT** enabled, leaving publication to human discretion.
+### 3.1 Delivered Files in `H:\000ProjectCode\Test_AI_CONTROLLER_me`
+- `PROJECT.yaml`: Canonical AIPC project definition specifying phases `web-01`..`web-05` and acceptance criteria `AC-WEB-01`..`AC-WEB-05`.
+- `index.html`: Semantic HTML5 structure containing all 7 required sections:
+  1. **Home (`#home`)**: Hero introduction for **K.TRITOD (TRITOD KRUAWONG)** — *Analog IC Design Engineer • Automation & Multi-Agent Systems Developer*.
+  2. **About Me (`#about`)**: Accurate professional summary based on public information in `tritod-k/me` (analog circuit design, HSPICE/Spectre simulation, precision IC layout, professional engineering training in Japan, and Python / Google Apps Script / AIPC automation).
+  3. **Engineering Skills (`#engineering-skills`)**: Analog Circuit Design, Simulation & Analysis (HSPICE/Spectre), IC Layout & Verification (DRC/LVS/PEX), and Bench Characterization.
+  4. **Software & Automation (`#software-automation`)**: Python Engineering Automation, Google Apps Script Automation, Multi-Agent AI Orchestration (AIPC), and Data Analytics & BI (SQL, Power Query, DAX, Power BI).
+  5. **Projects (`#projects`)**: Filterable cards (`All Projects`, `IC & Hardware`, `Software & AI`) presenting public-safe projects:
+     - *AI Project Controller (AIPC)* (`https://github.com/tritod-k/AI-Project-Controller`)
+     - *Financial & Stock Data Analysis Pipeline*
+     - *Analog IC Simulation & Verification Toolkit*
+     - *K.TRITOD Engineering Portfolio* (`https://github.com/tritod-k/Test_AI_CONTROLLER_me`)
+  6. **Contact (`#contact`)** & **7. GitHub (`#github`)**: Public-safe links to `https://github.com/tritod-k`.
+- `css/style.css`: Responsive dark-mode engineering design system using CSS custom properties, CSS Grid, Flexbox, keyboard focus-visible outlines, and `@media (max-width: 768px)` mobile drawer layout.
+- `js/main.js`: Mobile navigation toggle updating `aria-expanded`, `Escape` key handler, and interactive project category filtering.
+- `images/`: Local custom vector assets (`favicon.svg`, `aipc-architecture.svg`, `ic-layout-preview.svg`, `stock-flow-preview.svg`) — zero broken or missing images.
+- `tests/test_website.py`: 11 automated pytest tests validating HTML5 structure, viewport meta tag, required sections, internal anchor resolution, local SVG asset existence, `alt` attributes, ARIA navigation attributes, GitHub URLs, responsive CSS rules, `.nojekyll`/`README.md`, and the **Privacy Leak Guard**.
+- `.github/workflows/ci.yml` & `.nojekyll`: Automated GitHub Actions test workflow and GitHub Pages static compatibility marker.
+
+### 3.2 Strict Privacy & Isolation Verification
+- **Historical `tritod-k/me` Repository**: Read-only reference only; zero modifications made (`HEAD` remains `833cf00bad3bb524acf4b1c5289c2c04eacdaa75`).
+- **Excluded `GAS_OKX` System**: Strictly isolated; never accessed, referenced, or modified.
+- **Personal Data Protection**: Personal photographs (`joke.jpg`, `carE30.jpg`), personal email (`tritot_05@hotmail.com`), phone numbers, physical addresses, and confidential IC data are excluded and guarded by `test_privacy_leak_protection`.
+- **GitHub Pages Deployment**: Not enabled automatically (requires explicit human authorization per Section 9 & Section 12).
 
 ---
 
-## 6. Remote Repository Verification
+## 4. Verification Receipts
 
-Verification command: `git ls-remote https://github.com/tritod-k/Test_AI_CONTROLLER_me.git`
-
-```text
-5e65e6fe5f54397155b01a9611aa6e58597dba07    HEAD
-5e65e6fe5f54397155b01a9611aa6e58597dba07    refs/heads/main
-ec12b7261861d2fc87575a3adc902b8ada3ffa0a    refs/tags/aipc/k-tritod-portfolio/phase-web-01/attempt-01
-ec12b7261861d2fc87575a3adc902b8ada3ffa0a    refs/tags/aipc/k-tritod-portfolio/phase-web-01/pass
-c3c9e0c7371cfc7840061b355b4329cf1d949ac0    refs/tags/aipc/k-tritod-portfolio/phase-web-01/pre
-38254d786a06a81b5a550c787c0b19ca46740a75    refs/tags/aipc/k-tritod-portfolio/phase-web-02/attempt-01
-38254d786a06a81b5a550c787c0b19ca46740a75    refs/tags/aipc/k-tritod-portfolio/phase-web-02/pass
-ec12b7261861d2fc87575a3adc902b8ada3ffa0a    refs/tags/aipc/k-tritod-portfolio/phase-web-02/pre
-53563c5fe672024c8fba4f7d34cb54d5b69af9a0    refs/tags/aipc/k-tritod-portfolio/phase-web-03/attempt-01
-53563c5fe672024c8fba4f7d34cb54d5b69af9a0    refs/tags/aipc/k-tritod-portfolio/phase-web-03/pass
-38254d786a06a81b5a550c787c0b19ca46740a75    refs/tags/aipc/k-tritod-portfolio/phase-web-03/pre
-c2e0341b5d64408de974cd0726cc9192b6fcbf64    refs/tags/aipc/k-tritod-portfolio/phase-web-04/attempt-01
-c2e0341b5d64408de974cd0726cc9192b6fcbf64    refs/tags/aipc/k-tritod-portfolio/phase-web-04/pass
-53563c5fe672024c8fba4f7d34cb54d5b69af9a0    refs/tags/aipc/k-tritod-portfolio/phase-web-04/pre
-0d4431b884c014318a6dbfa0b0f309d79b9c651e    refs/tags/aipc/k-tritod-portfolio/phase-web-05/attempt-01
-0d4431b884c014318a6dbfa0b0f309d79b9c651e    refs/tags/aipc/k-tritod-portfolio/phase-web-05/pass
-c2e0341b5d64408de974cd0726cc9192b6fcbf64    refs/tags/aipc/k-tritod-portfolio/phase-web-05/pre
-```
-
-All 5 phases passed Phase Gate review and were merged and published cleanly.
+1. **Local Pytest Execution**:
+   - Command: `.venv\Scripts\python.exe -m pytest H:\000ProjectCode\Test_AI_CONTROLLER_me\tests\test_website.py -v`
+   - Result: `11 passed in 0.13s` (exit code `0`).
+2. **GitHub Remote & CI Verification**:
+   - Remote `https://github.com/tritod-k/Test_AI_CONTROLLER_me.git` verified empty prior to push, then populated with `main` (`5e65e6fe5f54397155b01a9611aa6e58597dba07`) and all 15 AIPC phase tags (`pre`, `attempt-01`, `pass` for `web-01`..`web-05`).
+   - GitHub Actions CI Run `42227925342` on `tritod-k/Test_AI_CONTROLLER_me` (`main @ 5e65e6f`) completed with **`conclusion=success`**.
