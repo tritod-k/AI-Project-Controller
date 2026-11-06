@@ -260,7 +260,10 @@ def antigravity_runtime_plan(
     settings_path: Path | str | None = None,
 ) -> dict[str, object]:
     """Return the deterministic subprocess execution plan for Antigravity CLI."""
-    exe = str(executable or find_agy_executable() or "agy")
+    resolved_exe = Path(executable) if executable is not None else find_agy_executable()
+    exe = str(resolved_exe or "agy")
+    qual = qualify_antigravity_runtime(config, executable=resolved_exe)
+    mode = getattr(config, "approval_mode", "accept-edits")
     settings_obj = {
         "permissions": {
             "deny": list(DENY_RULES),
@@ -275,8 +278,9 @@ def antigravity_runtime_plan(
         "--output-format",
         "stream-json",
         "--mode",
-        "accept-edits",
+        str(mode),
         "--sandbox",
+        "--disable-slash-commands",
         "--print-timeout",
         f"{int(config.operation_timeout * 4)}s",
         "--settings",
@@ -287,11 +291,13 @@ def antigravity_runtime_plan(
     return {
         "argv": argv,
         "cwd": str(workspace),
-        "qualified": True,
+        "qualified": qual.qualified,
+        "qualification_reason": qual.reason,
+        "runtime_version": qual.version,
         "settings": settings_obj,
         "model": config.model,
         "capabilities": {
-            "filesystem": True,
+            "filesystem": qual.qualified,
             "shell": False,
             "git": False,
             "network": False,
@@ -366,16 +372,7 @@ class AntigravityCliTransport:
             return True
         if qual.version is not None:
             return False
-        if self._explicit_executable is not None:
-            if self.runner != asyncio.create_subprocess_exec:
-                return True
-            try:
-                with open(self._explicit_executable, "rb") as f:
-                    if f.read(2) == b"bi":
-                        return True
-            except OSError:
-                pass
-        return False
+        return self._explicit_executable is not None and self.runner != asyncio.create_subprocess_exec
 
     @property
     def _aipc_qualified_antigravity_filesystem(self) -> bool:
@@ -489,8 +486,9 @@ class AntigravityCliTransport:
             "--output-format",
             "stream-json",
             "--mode",
-            "accept-edits",
+            str(getattr(self.config, "approval_mode", "accept-edits")),
             "--sandbox",
+            "--disable-slash-commands",
             "--print-timeout",
             f"{int(self.config.operation_timeout * 4)}s",
             "--settings",
@@ -659,12 +657,17 @@ ALLOWED_READ_ROOTS = [
 sys_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
 if sys_root:
     ALLOWED_READ_ROOTS.append(Path(sys_root).resolve())
+if os.name != "nt":
+    for posix_root in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc", "/dev"):
+        p_root = Path(posix_root)
+        if p_root.exists():
+            ALLOWED_READ_ROOTS.append(p_root.resolve())
 
 for p in list(sys.path):
     if p:
         try:
             rp = Path(p).resolve()
-            if any(rp.is_relative_to(root) for root in ALLOWED_READ_ROOTS):
+            if rp != WORKSPACE_PATH.parent and not rp.is_relative_to(WORKSPACE_PATH.parent):
                 ALLOWED_READ_ROOTS.append(rp)
         except Exception:
             pass

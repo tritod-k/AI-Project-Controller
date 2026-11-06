@@ -120,12 +120,28 @@ def _make_task(workspace: Path, *, allowed_tools: list[str] | None = None) -> Ta
     )
 
 
-def test_antigravity_runtime_plan_and_capabilities(tmp_path: Path) -> None:
+def test_antigravity_runtime_plan_and_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg = _make_config(tmp_path)
     ws = tmp_path / "workspace"
     ws.mkdir()
     exe = tmp_path / "agy.exe"
     exe.write_text("binary", encoding="utf-8")
+
+    def _mock_subp(args, **kwargs):
+        class _C:
+            returncode = 0
+            stdout = (
+                "1.5.2\n"
+                if "--version" in args
+                else "--sandbox --mode --settings --output-format --disable-slash-commands"
+            )
+            stderr = ""
+
+        return _C()
+
+    monkeypatch.setattr(subprocess, "run", _mock_subp)
 
     plan = antigravity_runtime_plan(cfg, ws, executable=exe)
     assert plan["qualified"] is True
@@ -134,6 +150,7 @@ def test_antigravity_runtime_plan_and_capabilities(tmp_path: Path) -> None:
     assert "--mode" in plan["argv"]
     assert "accept-edits" in plan["argv"]
     assert "--sandbox" in plan["argv"]
+    assert "--disable-slash-commands" in plan["argv"]
     assert "unsandboxed(*)" in plan["settings"]["permissions"]["deny"]
 
     transport = AntigravityCliTransport(cfg, executable=exe)
@@ -144,12 +161,28 @@ def test_antigravity_runtime_plan_and_capabilities(tmp_path: Path) -> None:
     assert adapter.capabilities.resume_session is False
 
 
-def test_antigravity_adapter_rejects_shell_or_git_allowed_tools(tmp_path: Path) -> None:
+def test_antigravity_adapter_rejects_shell_or_git_allowed_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg = _make_config(tmp_path)
     ws = tmp_path / "workspace"
     ws.mkdir()
     exe = tmp_path / "agy.exe"
     exe.write_text("binary", encoding="utf-8")
+
+    def _mock_subp(args, **kwargs):
+        class _C:
+            returncode = 0
+            stdout = (
+                "1.5.2\n"
+                if "--version" in args
+                else "--sandbox --mode --settings --output-format --disable-slash-commands"
+            )
+            stderr = ""
+
+        return _C()
+
+    monkeypatch.setattr(subprocess, "run", _mock_subp)
 
     transport = AntigravityCliTransport(cfg, executable=exe)
     adapter = GeminiAdapter(cfg, authorize_workspace=lambda t: ws, transport=transport)
