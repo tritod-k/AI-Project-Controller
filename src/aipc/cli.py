@@ -205,6 +205,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "codex": {
                 "available": True,
                 "qualification": "AVAILABLE",
+                "historical_live_qualification": "LIVE_VERIFIED",
+                "current_live_status": "DEFERRED_QUOTA_LIMIT",
                 "notes": (
                     "Validated worker adapter with offline contracts and documented limitations."
                 ),

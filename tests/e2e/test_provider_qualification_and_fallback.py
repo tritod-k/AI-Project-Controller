@@ -46,7 +46,7 @@ from aipc.agents.routing_models import (
 )
 from aipc.controller import Controller, ControllerPolicy
 from aipc.controller.errors import ProviderInterruption
-from aipc.controller.routing_models import WorkerBinding
+from aipc.controller.routing_models import RoutingProviderError, WorkerBinding
 from aipc.domain.enums import AgentStatus
 from aipc.domain.errors import AgentTimeoutError, UnknownRunError
 from aipc.domain.models import AgentResult, TaskRequest
@@ -436,6 +436,34 @@ class _QuotaFailingWorker(MockAgentAdapter):
         raise ProviderInterruption(condition="QUOTA_EXHAUSTED")
 
 
+class _StartQuotaFailingWorker(MockAgentAdapter):
+    """Mock worker that raises RoutingProviderError on start(task)."""
+
+    def __init__(self, agent_id: str = "codex-worker") -> None:
+        super().__init__(agent_id=agent_id, scenario="SUCCESS")
+        self.tasks: list[TaskRequest] = []
+
+    @property
+    def capabilities(self) -> AgentCapabilities:
+        return AgentCapabilities(filesystem=True, shell=True, git=True, approval_events=True)
+
+    async def start(self, task: TaskRequest):
+        raise RoutingProviderError(
+            OperationalFailure(kind="QUOTA_EXHAUSTED", effects="NONE", terminal=True)
+        )
+
+
+class _SuccessNormalizer(MockNormalizer):
+    def normalize(self, raw, context):
+        res = super().normalize(raw, context)
+        data = res.model_dump(mode="json")
+        data["status"] = "COMPLETED"
+        data["worker_claimed_complete"] = True
+        data["tests"] = dict(total=1, passed=1, failed=0, skipped=0)
+        data["evidence"]["test_log_path"] = "test.log"
+        return AgentResult.model_validate(data)
+
+
 class _SuccessMockWorker(MockAgentAdapter):
     def __init__(self, agent_id: str = "gemini-mock-worker") -> None:
         super().__init__(agent_id=agent_id, scenario="SUCCESS")
@@ -570,7 +598,7 @@ def test_case_5b_router_quota_fallback_to_secondary_worker(tmp_path: Path) -> No
     """Case 5B: Multi-Worker Router Fallback: codex fails quota -> fallback PASS."""
     # 1. Router deterministic fallback selection verification
     registry = AgentRegistry()
-    codex_w = _QuotaFailingWorker("codex-worker")
+    codex_w = _StartQuotaFailingWorker("codex-worker")
     gemini_w = _SuccessMockWorker(agent_id="gemini-mock-worker")
     registry.register(codex_w)
     registry.register(gemini_w)
@@ -616,58 +644,65 @@ def test_case_5b_router_quota_fallback_to_secondary_worker(tmp_path: Path) -> No
     assert fallback_dec.selected_agent_id == "gemini-mock-worker"
     assert fallback_dec.attempted_agents == ("codex-worker",)
 
-    # 2. End-to-end execution of secondary worker achieving PASS
+    # 2. End-to-end execution of secondary worker achieving PASS via Controller router fallback
     repo = tmp_path / "repo_5b"
     _setup_repo(repo)
-    project = _make_fallback_project(repo, worker="gemini-mock-worker")
+    project = _make_fallback_project(repo, worker="codex-worker")
 
     state = StateManager(tmp_path / "state_5b.json")
     state.initialize(project, "run-5b-exec")
     versions = VersionManager(repo, project.project.id, worktree_root=tmp_path / "worktrees_5b")
     recovery = RecoveryManager(project, state, versions)
 
-    class _SuccessNormalizer(MockNormalizer):
-        def normalize(self, raw, context):
-            res = super().normalize(raw, context)
-            data = res.model_dump(mode="json")
-            data["status"] = "COMPLETED"
-            data["worker_claimed_complete"] = True
-            data["tests"] = dict(total=1, passed=1, failed=0, skipped=0)
-            data["evidence"]["test_log_path"] = "test.log"
-            return AgentResult.model_validate(data)
-
-    fallback_worker = _SuccessMockWorker(agent_id="gemini-mock-worker")
-    reg2 = AgentRegistry()
-    reg2.register(fallback_worker)
-    norm2 = _SuccessNormalizer()
-
-    ctrl2 = Controller(
+    norm_success = _SuccessNormalizer()
+    ctrl = Controller(
         state=state,
         prompts=PromptEngine(),
-        agents=reg2,
-        normalizer=norm2,
+        agents=registry,
+        normalizer=norm_success,
         versions=versions,
         recovery=recovery,
         reviewer=DeterministicReviewer(),
         gate=PhaseGate(),
-        provider="gemini-mock-provider",
+        provider="codex-provider",
         review_authority="deterministic-reviewer",
         evidence_destination=tmp_path / "evidence_5b",
         rules=[CriterionRule(criterion_id="AC-1", kind="tests", minimum_passed=1)],
+        worker_router=router,
+        routing_policy=policy,
+        routing_requirements=TaskRequirements(required=("filesystem", "shell", "git")),
+        worker_bindings={
+            "codex-worker": WorkerBinding(provider="codex-provider", normalizer=MockNormalizer()),
+            "gemini-mock-worker": WorkerBinding(
+                provider="gemini-mock-provider", normalizer=norm_success
+            ),
+        },
     )
 
     ctrl_policy = ControllerPolicy(
         authorized_phase="01", allowed_tools=("filesystem", "shell", "git")
     )
-    result = asyncio.run(ctrl2.run_phase(project, "01", policy=ctrl_policy))
+    result = asyncio.run(ctrl.run_phase(project, "01", policy=ctrl_policy))
     assert result.outcome == "PASS"
     assert result.stable_checkpoint is not None
+
+    # Verify both routing assignments recorded in journal
+    journal_record = ctrl.journal("run-5b-exec", "01").load()
+    events = journal_record.routing_events
+    assert any(
+        e.decision.selected_agent_id == "codex-worker" and e.state == "FAILED_NO_EFFECTS"
+        for e in events
+    )
+    assert any(
+        e.decision.selected_agent_id == "gemini-mock-worker" and e.state == "STARTED"
+        for e in events
+    )
 
 
 def test_case_5c_real_gemini_refusal_fail_closed(tmp_path: Path) -> None:
     """Case 5C: Real Gemini Worker Refusal (Fail-Closed Safety): BLOCKED agent refused."""
     registry = AgentRegistry()
-    codex_w = _QuotaFailingWorker("codex-worker")
+    codex_w = _StartQuotaFailingWorker("codex-worker")
     # Real Gemini worker has zero capabilities (fail closed)
     gemini_real = MockAgentAdapter(agent_id="gemini-real-worker")
     registry.register(codex_w)
@@ -718,3 +753,42 @@ def test_case_5c_real_gemini_refusal_fail_closed(tmp_path: Path) -> None:
         and any(r.code == "RUNTIME_NOT_AVAILABLE" for r in c.reasons)
         for c in fallback_dec.rejected_candidates
     )
+
+    # End-to-end Controller run verifies fail-closed refusal
+    repo = tmp_path / "repo_5c"
+    _setup_repo(repo)
+    project = _make_fallback_project(repo, worker="codex-worker")
+    state = StateManager(tmp_path / "state_5c.json")
+    state.initialize(project, "run-5c-exec")
+    versions = VersionManager(repo, project.project.id, worktree_root=tmp_path / "worktrees_5c")
+    recovery = RecoveryManager(project, state, versions)
+
+    ctrl_5c = Controller(
+        state=state,
+        prompts=PromptEngine(),
+        agents=registry,
+        normalizer=MockNormalizer(),
+        versions=versions,
+        recovery=recovery,
+        reviewer=DeterministicReviewer(),
+        gate=PhaseGate(),
+        provider="codex-provider",
+        review_authority="deterministic-reviewer",
+        evidence_destination=tmp_path / "evidence_5c",
+        rules=[CriterionRule(criterion_id="AC-1", kind="tests", minimum_passed=1)],
+        worker_router=router,
+        routing_policy=policy,
+        routing_requirements=TaskRequirements(required=("filesystem", "shell", "git")),
+        worker_bindings={
+            "codex-worker": WorkerBinding(provider="codex-provider", normalizer=MockNormalizer()),
+            "gemini-real-worker": WorkerBinding(
+                provider="gemini-provider", normalizer=MockNormalizer()
+            ),
+        },
+    )
+    ctrl_policy = ControllerPolicy(
+        authorized_phase="01", allowed_tools=("filesystem", "shell", "git")
+    )
+    res_5c = asyncio.run(ctrl_5c.run_phase(project, "01", policy=ctrl_policy))
+    assert res_5c.outcome == "WAITING_PROVIDER"
+    assert "no_safe_fallback" in str(res_5c.waiting_reason).lower()
