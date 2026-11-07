@@ -45,12 +45,18 @@ Following a fresh installation of Docker Desktop and WSL2 kernel update, Docker 
   - Simple isolated Python one-liner: `PYTHON_OK 3.13.18 Linux`, exit code `0`.
   - Exit code propagation & cleanup: `sys.exit(42)` -> exit code `42`; `docker ps -a` confirmed `0` leftover containers.
 
-### 3.2 Reproducible Verification Image (`aipc-verify:py313-v1`)
+### 3.2 Reproducible Verification Image (`aipc-verify:py313-v1`) & Mount Hardening
 A dedicated, reproducible Docker image was created at `docker/Dockerfile.verify`:
-- **Base**: `python:3.13-slim` (`sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc`).
+- **Base**: Pinned by SHA-256 digest `python:3.13-slim@sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc`.
 - **Dependencies**: `pytest==8.3.5` pre-installed.
 - **User**: `65534:65534` (`nobody:nogroup`).
 - **Offline Network Isolation Verification**: `docker run --rm --network none aipc-verify:py313-v1 python3 -m pytest --version` -> `pytest 8.3.5`, exit code `0`.
+- **Mount & Pointer Security**:
+  - `/workspace:ro`: Workspace is mounted read-only to guarantee test code cannot mutate source files.
+  - `/workspace-out:rw`: Separate temporary output mount cleaned up on finish.
+  - Git worktree pointer protection: If `.git` is a git worktree pointer file, it is masked with an empty read-only file at `/workspace/.git:ro` so the host worktree path outside the workspace is never readable in the container.
+  - Host path privacy: `_resolve_docker_executable()` resolves container binaries dynamically without machine-specific usernames. `check_docker()` performs runtime readiness and image inspection.
+  - Workspace mutation guard: Host verifies `_hash_workspace_files(workspace)` before and after verification, failing closed if any workspace file changed.
 
 ### 3.3 Stage 4 Real Security Qualification (9/9 Requirements PASS)
 All 9 Stage 4 isolation and defense-in-depth requirements were executed against the live Docker Engine (`_run_container_verification`) in disposable workspaces:

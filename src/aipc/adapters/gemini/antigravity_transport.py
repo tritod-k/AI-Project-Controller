@@ -22,7 +22,12 @@ from aipc.normalization.validation import validate_agent_result
 from aipc.storage.json_store import _unique_object
 
 from .config import GeminiAdapterConfig
-from .doctor import antigravity_runtime_info, find_agy_executable, qualify_antigravity_runtime
+from .doctor import (
+    _resolve_docker_executable,
+    antigravity_runtime_info,
+    find_agy_executable,
+    qualify_antigravity_runtime,
+)
 from .errors import (
     GeminiAdapterError,
     GeminiProtocolError,
@@ -883,26 +888,7 @@ sys.addaudithook(audit_hook)
         command: tuple[str, ...],
     ) -> tuple[bool, TestSummary, str]:
         """Run verify_command inside a restricted OS container."""
-        runtime_bin = shutil.which(self.container_runtime)
-        if runtime_bin is None and os.name == "nt":
-            candidates = [
-                Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Administrator\AppData\Local"))
-                / "Programs"
-                / "DockerDesktop"
-                / "resources"
-                / "bin"
-                / f"{self.container_runtime}.exe",
-                Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-                / "Docker"
-                / "Docker"
-                / "resources"
-                / "bin"
-                / f"{self.container_runtime}.exe",
-            ]
-            for c in candidates:
-                if c.is_file():
-                    runtime_bin = str(c)
-                    break
+        runtime_bin = _resolve_docker_executable(self.container_runtime)
 
         if runtime_bin is None or not self.container_image:
             return (
@@ -932,12 +918,24 @@ sys.addaudithook(audit_hook)
             if not has_cache_opt:
                 normalized_cmd.extend(["-o", "cache_dir=/tmp/.pytest_cache"])
 
-        mount_args = ["-v", f"{ws_real}:/workspace:rw"]
-        git_path = workspace / ".git"
-        if git_path.exists():
-            mount_args.extend(["-v", f"{git_path.resolve()}:/workspace/.git:ro"])
-
         safe_turn_id = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(turn_id))
+        out_dir = self.config.state_root / f"verify-out-{safe_turn_id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        mount_args = [
+            "-v",
+            f"{ws_real}:/workspace:ro",
+            "-v",
+            f"{out_dir.resolve()}:/workspace-out:rw",
+        ]
+        git_path = workspace / ".git"
+        if git_path.is_dir():
+            mount_args.extend(["-v", f"{git_path.resolve()}:/workspace/.git:ro"])
+        elif git_path.is_file():
+            empty_git_file = self.config.state_root / "empty_git_pointer"
+            empty_git_file.write_text("", encoding="utf-8")
+            mount_args.extend(["-v", f"{empty_git_file.resolve()}:/workspace/.git:ro"])
+
         container_name = f"aipc-verify-{safe_turn_id}"
 
         container_cmd = [
@@ -963,6 +961,12 @@ sys.addaudithook(audit_hook)
             "512m",
             "-e",
             "HOME=/tmp",
+            "-e",
+            "TMPDIR=/tmp",
+            "-e",
+            "TEMP=/tmp",
+            "-e",
+            "TMP=/tmp",
             "-e",
             "PYTHONDONTWRITEBYTECODE=1",
             *mount_args,
@@ -1001,6 +1005,8 @@ sys.addaudithook(audit_hook)
                 TestSummary(total=1, passed=0, failed=1, skipped=0),
                 f"ERROR: Container execution failed: {exc}",
             )
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
 
         shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
         for pycache in list(workspace.rglob("__pycache__")):
@@ -1103,6 +1109,7 @@ sys.addaudithook(audit_hook)
             return False
 
         if self.verify_command is not None:
+            pre_verify_hashes = _hash_workspace_files(workspace)
             if self.verification_isolation == "blocked":
                 log_text = (
                     "BLOCKED: Host execution of untrusted verification code is disabled by "
@@ -1132,6 +1139,13 @@ sys.addaudithook(audit_hook)
                 )
                 passed = False
                 summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+
+            post_verify_hashes = _hash_workspace_files(workspace)
+            if post_verify_hashes != pre_verify_hashes:
+                passed = False
+                summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+                err_msg = "Security violation: workspace files were mutated during verification"
+                log_text = f"{err_msg}\n{log_text}" if log_text else err_msg
 
             verify_log_path = self.config.state_root / f"verify-{turn_id}.log"
             verify_log_path.write_text(log_text, encoding="utf-8")

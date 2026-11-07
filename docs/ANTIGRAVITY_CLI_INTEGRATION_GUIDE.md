@@ -167,7 +167,13 @@ The integration of `agy.exe` has been verified across three concrete operational
 
 ### 5.4 Real Docker Container Qualification & End-to-End Execution (`aipc-verify:py313-v1`)
 - **Objective**: Qualify live Docker Engine container verification (`verification_isolation="container"`) with `agy.exe 1.5.3` (`gemini-3.8-flash-medium`) on branch `validation/docker-container-qualification`.
-- **Image**: `aipc-verify:py313-v1` (Python 3.13.18, `pytest==8.3.5`, user `65534:65534`, workdir `/workspace`).
+- **Image**: `aipc-verify:py313-v1` pinned by digest (`python:3.13-slim@sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc`, `pytest==8.3.5`, user `65534:65534`, workdir `/workspace`).
+- **Mount & Worktree Hardening**:
+  - `/workspace:ro`: Source workspace is mounted strictly read-only so containerized tests cannot tamper with source code.
+  - `/workspace-out:rw`: Isolated host scratch directory mounted for test outputs, cleaned up automatically after container exits.
+  - Git worktree pointer protection: When `workspace/.git` is a git worktree pointer file, it is masked with an empty file at `/workspace/.git:ro` so the host repository path outside the workspace is never exposed inside the container.
+  - Dynamic discovery & qualification: Zero machine-specific private paths; Docker is discovered via `_resolve_docker_executable()` and qualified dynamically via `check_docker()` in `doctor.py`.
+  - Workspace mutation check: Host calculates `_hash_workspace_files(workspace)` before and after container execution; any file mutation immediately fails closed.
 - **Security Checks (Stage 4)**: 9/9 PASS:
   1. 4A: Valid test passes (`summary.passed == 1`).
   2. 4B: External filesystem access denied (`FileNotFoundError` on host paths, `~/.gemini` credentials inaccessible).

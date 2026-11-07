@@ -142,7 +142,7 @@ Completed Attempt 06 — Experimental Release, Container Qualification & Continu
    - Authored `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md` covering Release Identity, Operational Readiness Table, Container Discovery & Installation Plan, Release Safety, Codex Return Handoff, Branch Protection Assessment, and Explicit Merge Recommendations (`CONDITIONAL GO — EXPERIMENTAL MERGE`, `GO — SUPERVISED OPERATION`, `NO-GO — UNATTENDED PRODUCTION`).
 
 ## Tests
-- `tests/gemini/test_antigravity_transport.py`: 27 passed (including container runner hardening with `python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, and `:/workspace/.git:ro`).
+- `tests/gemini/test_antigravity_transport.py`: 31 passed (including container runner hardening with `python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, `/workspace:ro`, worktree `.git` pointer protection, timeout killer `docker rm -f`, and live Docker security qualification).
 - `tests/integration/test_cli.py`: 4 passed.
 - `tests/routing/test_router.py`: 7 passed.
 - `Test_AI_CONTROLLER_me/tests/test_website.py`: 12 passed.
@@ -168,7 +168,12 @@ Controller review of Attempt 06, `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`, AIPC 
 - **Branch**: `validation/docker-container-qualification`
 - **Host Docker Engine**: Docker Desktop 4.98.0 (245422), Engine 29.9.2, WSL2 6.18.54.1 (`desktop-linux` context). Configured `"UseResourceSaver": false` to eliminate idle VM pauses.
 - **Stage 2 Beginner Validation**: `hello-world` (exit 0), `python:3.13-slim` (Python 3.13.18, exit 0), Python one-liner (`PYTHON_OK 3.13.18 Linux`), exit code propagation (`sys.exit(42)` -> 42), zero leftover containers.
-- **Stage 3 Verification Image (`aipc-verify:py313-v1`)**: Created `docker/Dockerfile.verify` (Python 3.13-slim + `pytest==8.3.5`, user `65534:65534`, workdir `/workspace`). Tested offline execution with `--network none` -> `pytest 8.3.5` (exit 0).
+- **Stage 3 Verification Image (`aipc-verify:py313-v1`) & Mount Security Hardening**:
+  - Created `docker/Dockerfile.verify` pinned by SHA-256 digest `python:3.13-slim@sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc` with `pytest==8.3.5`, user `65534:65534`, workdir `/workspace`. Tested offline execution with `--network none` -> `pytest 8.3.5` (exit 0).
+  - Hardened `/workspace:ro` read-only mount with isolated `/workspace-out:rw` output scratch dir.
+  - Git worktree pointer protection: When `workspace/.git` is a git worktree pointer file, masked with an empty read-only file at `/workspace/.git:ro` preventing container leak of host repository path.
+  - Zero private host paths: Resolved dynamically via `_resolve_docker_executable()` and verified via `check_docker()` in `doctor.py`. Zero `Administrator` occurrences in `src/`, `tests/`, and `docker/`.
+  - Host workspace mutation guard: `_hash_workspace_files(workspace)` checked before and after container execution.
 - **Stage 4 Security Qualification (9/9 PASS)**:
   - 4A (Authorized execution): `passed=True`, `summary.passed=1`.
   - 4B (External filesystem access denial): Host `H:\000ProjectCode\...` and `C:\Users\Administrator` raise `FileNotFoundError`; host `~/.gemini/antigravity` OAuth credentials inaccessible.
