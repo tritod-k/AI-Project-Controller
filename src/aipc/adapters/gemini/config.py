@@ -18,7 +18,7 @@ class GeminiAdapterConfig(CanonicalRecord):
     operation_timeout: StrictInt = Field(default=30, gt=0, le=120)
     cancellation_timeout: StrictInt = Field(default=10, gt=0, le=120)
     max_event_bytes: StrictInt = Field(default=2 * 1024 * 1024, ge=1024, le=16 * 1024 * 1024)
-    approval_mode: Literal["plan", "accept-edits", "yolo"] = "accept-edits"
+    approval_mode: Literal["plan", "accept-edits"] = "accept-edits"
     disable_slash_commands: bool = True
     verification_isolation: Literal["blocked", "container", "unsafe_host_opt_in"] = "blocked"
     container_image: str | None = None
@@ -36,7 +36,7 @@ class GeminiAdapterConfig(CanonicalRecord):
     def _evaluate_security_controls(self) -> "GeminiAdapterConfig":
         if (
             self.verification_isolation == "unsafe_host_opt_in"
-            or self.approval_mode == "yolo"
+            or getattr(self, "approval_mode", "accept-edits") not in ("plan", "accept-edits")
             or not self.disable_slash_commands
         ):
             object.__setattr__(self, "security_controls_verified", False)
