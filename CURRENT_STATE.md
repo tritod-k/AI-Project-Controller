@@ -13,21 +13,21 @@ Operational Readiness Validation (Post-Phase 22 Operational Deployment)
 AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 04 (AWAITING_REVIEW)
+Attempt 06 (AWAITING_REVIEW — Experimental Release, Container Qualification & Continuity Validation)
 
 ## Phase Gate
 PENDING
 
 ## Last Stable Checkpoint
-aipc-phase-22-pass (Master retained clean).
+aipc-phase-22-pass (Master retained clean at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
 Branch: validation/operational-readiness.
 
 ## Current Branch / Worktree
 validation/operational-readiness, H:/000ProjectCode/AI_Project_Controller.
 
 ## Last Commit
-dfe38aa26611694a8a4934bbab91de60a6031dbe (AIPC Phase post-22 attempt 03 - Format antigravity_transport.py for CI ruff check).
-Attempt 04 final security boundary & git integrity fixes applied on validation/operational-readiness.
+7b67db1d086ee9ffb30895dd6c6a533545b08111 (AIPC Phase post-22 attempt 05 - Reject yolo approval_mode in GeminiAdapterConfig).
+Attempt 06 adds Stage 4 container runner hardening (`python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, read-only `.git` mount) and `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -75,8 +75,9 @@ None — All 23 architectural phases (Phases 00–22) complete! Operational read
 | **4. Antigravity Security Qualification** | `PASS (QUALIFIED_FILESYSTEM_ONLY)` | `filesystem_write: AVAILABLE`; `shell`, `git`, `network`, `approval_events: BLOCKED`. |
 | **5. Real Gemini Coding Task via AIPC** | `PASS` | `live-agy-coding` phase-01 modified `index.html`, 1 test passed in 31.8s, checkpoint `refs/tags/aipc/live-agy-coding/phase-01/pass`. |
 | **6. Codex -> Gemini Quota Fallback** | `PASS (SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI)` | Simulated `QUOTA_EXHAUSTED` -> routed to `gemini-antigravity` via `agy.exe`, phase passed in 40.8s, checkpoint `refs/tags/aipc/live-agy-fallback/phase-01/pass`. |
-| **7. Portfolio Project Live Enhancement** | `PASS` | `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me` updated by `agy.exe`, 12/12 pytest pass, commit `01940359dd181e75b426462b93aa61d5157cef84`, main untouched. |
+| **7. Portfolio Project Live Enhancement** | `PASS` | `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me` updated by `agy.exe`, 12/12 pytest pass, transient `.aipc_test.log` removed (`214ff8b8f2ea4da9834e80addc11990ad616a107`), PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1) opened, `main` untouched (`5e65e6fe5f54397155b01a9611aa6e58597dba07`). |
 | **8. Codex Live Execution** | `DEFERRED` | Weekly subscription limit reached; historical receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` preserved. |
+| **9. Container Runtime Qualification** | `CONTAINER_BLOCKED` (Host) / `OFFLINE_VERIFIED` (Code) | Docker CLI v28.0.4 installed, but daemon stopped & WSL2 kernel missing (`wsl --update` needed). `_run_container_verification()` hardened & unit-tested. |
 
 ---
 
@@ -126,45 +127,39 @@ None — All 23 architectural phases (Phases 00–22) complete! Operational read
 ---
 
 ## Current Work
-Completed Attempt 04 Final Security Boundary & Git Integrity Fixes:
-1. **Issue 1 (Security Isolation & Host Verification Boundaries)**:
-   - Recognized that Python `sys.addaudithook()` is defense-in-depth and NOT an OS-enforced security boundary for untrusted code.
-   - Set host verification to disabled by default (`verification_isolation: Literal["blocked", "container", "unsafe_host_opt_in"] = "blocked"`).
-   - Implemented `_run_container_verification()` running verification inside an isolated OS container (`docker` or `podman`) with `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, and `--memory 512m`.
-   - In-process audit hook verification is only executed when explicitly opted in via `verification_isolation="unsafe_host_opt_in"`.
-2. **Issue 2 (Runtime Qualification & Security Controls Verification)**:
-   - Separated CLI execution compatibility (`cli_compatible`) from verified security boundary status (`effective_security_verified`).
-   - Dynamic qualification explicitly marks `sandbox_verified=False` on bare Windows hosts.
-   - `qualify_antigravity_runtime()` verifies that required security arguments are present and fails closed (`LIVE_RUNTIME_BLOCKED`) if unverified or configured with `--yolo` / disabled slash commands.
-3. **Issue 3 (Git Integrity & Safe Commit Implementation)**:
-   - Staged files existing before the agent turn remain preserved in the Git index and are never committed into the agent attempt commit.
-   - Files modified during the turn are tracked via workspace SHA-256 hash comparison against pre-turn hashes; only files modified by the turn are staged and committed with `git commit --only`.
-   - Untouched dirty files remain undisturbed in the workspace.
-   - Non-zero return codes on all Git commands fail closed.
-   - Local repository `user.name` and `user.email` are strictly preserved.
-   - Verification failure never creates a Git commit and captures failure logs cleanly.
-4. **Merge & Operational Recommendations**:
-   - **Experimental Merge (`validation/operational-readiness` -> `master`)**: **GO** (with `QUALIFIED_FILESYSTEM_ONLY` and default-blocked host verification).
-   - **Unattended Production Autonomous Execution**: **NO-GO** on bare Windows host until OS-enforced container/VM/Windows Sandbox isolation is active for verification and shell execution.
+Completed Attempt 06 — Experimental Release, Container Qualification & Continuity Validation:
+1. **Stage 1 & Stage 3 (Read-Only Repository Audit & Container Discovery)**:
+   - Verified `master` untouched at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833` and `Test_AI_CONTROLLER_me` `main` untouched at `5e65e6fe5f54397155b01a9611aa6e58597dba07`.
+   - Read-only host container discovery found Docker CLI v28.0.4 (`docker.exe`), no Podman, Docker Linux engine daemon stopped (`open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`), and WSL2 kernel missing (`wsl --update` required). Classified host runtime as `CONTAINER_BLOCKED` without installing any software.
+2. **Stage 4 (Container Verification Runner Hardening)**:
+   - Hardened `_run_container_verification()` in `src/aipc/adapters/gemini/antigravity_transport.py`:
+     - Normalizes Windows host Python executable paths (`python.exe`, `H:\...\python.exe`) to `"python3"` inside the Linux container.
+     - Enforces `--network none`, `--read-only`, `--tmpfs /tmp:rw,noexec,nosuid,size=64m`, `--user 65534:65534`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, `--memory 512m`.
+     - Mounts `/workspace/.git:ro` read-only when `.git` exists in the workspace.
+3. **Stage 7 (Portfolio Repository Hygiene & PR)**:
+   - Removed transient `.aipc_test.log` from `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me`, added `.aipc_test.log` to `.gitignore`, verified `12 passed` in `tests/test_website.py`, pushed `214ff8b8f2ea4da9834e80addc11990ad616a107`, and opened PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1) without merging.
+4. **Stage 8, 9 & 13 (Operational MVP Release Review, Branch Protection & Merge Recommendations)**:
+   - Authored `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md` covering Release Identity, Operational Readiness Table, Container Discovery & Installation Plan, Release Safety, Codex Return Handoff, Branch Protection Assessment, and Explicit Merge Recommendations (`CONDITIONAL GO — EXPERIMENTAL MERGE`, `GO — SUPERVISED OPERATION`, `NO-GO — UNATTENDED PRODUCTION`).
 
 ## Tests
-- `tests/gemini/test_antigravity_transport.py`: 27 passed in 35.14s (including default-blocked verification, container runner command building, staged index preservation, dirty file hash tracking, git failure fail-closed, and audit hook defense-in-depth).
-- `tests/e2e/test_provider_qualification_and_fallback.py`: 13 passed in 281.72s (100% pass across full suite including T4 Antigravity CLI transport contract, fallback, doctor reporting, and qualification).
-- `tests/integration/test_cli.py`: 4 passed in 0.95s.
-- `tests/e2e/test_full_mock_e2e.py`: 8 passed in 10.3s.
-- Code quality & formatting: `ruff check .` (0 errors), `ruff format --check .` (288 files clean).
+- `tests/gemini/test_antigravity_transport.py`: 27 passed (including container runner hardening with `python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, and `:/workspace/.git:ro`).
+- `tests/integration/test_cli.py`: 4 passed.
+- `tests/routing/test_router.py`: 7 passed.
+- `Test_AI_CONTROLLER_me/tests/test_website.py`: 12 passed.
+- Code quality & formatting: `ruff check .` (0 errors), `ruff format --check .` (clean), `git diff --check` (clean).
 
 ## Required Fixes / Remaining Work
-Awaiting Controller independent review and Phase Gate evaluation. Worker does NOT self-advance to PASS.
+Awaiting Controller independent review and human Commander decision on Experimental MVP PR merge. Worker does NOT self-advance to PASS.
 
 ## Warnings / Known Issues
-None.
+- Host container runtime is `CONTAINER_BLOCKED` until human Commander runs `wsl --update` and starts Docker Desktop.
+- Live Codex execution and live Codex-to-Gemini handoff remain `DEFERRED` until weekly Codex subscription quota resets.
 
 ## Recovery Notes
-Branch `validation/operational-readiness` contains verified security hardening, negative test suites, default-blocked verification isolation, container runner support, git index preservation, and documentation updates. `master` branch remains clean and protected at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`.
+Branch `validation/operational-readiness` is clean, tested, and backed by GitHub Actions CI (`ubuntu-latest` Python 3.12 & 3.13). `master` remains untouched at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`.
 
 ## Next Action
-Controller review of Attempt 04 Final Security Boundary & Git Integrity Fixes and Phase Completion Report.
+Controller review of Attempt 06, `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`, AIPC Pull Request (`validation/operational-readiness` -> `master`), and Portfolio Pull Request (`feature/antigravity-live-enhancement` -> `main`).
 
 ## Timestamp
-2026-11-07T08:55:00+07:00
+2026-11-07T10:08:00+07:00

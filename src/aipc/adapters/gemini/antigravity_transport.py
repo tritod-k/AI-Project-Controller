@@ -892,12 +892,34 @@ sys.addaudithook(audit_hook)
             )
 
         ws_real = workspace.resolve()
+        normalized_cmd = list(command)
+        if normalized_cmd:
+            exe_token = normalized_cmd[0]
+            exe_lower = exe_token.lower()
+            if (
+                exe_lower.endswith("python.exe")
+                or exe_lower.endswith("python")
+                or ("\\" in exe_token and "python" in exe_lower)
+                or (":" in exe_token and "python" in exe_lower)
+            ):
+                normalized_cmd[0] = "python3"
+
+        mount_args = ["-v", f"{ws_real}:/workspace:rw"]
+        git_path = workspace / ".git"
+        if git_path.exists():
+            mount_args.extend(["-v", f"{git_path.resolve()}:/workspace/.git:ro"])
+
         container_cmd = [
             self.container_runtime,
             "run",
             "--rm",
             "--network",
             "none",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--user",
+            "65534:65534",
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -910,12 +932,11 @@ sys.addaudithook(audit_hook)
             "HOME=/tmp",
             "-e",
             "PYTHONDONTWRITEBYTECODE=1",
-            "-v",
-            f"{ws_real}:/workspace:rw",
+            *mount_args,
             "-w",
             "/workspace",
             self.container_image,
-            *command,
+            *normalized_cmd,
         ]
 
         try:

@@ -974,6 +974,9 @@ def test_container_verification_builds_restricted_os_isolated_command(
     monkeypatch.setattr(shutil, "which", lambda r: f"/usr/bin/{r}")
     monkeypatch.setattr(subprocess, "run", _mock_run)
 
+    git_dir = ws / ".git"
+    git_dir.mkdir()
+
     transport_container = AntigravityCliTransport(
         cfg,
         verification_isolation="container",
@@ -983,7 +986,14 @@ def test_container_verification_builds_restricted_os_isolated_command(
     passed, summary, log_text = transport_container._run_container_verification(
         turn_id="turn-c-ok",
         workspace=ws,
-        command=("pytest", "-q", "-p", "no:cacheprovider"),
+        command=(
+            r"H:\000ProjectCode\.venv\Scripts\python.exe",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ),
     )
     assert passed is True
     assert captured_cmd[0] == "docker"
@@ -991,6 +1001,11 @@ def test_container_verification_builds_restricted_os_isolated_command(
     assert "--rm" in captured_cmd
     assert "--network" in captured_cmd
     assert captured_cmd[captured_cmd.index("--network") + 1] == "none"
+    assert "--read-only" in captured_cmd
+    assert "--tmpfs" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--tmpfs") + 1] == "/tmp:rw,noexec,nosuid,size=64m"
+    assert "--user" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--user") + 1] == "65534:65534"
     assert "--cap-drop" in captured_cmd
     assert captured_cmd[captured_cmd.index("--cap-drop") + 1] == "ALL"
     assert "--security-opt" in captured_cmd
@@ -999,9 +1014,13 @@ def test_container_verification_builds_restricted_os_isolated_command(
     assert "--memory" in captured_cmd
     assert "-w" in captured_cmd
     assert captured_cmd[captured_cmd.index("-w") + 1] == "/workspace"
-    assert f"{ws.resolve()}:/workspace:rw" in " ".join(captured_cmd)
-    assert "python:3.13-slim" in captured_cmd
     cmd_str = " ".join(captured_cmd)
+    assert f"{ws.resolve()}:/workspace:rw" in cmd_str
+    assert f"{git_dir.resolve()}:/workspace/.git:ro" in cmd_str
+    assert "python:3.13-slim" in captured_cmd
+    image_idx = captured_cmd.index("python:3.13-slim")
+    assert captured_cmd[image_idx + 1] == "python3"
+    assert captured_cmd[image_idx + 2 :] == ["-m", "pytest", "-q", "-p", "no:cacheprovider"]
     assert ".gemini" not in cmd_str
     assert "OPENAI_API_KEY" not in cmd_str
 
