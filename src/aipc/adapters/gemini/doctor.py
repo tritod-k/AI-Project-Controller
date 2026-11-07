@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2"})
+QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2", "1.5.3"})
 REQUIRED_AGY_FLAGS: tuple[str, ...] = (
     "--sandbox",
     "--mode",

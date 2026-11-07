@@ -996,9 +996,11 @@ def test_container_verification_builds_restricted_os_isolated_command(
         ),
     )
     assert passed is True
-    assert captured_cmd[0] == "docker"
+    assert captured_cmd[0].endswith("docker")
     assert captured_cmd[1] == "run"
     assert "--rm" in captured_cmd
+    assert "--name" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--name") + 1] == "aipc-verify-turn-c-ok"
     assert "--network" in captured_cmd
     assert captured_cmd[captured_cmd.index("--network") + 1] == "none"
     assert "--read-only" in captured_cmd
@@ -1221,3 +1223,88 @@ def test_git_integrity_preserves_worktree_and_commit_identity(tmp_path: Path) ->
 
     log_author = _run_safe_git(["log", "-1", "--format=%an <%ae>"], ws, empty_hooks).stdout.strip()
     assert log_author == "Custom Dev <dev@example.com>"
+
+
+def test_container_verification_timeout_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When container verification times out, it forcefully kills and removes the container."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    calls: list[list[str]] = []
+
+    def _mock_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if "rm" in cmd:
+
+            class _RmRes:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _RmRes()
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    monkeypatch.setattr(shutil, "which", lambda r: f"/usr/bin/{r}")
+    monkeypatch.setattr(subprocess, "run", _mock_run)
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image="aipc-verify:py313-v1",
+        container_runtime="docker",
+    )
+    passed, summary, log_text = transport._run_container_verification(
+        turn_id="turn-timeout-check",
+        workspace=ws,
+        command=("python3", "-m", "pytest", "-q"),
+    )
+    assert passed is False
+    assert "TIMEOUT: Container verification timed out" in log_text
+    assert len(calls) == 2
+    assert calls[1] == ["/usr/bin/docker", "rm", "-f", "aipc-verify-turn-timeout-check"]
+
+
+def test_container_verification_live_smoke(tmp_path: Path) -> None:
+    """Live Docker smoke test with aipc-verify:py313-v1 if engine and image are present."""
+    docker_bin = shutil.which("docker")
+    if docker_bin is None and os.name == "nt":
+        candidate = Path(
+            r"C:\Users\Administrator\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe"
+        )
+        if candidate.is_file():
+            docker_bin = str(candidate)
+
+    if not docker_bin:
+        pytest.skip("Docker CLI not available")
+
+    inspect_res = subprocess.run(
+        [docker_bin, "image", "inspect", "aipc-verify:py313-v1"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if inspect_res.returncode != 0:
+        pytest.skip("aipc-verify:py313-v1 image not built locally")
+
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "test_smoke.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image="aipc-verify:py313-v1",
+        container_runtime="docker",
+    )
+    passed, summary, log_text = transport._run_container_verification(
+        turn_id="live-smoke",
+        workspace=ws,
+        command=("python3", "-m", "pytest", "-q"),
+    )
+    assert passed is True
+    assert summary.passed == 1
+    assert summary.failed == 0

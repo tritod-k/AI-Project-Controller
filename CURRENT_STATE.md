@@ -13,7 +13,7 @@ Operational Readiness Validation (Post-Phase 22 Operational Deployment)
 AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 06 (AWAITING_REVIEW — Experimental Release, Container Qualification & Continuity Validation)
+Attempt 07 (AWAITING_REVIEW — Real Docker Container Qualification & End-to-End Execution)
 
 ## Phase Gate
 PENDING
@@ -23,7 +23,7 @@ aipc-phase-22-pass (Master retained clean at `41db10ae933ec0ca0f9d7207bf1e6b8c3d
 Branch: validation/operational-readiness.
 
 ## Current Branch / Worktree
-validation/operational-readiness, H:/000ProjectCode/AI_Project_Controller.
+validation/docker-container-qualification, H:/000ProjectCode/AI_Project_Controller.
 
 ## Last Commit
 7b67db1d086ee9ffb30895dd6c6a533545b08111 (AIPC Phase post-22 attempt 05 - Reject yolo approval_mode in GeminiAdapterConfig).
@@ -77,7 +77,7 @@ None — All 23 architectural phases (Phases 00–22) complete! Operational read
 | **6. Codex -> Gemini Quota Fallback** | `PASS (SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI)` | Simulated `QUOTA_EXHAUSTED` -> routed to `gemini-antigravity` via `agy.exe`, phase passed in 40.8s, checkpoint `refs/tags/aipc/live-agy-fallback/phase-01/pass`. |
 | **7. Portfolio Project Live Enhancement** | `PASS` | `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me` updated by `agy.exe`, 12/12 pytest pass, transient `.aipc_test.log` removed (`214ff8b8f2ea4da9834e80addc11990ad616a107`), PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1) opened, `main` untouched (`5e65e6fe5f54397155b01a9611aa6e58597dba07`). |
 | **8. Codex Live Execution** | `DEFERRED` | Weekly subscription limit reached; historical receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` preserved. |
-| **9. Container Runtime Qualification** | `CONTAINER_BLOCKED` (Host) / `OFFLINE_VERIFIED` (Code) | Docker CLI v28.0.4 installed, but daemon stopped & WSL2 kernel missing (`wsl --update` needed). `_run_container_verification()` hardened & unit-tested. |
+| **9. Container Runtime Qualification** | `CONTAINER_LIVE_VERIFIED` | Docker Desktop 4.98.0 / Engine 29.9.2 & WSL2 6.18.54.1 live verified. Built reproducible image `aipc-verify:py313-v1`. All 9 Stage 4 isolation checks PASS. Stage 5 live E2E with real `agy.exe 1.5.3` + real container verification PASS (`refs/tags/aipc/docker-e2e/phase-01/pass`). |
 
 ---
 
@@ -163,3 +163,26 @@ Controller review of Attempt 06, `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`, AIPC 
 
 ## Timestamp
 2026-11-07T10:08:00+07:00
+
+### Section 11 — Real Docker Container Qualification & End-to-End Audit Trail (Stages 1–6)
+- **Branch**: `validation/docker-container-qualification`
+- **Host Docker Engine**: Docker Desktop 4.98.0 (245422), Engine 29.9.2, WSL2 6.18.54.1 (`desktop-linux` context). Configured `"UseResourceSaver": false` to eliminate idle VM pauses.
+- **Stage 2 Beginner Validation**: `hello-world` (exit 0), `python:3.13-slim` (Python 3.13.18, exit 0), Python one-liner (`PYTHON_OK 3.13.18 Linux`), exit code propagation (`sys.exit(42)` -> 42), zero leftover containers.
+- **Stage 3 Verification Image (`aipc-verify:py313-v1`)**: Created `docker/Dockerfile.verify` (Python 3.13-slim + `pytest==8.3.5`, user `65534:65534`, workdir `/workspace`). Tested offline execution with `--network none` -> `pytest 8.3.5` (exit 0).
+- **Stage 4 Security Qualification (9/9 PASS)**:
+  - 4A (Authorized execution): `passed=True`, `summary.passed=1`.
+  - 4B (External filesystem access denial): Host `H:\000ProjectCode\...` and `C:\Users\Administrator` raise `FileNotFoundError`; host `~/.gemini/antigravity` OAuth credentials inaccessible.
+  - 4C (Read-only root filesystem): Writing `/etc/exploit` raises `OSError: [Errno 30] Read-only file system` (`--read-only`); `/tmp` is writable tmpfs.
+  - 4D (Network isolation): Outbound connection to `1.1.1.1:80` raises `OSError: [Errno 101] Network is unreachable` (`--network none`).
+  - 4E (Non-root execution & privilege drop): `os.getuid() == 65534`, `os.setuid(0)` raises `PermissionError` (`--user 65534:65534`, `--cap-drop ALL`, `--security-opt no-new-privileges`).
+  - 4F (Protection of Git metadata): Writing `/workspace/.git/HEAD` raises `OSError: [Errno 30] Read-only file system` (`/workspace/.git:ro`); host `.git` untouched.
+  - 4G (Memory & process limits): `/sys/fs/cgroup/memory.max == 536870912` (512 MiB), `/sys/fs/cgroup/pids.max == 64`.
+  - 4H (Container timeout & cleanup): 15-second hang with 2-second timeout returned `passed=False` (`TIMEOUT`), container killed and removed cleanly via `docker rm -f`, `docker ps -a` confirmed 0 leftover containers.
+  - 4I (Failed verification prevents Phase Gate PASS): Failing test returns `passed=False`, creates zero Git commit, and prevents Phase Gate `PASS`.
+- **Stage 5 Live End-to-End Execution**:
+  - Dispatched `agy.exe 1.5.3` (`gemini-3.8-flash-medium`) to create `index.html` with `<!DOCTYPE html><html><body><h1>AIPC Docker Verified</h1></body></html>`.
+  - Independent Docker container `aipc-verify:py313-v1` executed `pytest` on attempt worktree (`exit_code=0`, `1 passed in 0.05s`).
+  - Reviewer & PhaseGate returned `PASS`.
+  - Checkpoint `refs/tags/aipc/docker-e2e/phase-01/pass` created and state marked `COMPLETED` / `PASS`.
+  - `RecoveryManager.inspect` confirmed clean state (`NO_RECOVERY_NEEDED`).
+- **Global Policy Safety**: `verification_isolation="blocked"` remains the global default in `GeminiAdapterConfig`.

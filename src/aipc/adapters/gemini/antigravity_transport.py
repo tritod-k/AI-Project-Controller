@@ -884,6 +884,26 @@ sys.addaudithook(audit_hook)
     ) -> tuple[bool, TestSummary, str]:
         """Run verify_command inside a restricted OS container."""
         runtime_bin = shutil.which(self.container_runtime)
+        if runtime_bin is None and os.name == "nt":
+            candidates = [
+                Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Administrator\AppData\Local"))
+                / "Programs"
+                / "DockerDesktop"
+                / "resources"
+                / "bin"
+                / f"{self.container_runtime}.exe",
+                Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+                / "Docker"
+                / "Docker"
+                / "resources"
+                / "bin"
+                / f"{self.container_runtime}.exe",
+            ]
+            for c in candidates:
+                if c.is_file():
+                    runtime_bin = str(c)
+                    break
+
         if runtime_bin is None or not self.container_image:
             return (
                 False,
@@ -904,15 +924,28 @@ sys.addaudithook(audit_hook)
             ):
                 normalized_cmd[0] = "python3"
 
+        if any("pytest" in arg for arg in normalized_cmd):
+            has_cache_opt = any(
+                arg in ("-o", "-p") or "cache_dir" in arg or "no:cacheprovider" in arg
+                for arg in normalized_cmd
+            )
+            if not has_cache_opt:
+                normalized_cmd.extend(["-o", "cache_dir=/tmp/.pytest_cache"])
+
         mount_args = ["-v", f"{ws_real}:/workspace:rw"]
         git_path = workspace / ".git"
         if git_path.exists():
             mount_args.extend(["-v", f"{git_path.resolve()}:/workspace/.git:ro"])
 
+        safe_turn_id = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(turn_id))
+        container_name = f"aipc-verify-{safe_turn_id}"
+
         container_cmd = [
-            self.container_runtime,
+            runtime_bin,
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--network",
             "none",
             "--read-only",
@@ -948,6 +981,15 @@ sys.addaudithook(audit_hook)
                 timeout=self.config.operation_timeout,
             )
         except subprocess.TimeoutExpired:
+            try:
+                subprocess.run(
+                    [runtime_bin, "rm", "-f", container_name],
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+            except Exception:
+                pass
             return (
                 False,
                 TestSummary(total=1, passed=0, failed=1, skipped=0),
@@ -1170,13 +1212,17 @@ sys.addaudithook(audit_hook)
             elif event_type in ("tool_step", "step_update"):
                 step_obj = frame.get("step") or frame.get("step_update")
                 if isinstance(step_obj, dict):
-                    self._process_tool_step(
-                        step=step_obj,
-                        workspace=workspace,
-                        observations=observations,
-                        edited_paths=edited_paths,
-                        denial_reasons=denial_reasons,
-                    )
+                    step_type = step_obj.get("step_type")
+                    if step_type == "tool" or (
+                        step_type is None and ("tool" in step_obj or "tool_name" in step_obj)
+                    ):
+                        self._process_tool_step(
+                            step=step_obj,
+                            workspace=workspace,
+                            observations=observations,
+                            edited_paths=edited_paths,
+                            denial_reasons=denial_reasons,
+                        )
             elif event_type in ("text_delta", "message"):
                 pass
             elif event_type == "result":
@@ -1311,9 +1357,17 @@ sys.addaudithook(audit_hook)
                     f"prohibited Antigravity tool execution detected: {tool_name}"
                 )
             denial_reasons.append(f"unauthorized_tool:{tool_name}")
-            observations.append(
-                ToolObservation(tool_call_id=tool_id, kind="execute", status="failed", paths=())
+            existing_idx = next(
+                (i for i, o in enumerate(observations) if o.tool_call_id == tool_id),
+                None,
             )
+            unauth_obs = ToolObservation(
+                tool_call_id=tool_id, kind="execute", status="failed", paths=()
+            )
+            if existing_idx is not None:
+                observations[existing_idx] = unauth_obs
+            else:
+                observations.append(unauth_obs)
             return
 
         kind = "read"
@@ -1349,14 +1403,21 @@ sys.addaudithook(audit_hook)
                 paths = ()
 
         obs_status = "completed" if state == "DONE" else "failed"
-        observations.append(
-            ToolObservation(
-                tool_call_id=tool_id,
-                kind=kind,  # type: ignore[arg-type]
-                status=obs_status,  # type: ignore[arg-type]
-                paths=paths,
-            )
+        obs = ToolObservation(
+            tool_call_id=tool_id,
+            kind=kind,  # type: ignore[arg-type]
+            status=obs_status,  # type: ignore[arg-type]
+            paths=paths,
         )
+        existing_idx = next(
+            (i for i, o in enumerate(observations) if o.tool_call_id == tool_id),
+            None,
+        )
+        if existing_idx is not None:
+            if state == "DONE" or obs_status == "completed":
+                observations[existing_idx] = obs
+        else:
+            observations.append(obs)
 
     async def wait(self, session_id: str, turn_id: str) -> GeminiRawResult:
         state = self.turns.get((session_id, turn_id))

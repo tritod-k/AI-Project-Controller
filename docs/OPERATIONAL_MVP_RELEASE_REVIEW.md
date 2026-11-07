@@ -24,7 +24,7 @@
 | **Codex Live** | `DEFERRED` (Historical `LIVE_VERIFIED`) | Historical Phase 12 receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` (`PASS`). Current live execution deferred due to weekly subscription usage limit. | No live calls permitted until weekly subscription quota resets. |
 | **Antigravity CLI** | `LIVE_VERIFIED` (`QUALIFIED_FILESYSTEM_ONLY`) | `C:\Users\Administrator\AppData\Local\agy\bin\agy.exe` (`v1.5.2`), personal OAuth session (`~/.gemini/antigravity`), zero API keys, zero Vertex billing. Dynamic qualification in `src/aipc/adapters/gemini/doctor.py`. | `shell`, `git`, `network`, and `approval_events` are strictly `BLOCKED`. `sandbox_verified=False` on bare Windows host. |
 | **Real Gemini Coding** | `LIVE_VERIFIED` | Section 8 `live-agy-coding` phase-01 modified `index.html`, passed independent verification (`1 passed`), checkpoint `refs/tags/aipc/live-agy-coding/phase-01/pass`, receipt `scratch/live_sec8_sec9/sec8_summary.json` (`31,829 ms`, model `gemini-3.8-flash-medium`). | Scoped to filesystem-only edits inside isolated attempt worktrees. |
-| **Container Verification** | `CONTAINER_BLOCKED` (Host Runtime) / `OFFLINE_VERIFIED` (Runner Contract) | `_run_container_verification()` hardened with Windows `python.exe` -> `python3` normalization, `--network none`, `--read-only`, `--tmpfs /tmp:rw,noexec,nosuid,size=64m`, `--user 65534:65534`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, `--memory 512m`, and read-only `.git` mount (`:/workspace/.git:ro`). Verified by `tests/gemini/test_antigravity_transport.py`. | Host Docker daemon is not running (`open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`) and WSL2 kernel is missing (`wsl --update` required). Default mode remains `verification_isolation="blocked"`. |
+| **Container Verification** | `CONTAINER_LIVE_VERIFIED` | Full 6-stage qualification completed on Windows PC (`validation/docker-container-qualification`). Docker Desktop 4.98.0 / Engine 29.9.2, WSL2 Kernel 6.18.54.1. Base: `aipc-verify:py313-v1` (Python 3.13.18 + pytest 8.3.5). 9/9 Stage 4 security checks passed (authorized execution, external filesystem denial, read-only root FS, network isolation, non-root uid 65534, git metadata ro, memory 512MB & pids 64 limits, timeout kill & cleanup `docker rm -f`, failed verification prevention). Stage 5 E2E verified live with `agy.exe 1.5.3` (`gemini-3.8-flash-medium`) + real container verification -> Phase Gate PASS (`refs/tags/aipc/docker-e2e/phase-01/pass`). | Global default remains fail-closed `verification_isolation="blocked"` in `GeminiAdapterConfig`. Container verification is activated explicitly via `verification_isolation="container"` when Docker Engine and `aipc-verify:py313-v1` are available. |
 | **Quota Fallback** | `MOCK_FALLBACK_PASS` + `SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI` (`FULL_LIVE_CODEX_TO_GEMINI_HANDOFF_DEFERRED`) | Offline router fallback (`tests/routing/test_router.py` `PASS`) + Section 9 live fallback where pre-start `QUOTA_EXHAUSTED` on `codex-worker` (`effects=NONE`) routed to live `gemini-antigravity` (`agy.exe`), achieving `PASS` in `40,884 ms` (`refs/tags/aipc/live-agy-fallback/phase-01/pass`). | Full live mid-flight Codex-to-Gemini handoff (`FULL_LIVE_CODEX_TO_GEMINI_HANDOFF_DEFERRED`) awaits Codex quota reset. |
 | **Recovery** | `OFFLINE_VERIFIED` / `LIVE_VERIFIED` | `RecoveryManager` verified across interrupted runs, dirty worktree detection, human edit protection (`WAITING_HUMAN`), and pre-fallback clean worktree verification. | Session resume on Antigravity CLI is intentionally disabled (`GeminiSessionLostError` fail-closed) due to lack of a replay barrier. |
 | **Git Integrity** | `OFFLINE_VERIFIED` / `LIVE_VERIFIED` | `_commit_turn_changes()` and `_run_safe_git()` verified by unit & integration tests: pre-existing staged files preserved in index, only SHA-256 delta files committed via `git commit --only`, untouched dirty files preserved, hooks neutralized (`core.hooksPath`), local commit identity preserved, failed verification creates zero commits. | Requires Git CLI on host `PATH`. |
@@ -32,54 +32,45 @@
 
 ---
 
-## 3. Stage 3 & Stage 4 — Container Runtime Discovery, Hardening & Installation Plan
+## 3. Real Docker Container Qualification & End-to-End Verification (Stages 1–6)
 
-### 3.1 Read-Only Host Discovery Results
-A strictly read-only inspection of the Windows host environment was executed without installing software or modifying system settings:
+### 3.1 Real Host Environment Status
+Following a fresh installation of Docker Desktop and WSL2 kernel update, Docker Engine is fully operational:
+- **Docker Client & Engine**: Docker Desktop 4.98.0 (245422), Engine 29.9.2, API 1.56, context `desktop-linux`.
+- **WSL2 Runtime**: Kernel version 6.18.54.1-1, WSL version 3.0.3.0.
+- **Resource Saver Prevention**: Configured `"UseResourceSaver": false` in `settings-store.json` to prevent idle freeze of the WSL2 Linux VM.
+- **Beginner Validation (Stage 2)**:
+  - `docker run --rm hello-world`: Exit code `0`, output verified.
+  - `docker run --rm python:3.13-slim python3 --version`: `Python 3.13.18`, exit code `0`.
+  - Simple isolated Python one-liner: `PYTHON_OK 3.13.18 Linux`, exit code `0`.
+  - Exit code propagation & cleanup: `sys.exit(42)` -> exit code `42`; `docker ps -a` confirmed `0` leftover containers.
 
-1. **Docker CLI (`docker --version`)**:
-   - **Installed**: Yes — `C:\Program Files\Docker\Docker\resources\bin\docker.exe` (`Docker version 28.0.4, build b8034c0`).
-2. **Docker Daemon (`docker info`)**:
-   - **Status**: **Not Running / Unavailable** (`EXIT_CODE=1`).
-   - **Exact Error**: `ERROR: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.48/info": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.`
-3. **Podman CLI (`podman --version`)**:
-   - **Installed**: No (`CommandNotFoundException`).
-4. **WSL2 Status (`wsl --status`)**:
-   - **Default Version**: `2`
-   - **Exact Error**: `The WSL 2 kernel file is not found. To update or restore the kernel please run 'wsl --update'.`
+### 3.2 Reproducible Verification Image (`aipc-verify:py313-v1`)
+A dedicated, reproducible Docker image was created at `docker/Dockerfile.verify`:
+- **Base**: `python:3.13-slim` (`sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc`).
+- **Dependencies**: `pytest==8.3.5` pre-installed.
+- **User**: `65534:65534` (`nobody:nogroup`).
+- **Offline Network Isolation Verification**: `docker run --rm --network none aipc-verify:py313-v1 python3 -m pytest --version` -> `pytest 8.3.5`, exit code `0`.
 
-**Classification**: **`CONTAINER_BLOCKED`** on the current host environment because the WSL2 kernel is missing and the Docker Desktop Linux engine daemon is not running.
+### 3.3 Stage 4 Real Security Qualification (9/9 Requirements PASS)
+All 9 Stage 4 isolation and defense-in-depth requirements were executed against the live Docker Engine (`_run_container_verification`) in disposable workspaces:
+1. **4A (Authorized Test Execution)**: Valid pytest test passed (`passed=True`, `summary.passed=1`).
+2. **4B (External Filesystem Access Denial)**: Container filesystem blocks access to host paths `H:\000ProjectCode\...` and `C:\Users\Administrator` (`FileNotFoundError`); host OAuth credentials `~/.gemini/antigravity` are completely inaccessible.
+3. **4C (Read-Only Root Filesystem)**: Attempts to write `/etc/exploit` and `/usr/exploit` raise `OSError: [Errno 30] Read-only file system` (`--read-only`), while `/tmp` is writable (`--tmpfs /tmp:rw,noexec,nosuid,size=64m`).
+4. **4D (Network Isolation)**: Outbound socket connection to `1.1.1.1:80` raises `OSError: [Errno 101] Network is unreachable` (`--network none`).
+5. **4E (Non-Root Execution & Privilege Drop)**: `os.getuid() == 65534`, `os.getgid() == 65534`, and `os.setuid(0)` raises `PermissionError` (`--user 65534:65534`, `--cap-drop ALL`, `--security-opt no-new-privileges`).
+6. **4F (Protection of Git Metadata)**: Attempts to overwrite `/workspace/.git/HEAD` or `.git/config` raise `OSError: [Errno 30] Read-only file system` (`/workspace/.git:ro`), and host Git repository is 100% untouched.
+7. **4G (Memory and Process Limits)**: Verified `/sys/fs/cgroup/memory.max` is `536870912` (512 MiB) and `/sys/fs/cgroup/pids.max` is `64`.
+8. **4H (Container Timeout and Cleanup)**: A 15-second hang with 2-second timeout returned `passed=False` (`TIMEOUT`), invoked `docker rm -f aipc-verify-<turn_id>`, and `docker ps -a` confirmed zero leftover containers.
+9. **4I (Failed Verification Prevents Phase Gate PASS)**: A failing test returned `passed=False`, created zero Git commit, and prevented Phase Gate `PASS`.
 
-### 3.2 Stage 4 Container Verification Hardening Implemented in Code
-In `src/aipc/adapters/gemini/antigravity_transport.py` (`_run_container_verification`), all Stage 4 security and cross-platform compatibility controls are implemented and unit-tested:
-- **Container-side Python Executable Normalization**: Windows host interpreter paths (e.g., `H:\000ProjectCode\.venv\Scripts\python.exe` or `python.exe`) are automatically normalized to `"python3"` inside the Linux container.
-- **Strict OS Isolation Flags**:
-  - `--rm` (ephemeral container removal)
-  - `--network none` (complete network disconnect)
-  - `--read-only` (immutable root filesystem)
-  - `--tmpfs /tmp:rw,noexec,nosuid,size=64m` (bounded non-executable scratch space)
-  - `--user 65534:65534` (unprivileged `nobody:nogroup` execution)
-  - `--cap-drop ALL` (drop all Linux capabilities)
-  - `--security-opt no-new-privileges` (prevent privilege escalation)
-  - `--pids-limit 64` (fork-bomb protection)
-  - `--memory 512m` (memory ceiling)
-- **Workspace & `.git` Protection**:
-  - Mounts only the attempt workspace (`-v <workspace>:/workspace:rw`).
-  - Overlays a read-only bind mount on `.git` (`-v <workspace>/.git:/workspace/.git:ro`) whenever `.git` exists, preventing untrusted test code inside the container from mutating repository metadata or hooks.
-  - Zero host credentials, `.env` files, or `~/.gemini` OAuth directories are mounted or passed into the container environment.
-
-### 3.3 Recommended Container Runtime Activation Plan (Requires Human Approval)
-To transition from `CONTAINER_BLOCKED` to live `CONTAINER_VERIFIED` on this Windows machine, the human Commander may authorize and perform the following steps:
-1. **Prerequisites & System Changes**:
-   - Run `wsl --update` in an elevated Administrator PowerShell prompt to restore/install the Microsoft WSL2 Linux kernel package.
-   - Start **Docker Desktop** (already installed at v28.0.4) and wait for `docker info` to report a healthy Linux engine.
-2. **Permissions Required**:
-   - Local Administrator elevation for `wsl --update` and membership in the local `docker-users` group.
-3. **License & Billing Considerations**:
-   - **Docker Desktop**: Free for personal use, education, small businesses (<250 employees AND <\$10M annual revenue), and non-commercial open-source projects; requires a paid subscription for larger commercial enterprises.
-   - **Alternative (Zero License Cost)**: Install **Podman Desktop / Podman CLI** (Apache 2.0 open-source) and configure `container_runtime="podman"` in `GeminiAdapterConfig`.
-4. **Base Image Preparation**:
-   - Pull a minimal Python + pytest image once online: `docker pull python:3.13-slim` (and build a local tag `aipc-verify:py313` with `pytest` pre-installed so `--network none` runs offline).
+### 3.4 Stage 5 End-to-End Live Orchestration (`agy.exe` + Real Container Verification)
+Executed a full live `Controller.run_phase` on a disposable Git repository with real `agy.exe 1.5.3` (model `gemini-3.8-flash-medium`) and real container verification (`verification_isolation="container"`, `container_image="aipc-verify:py313-v1"`):
+- **Agent Dispatch**: `agy.exe` created `index.html` containing `<!DOCTYPE html><html><body><h1>AIPC Docker Verified</h1></body></html>` in the attempt worktree.
+- **Container Verification**: Container `aipc-verify:py313-v1` executed `pytest` on the attempt worktree: `exit_code=0`, `1 passed in 0.05s`, verify log captured.
+- **Evidence & Review**: `EvidenceCollector`, `DeterministicReviewer`, and `PhaseGate` returned `PASS` (`GateAction.MARK_PHASE_PASS`, `GateAction.CREATE_STABLE_CHECKPOINT`, `GateAction.ADVANCE_TO_NEXT_PHASE`).
+- **Git Checkpoint Tags**: `refs/tags/aipc/docker-e2e/phase-01/pass` created and state marked `COMPLETED` / `PASS`.
+- **Clean Recovery**: `RecoveryManager.inspect` confirmed `NO_RECOVERY_NEEDED` and clean state.
 
 ---
 
