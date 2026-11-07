@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,8 @@ from aipc.adapters.gemini import (
     antigravity_runtime_plan,
 )
 from aipc.adapters.gemini.antigravity_transport import (
+    _hash_workspace_files,
+    _run_safe_git,
     scan_workspace_integrity,
     snapshot_build_and_hook_configs,
 )
@@ -564,7 +567,7 @@ def test_isolated_verification_blocks_external_read(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    transport = AntigravityCliTransport(cfg)
+    transport = AntigravityCliTransport(cfg, verification_isolation="unsafe_host_opt_in")
     passed, summary, log_text = transport._run_isolated_verification(
         turn_id="turn-sec-read",
         workspace=ws,
@@ -586,7 +589,7 @@ def test_isolated_verification_blocks_subprocess(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    transport = AntigravityCliTransport(cfg)
+    transport = AntigravityCliTransport(cfg, verification_isolation="unsafe_host_opt_in")
     passed, summary, log_text = transport._run_isolated_verification(
         turn_id="turn-sec-sub",
         workspace=ws,
@@ -608,7 +611,7 @@ def test_isolated_verification_blocks_network(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    transport = AntigravityCliTransport(cfg)
+    transport = AntigravityCliTransport(cfg, verification_isolation="unsafe_host_opt_in")
     passed, summary, log_text = transport._run_isolated_verification(
         turn_id="turn-sec-net",
         workspace=ws,
@@ -646,7 +649,7 @@ def test_isolated_verification_blocks_junction_escape(tmp_path: Path) -> None:
             encoding="utf-8",
         )
 
-        transport = AntigravityCliTransport(cfg)
+        transport = AntigravityCliTransport(cfg, verification_isolation="unsafe_host_opt_in")
         passed, summary, log_text = transport._run_isolated_verification(
             turn_id="turn-sec-junc",
             workspace=ws,
@@ -871,6 +874,7 @@ def test_failed_verification_preserves_log_and_does_not_commit(tmp_path: Path) -
         cfg,
         verify_command=(sys.executable, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
         auto_commit_attempt=True,
+        verification_isolation="unsafe_host_opt_in",
     )
     ok = transport._post_turn_host_finalize(
         session_id="s-fail",
@@ -893,3 +897,308 @@ def test_failed_verification_preserves_log_and_does_not_commit(tmp_path: Path) -
         check=True,
     )
     assert "AIPC Antigravity CLI turn turn-fail-rec changes" not in log_res.stdout
+
+
+def test_host_verification_disabled_by_default_fails_closed(tmp_path: Path) -> None:
+    """Default verification_isolation='blocked' refuses host execution and fails closed."""
+    cfg = _make_config(tmp_path)
+    assert cfg.verification_isolation == "blocked"
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "test_dummy.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verify_command=(sys.executable, "-B", "-m", "pytest", "-q"),
+        auto_commit_attempt=True,
+    )
+    assert transport.verification_isolation == "blocked"
+
+    ok = transport._post_turn_host_finalize(
+        session_id="s-blocked",
+        turn_id="turn-blocked-1",
+        workspace=ws,
+        state={},
+    )
+    assert ok is False
+
+    log_file = cfg.state_root / "verify-turn-blocked-1.log"
+    assert log_file.exists()
+    content = log_file.read_text(encoding="utf-8")
+    assert (
+        "BLOCKED: Host execution of untrusted verification code is disabled by default" in content
+    )
+    assert "Python sys.addaudithook() is not an OS security boundary" in content
+
+    failed_log = cfg.state_root / "failed_attempts" / "turn-blocked-1.log"
+    assert failed_log.exists()
+    assert ".aipc_test.log" not in [p.name for p in ws.iterdir()]
+
+
+def test_container_verification_builds_restricted_os_isolated_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verification_isolation='container' builds restricted container command and fails closed."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    # 1. Fails closed when container runtime/image is unavailable
+    transport_no_runtime = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image=None,
+    )
+    passed, summary, log_text = transport_no_runtime._run_container_verification(
+        turn_id="turn-c-none",
+        workspace=ws,
+        command=("pytest", "-q"),
+    )
+    assert passed is False
+    assert "BLOCKED: Container runtime or image unavailable" in log_text
+
+    # 2. When runtime and image are configured, inspect exact container command
+    captured_cmd: list[str] = []
+
+    def _mock_run(cmd, **kwargs):
+        nonlocal captured_cmd
+        captured_cmd = list(cmd)
+
+        class _Res:
+            returncode = 0
+            stdout = "1 passed in 0.05s\n"
+            stderr = ""
+
+        return _Res()
+
+    monkeypatch.setattr(shutil, "which", lambda r: f"/usr/bin/{r}")
+    monkeypatch.setattr(subprocess, "run", _mock_run)
+
+    transport_container = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image="python:3.13-slim",
+        container_runtime="docker",
+    )
+    passed, summary, log_text = transport_container._run_container_verification(
+        turn_id="turn-c-ok",
+        workspace=ws,
+        command=("pytest", "-q", "-p", "no:cacheprovider"),
+    )
+    assert passed is True
+    assert captured_cmd[0] == "docker"
+    assert captured_cmd[1] == "run"
+    assert "--rm" in captured_cmd
+    assert "--network" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--network") + 1] == "none"
+    assert "--cap-drop" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--cap-drop") + 1] == "ALL"
+    assert "--security-opt" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--security-opt") + 1] == "no-new-privileges"
+    assert "--pids-limit" in captured_cmd
+    assert "--memory" in captured_cmd
+    assert "-w" in captured_cmd
+    assert captured_cmd[captured_cmd.index("-w") + 1] == "/workspace"
+    assert f"{ws.resolve()}:/workspace:rw" in " ".join(captured_cmd)
+    assert "python:3.13-slim" in captured_cmd
+    cmd_str = " ".join(captured_cmd)
+    assert ".gemini" not in cmd_str
+    assert "OPENAI_API_KEY" not in cmd_str
+
+
+def test_git_integrity_preserves_pre_existing_staged_files(tmp_path: Path) -> None:
+    """Pre-existing staged files in index are preserved and not swept into turn commit."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    empty_hooks = cfg.state_root / "empty_hooks"
+    empty_hooks.mkdir(parents=True, exist_ok=True)
+
+    _run_safe_git(["init"], ws, empty_hooks)
+    (ws / "init.txt").write_text("initial", encoding="utf-8")
+    _run_safe_git(["add", "."], ws, empty_hooks)
+    _run_safe_git(["commit", "-m", "init"], ws, empty_hooks)
+
+    # User stages a file before turn
+    (ws / "staged_before.txt").write_text("user staged content", encoding="utf-8")
+    _run_safe_git(["add", "staged_before.txt"], ws, empty_hooks)
+
+    # Snapshot pre-turn file hashes
+    pre_hashes = _hash_workspace_files(ws)
+    state = {"pre_turn_file_hashes": pre_hashes}
+
+    # Agent creates agent_new.txt during turn
+    (ws / "agent_new.txt").write_text("agent created content", encoding="utf-8")
+
+    transport = AntigravityCliTransport(cfg, auto_commit_attempt=True)
+    ok, msg = transport._commit_turn_changes(ws, "turn-git-stage", state, empty_hooks)
+    assert ok is True
+
+    # Last commit must contain ONLY agent_new.txt
+    show_res = _run_safe_git(["show", "--name-only", "--format="], ws, empty_hooks)
+    committed_files = [line.strip() for line in show_res.stdout.splitlines() if line.strip()]
+    assert committed_files == ["agent_new.txt"]
+
+    # staged_before.txt must remain staged in the index
+    status_res = _run_safe_git(["status", "--porcelain"], ws, empty_hooks)
+    assert "A  staged_before.txt" in status_res.stdout
+
+
+def test_git_integrity_commits_pre_existing_modified_file_subsequently_edited_by_agent(
+    tmp_path: Path,
+) -> None:
+    """File dirty before turn but edited by agent is committed; untouched dirty is preserved."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    empty_hooks = cfg.state_root / "empty_hooks"
+    empty_hooks.mkdir(parents=True, exist_ok=True)
+
+    _run_safe_git(["init"], ws, empty_hooks)
+    (ws / "shared.txt").write_text("v1", encoding="utf-8")
+    (ws / "untouched_dirty.txt").write_text("v1", encoding="utf-8")
+    _run_safe_git(["add", "."], ws, empty_hooks)
+    _run_safe_git(["commit", "-m", "init"], ws, empty_hooks)
+
+    # Both files modified before turn (unstaged)
+    (ws / "shared.txt").write_text("v2", encoding="utf-8")
+    (ws / "untouched_dirty.txt").write_text("v2", encoding="utf-8")
+
+    pre_hashes = _hash_workspace_files(ws)
+    state = {"pre_turn_file_hashes": pre_hashes}
+
+    # Agent subsequently edits shared.txt (v2 -> v3) during turn; leaves untouched_dirty.txt as v2
+    (ws / "shared.txt").write_text("v3", encoding="utf-8")
+
+    transport = AntigravityCliTransport(cfg, auto_commit_attempt=True)
+    ok, msg = transport._commit_turn_changes(ws, "turn-git-dirty", state, empty_hooks)
+    assert ok is True
+
+    # Last commit must contain ONLY shared.txt
+    show_res = _run_safe_git(["show", "--name-only", "--format="], ws, empty_hooks)
+    committed_files = [line.strip() for line in show_res.stdout.splitlines() if line.strip()]
+    assert committed_files == ["shared.txt"]
+
+    # untouched_dirty.txt remains uncommitted in worktree with v2 content
+    status_res = _run_safe_git(["status", "--porcelain"], ws, empty_hooks)
+    assert "M untouched_dirty.txt" in status_res.stdout
+    assert (ws / "untouched_dirty.txt").read_text(encoding="utf-8") == "v2"
+    assert (ws / "shared.txt").read_text(encoding="utf-8") == "v3"
+
+
+def test_git_integrity_failed_git_add_or_commit_marks_finalize_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failure during git add or git commit causes _post_turn_host_finalize to fail closed."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    empty_hooks = cfg.state_root / "empty_hooks"
+    empty_hooks.mkdir(parents=True, exist_ok=True)
+
+    _run_safe_git(["init"], ws, empty_hooks)
+    (ws / "init.txt").write_text("init", encoding="utf-8")
+    _run_safe_git(["add", "."], ws, empty_hooks)
+    _run_safe_git(["commit", "-m", "init"], ws, empty_hooks)
+
+    (ws / "agent.txt").write_text("content", encoding="utf-8")
+
+    real_run_safe = _run_safe_git
+
+    def _mock_failing_git(args, cwd, hooks_dir):
+        if "commit" in args:
+
+            class _F:
+                returncode = 1
+                stdout = ""
+                stderr = "fatal: lockfile exists"
+
+            return _F()
+        return real_run_safe(args, cwd, hooks_dir)
+
+    monkeypatch.setattr(
+        "aipc.adapters.gemini.antigravity_transport._run_safe_git", _mock_failing_git
+    )
+
+    pre_configs = snapshot_build_and_hook_configs(ws)
+    transport = AntigravityCliTransport(cfg, auto_commit_attempt=True)
+    ok = transport._post_turn_host_finalize(
+        session_id="s-fail-commit",
+        turn_id="turn-fail-commit",
+        workspace=ws,
+        state={"pre_turn_file_hashes": {}, "pre_turn_config_digests": pre_configs},
+    )
+    assert ok is False
+
+    failed_log = cfg.state_root / "failed_attempts" / "turn-fail-commit.log"
+    assert failed_log.exists()
+    assert "Git commit failed: fatal: lockfile exists" in failed_log.read_text(encoding="utf-8")
+
+
+def test_git_integrity_verification_failure_creates_no_commit(tmp_path: Path) -> None:
+    """When verification fails, no Git commit is created and HEAD SHA remains identical."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    empty_hooks = cfg.state_root / "empty_hooks"
+    empty_hooks.mkdir(parents=True, exist_ok=True)
+
+    _run_safe_git(["init"], ws, empty_hooks)
+    (ws / "initial.txt").write_text("initial", encoding="utf-8")
+    _run_safe_git(["add", "."], ws, empty_hooks)
+    _run_safe_git(["commit", "-m", "init"], ws, empty_hooks)
+
+    head_before = _run_safe_git(["rev-parse", "HEAD"], ws, empty_hooks).stdout.strip()
+
+    (ws / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    (ws / "test_feature.py").write_text("def test_f(): assert False\n", encoding="utf-8")
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verify_command=(sys.executable, "-B", "-m", "pytest", "-q"),
+        auto_commit_attempt=True,
+        verification_isolation="unsafe_host_opt_in",
+    )
+    ok = transport._post_turn_host_finalize(
+        session_id="s-verify-fail",
+        turn_id="turn-verify-fail",
+        workspace=ws,
+        state={
+            "pre_turn_file_hashes": _hash_workspace_files(ws),
+            "pre_turn_config_digests": snapshot_build_and_hook_configs(ws),
+        },
+    )
+    assert ok is False
+
+    head_after = _run_safe_git(["rev-parse", "HEAD"], ws, empty_hooks).stdout.strip()
+    assert head_before == head_after
+    assert not (ws / ".aipc_test.log").exists()
+
+
+def test_git_integrity_preserves_worktree_and_commit_identity(tmp_path: Path) -> None:
+    """Configured local repository commit identity is preserved and not overwritten."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    empty_hooks = cfg.state_root / "empty_hooks"
+    empty_hooks.mkdir(parents=True, exist_ok=True)
+
+    _run_safe_git(["init"], ws, empty_hooks)
+    _run_safe_git(["config", "user.name", "Custom Dev"], ws, empty_hooks)
+    _run_safe_git(["config", "user.email", "dev@example.com"], ws, empty_hooks)
+
+    (ws / "init.txt").write_text("init", encoding="utf-8")
+    _run_safe_git(["add", "."], ws, empty_hooks)
+    _run_safe_git(["commit", "-m", "init"], ws, empty_hooks)
+
+    pre_hashes = _hash_workspace_files(ws)
+    (ws / "agent_doc.txt").write_text("agent documentation", encoding="utf-8")
+
+    transport = AntigravityCliTransport(cfg, auto_commit_attempt=True)
+    ok, msg = transport._commit_turn_changes(
+        ws, "turn-git-id", {"pre_turn_file_hashes": pre_hashes}, empty_hooks
+    )
+    assert ok is True
+
+    log_author = _run_safe_git(["log", "-1", "--format=%an <%ae>"], ws, empty_hooks).stdout.strip()
+    assert log_author == "Custom Dev <dev@example.com>"

@@ -13,7 +13,7 @@ Operational Readiness Validation (Post-Phase 22 Operational Deployment)
 AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 03 (AWAITING_REVIEW)
+Attempt 04 (AWAITING_REVIEW)
 
 ## Phase Gate
 PENDING
@@ -26,8 +26,8 @@ Branch: validation/operational-readiness.
 validation/operational-readiness, H:/000ProjectCode/AI_Project_Controller.
 
 ## Last Commit
-4cb648579f5776f991113a3f2d1fa2b533f60260 (AIPC Phase post-22 attempt 02 - Antigravity CLI live integration and operational verification).
-Attempt 03 pre-merge security hardening verified on validation/operational-readiness.
+dfe38aa26611694a8a4934bbab91de60a6031dbe (AIPC Phase post-22 attempt 03 - Format antigravity_transport.py for CI ruff check).
+Attempt 04 final security boundary & git integrity fixes applied on validation/operational-readiness.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -126,28 +126,32 @@ None — All 23 architectural phases (Phases 00–22) complete! Operational read
 ---
 
 ## Current Work
-Completed Attempt 03 Independent Pre-Merge Security & Release Readiness Review:
-1. **Priority 1 (Host Verification Execution Security)**:
-   - Implemented `snapshot_build_and_hook_configs()` and `check_build_config_mutations()` in `AntigravityCliTransport` to guard against tampering with `.git/config`, `.git/hooks/*`, `pyproject.toml`, `pytest.ini`, `setup.cfg`, `setup.py`, `tox.ini`, `conftest.py`, and `*.pth`. Any agent mutation triggers `GeminiProtocolError` before host test execution.
-   - Built `_run_isolated_verification()` sandbox with isolated `home/` (`USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`) and `tmp/` (`TEMP`, `TMP`, `TMPDIR`), sanitized environment stripping Host secrets, and a `sitecustomize.py` installing a strict Python `sys.addaudithook`. The audit hook blocks outbound network calls (`socket.*`, `urllib.*`), subprocess/shell execution (`subprocess.Popen`, `os.system`, `os.spawn*`, `winreg.*`), and directory escapes outside the workspace/sandbox.
-2. **Priority 2 (Sandbox & Permission Enforcement)**:
-   - Implemented `scan_workspace_integrity()` to recursively detect and reject reparse points, junctions, and symlinks pointing outside the workspace.
-   - Enforced strict `ALLOWED_AGY_TOOLS` whitelist (`run_command` forbidden; prohibited tool execution triggers `GeminiProtocolError`).
-   - Hardened `--settings` JSON with explicit permission deny list for shell and git commands.
-3. **Priority 3 (Dynamic Capability Qualification)**:
-   - Upgraded `doctor.py` (`qualify_antigravity_runtime()`) to dynamically inspect real `agy.exe` presence, version `1.5.2`, required security flags, and explicitly reject `--yolo` mode.
-4. **Priority 4 (Git & Test Evidence Integrity)**:
-   - Preserved pre-turn dirty files across runs; disabled untrusted git hooks using `-c core.hooksPath=/dev/null` and `--no-verify`.
-   - Guaranteed that host verification failure never creates a Git commit and captures failed test logs directly into the canonical receipt.
-5. **Priority 5 (CI Workflow Coverage)**:
-   - Updated `.github/workflows/ci.yml` fast-test job to validate `tests/gemini`, `test_cli.py`, `test_full_mock_e2e.py`, and `test_provider_qualification_and_fallback.py`.
+Completed Attempt 04 Final Security Boundary & Git Integrity Fixes:
+1. **Issue 1 (Security Isolation & Host Verification Boundaries)**:
+   - Recognized that Python `sys.addaudithook()` is defense-in-depth and NOT an OS-enforced security boundary for untrusted code.
+   - Set host verification to disabled by default (`verification_isolation: Literal["blocked", "container", "unsafe_host_opt_in"] = "blocked"`).
+   - Implemented `_run_container_verification()` running verification inside an isolated OS container (`docker` or `podman`) with `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, and `--memory 512m`.
+   - In-process audit hook verification is only executed when explicitly opted in via `verification_isolation="unsafe_host_opt_in"`.
+2. **Issue 2 (Runtime Qualification & Security Controls Verification)**:
+   - Separated CLI execution compatibility (`cli_compatible`) from verified security boundary status (`effective_security_verified`).
+   - Dynamic qualification explicitly marks `sandbox_verified=False` on bare Windows hosts.
+   - `qualify_antigravity_runtime()` verifies that required security arguments are present and fails closed (`LIVE_RUNTIME_BLOCKED`) if unverified or configured with `--yolo` / disabled slash commands.
+3. **Issue 3 (Git Integrity & Safe Commit Implementation)**:
+   - Staged files existing before the agent turn remain preserved in the Git index and are never committed into the agent attempt commit.
+   - Files modified during the turn are tracked via workspace SHA-256 hash comparison against pre-turn hashes; only files modified by the turn are staged and committed with `git commit --only`.
+   - Untouched dirty files remain undisturbed in the workspace.
+   - Non-zero return codes on all Git commands fail closed.
+   - Local repository `user.name` and `user.email` are strictly preserved.
+   - Verification failure never creates a Git commit and captures failure logs cleanly.
+4. **Merge & Operational Recommendations**:
+   - **Experimental Merge (`validation/operational-readiness` -> `master`)**: **GO** (with `QUALIFIED_FILESYSTEM_ONLY` and default-blocked host verification).
+   - **Unattended Production Autonomous Execution**: **NO-GO** on bare Windows host until OS-enforced container/VM/Windows Sandbox isolation is active for verification and shell execution.
 
 ## Tests
-- `tests/gemini/test_antigravity_transport.py`: 20 passed in 13.31s (including negative security tests for external secret reads, network calls, subprocess spawns, build file tampering, and junction escapes).
-- `tests/e2e/test_provider_qualification_and_fallback.py`: 13 passed in 154.64s.
+- `tests/gemini/test_antigravity_transport.py`: 27 passed in 35.14s (including default-blocked verification, container runner command building, staged index preservation, dirty file hash tracking, git failure fail-closed, and audit hook defense-in-depth).
+- `tests/e2e/test_provider_qualification_and_fallback.py`: 13 passed in 281.72s (100% pass across full suite including T4 Antigravity CLI transport contract, fallback, doctor reporting, and qualification).
 - `tests/integration/test_cli.py`: 4 passed in 0.95s.
 - `tests/e2e/test_full_mock_e2e.py`: 8 passed in 10.3s.
-- `Test_AI_CONTROLLER_me\tests\test_website.py`: 12 passed in 0.17s.
 - Code quality & formatting: `ruff check .` (0 errors), `ruff format --check .` (288 files clean).
 
 ## Required Fixes / Remaining Work
@@ -157,10 +161,10 @@ Awaiting Controller independent review and Phase Gate evaluation. Worker does NO
 None.
 
 ## Recovery Notes
-Branch `validation/operational-readiness` contains verified security hardening, negative test suites, and documentation updates. `master` branch remains clean and protected at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`.
+Branch `validation/operational-readiness` contains verified security hardening, negative test suites, default-blocked verification isolation, container runner support, git index preservation, and documentation updates. `master` branch remains clean and protected at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`.
 
 ## Next Action
-Controller review of Attempt 03 Pre-Merge Security Hardening and Phase Completion Report.
+Controller review of Attempt 04 Final Security Boundary & Git Integrity Fixes and Phase Completion Report.
 
 ## Timestamp
-2026-11-07T00:33:00+07:00
+2026-11-07T08:55:00+07:00

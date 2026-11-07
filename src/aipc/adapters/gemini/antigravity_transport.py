@@ -9,6 +9,7 @@ import stat
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from aipc.agents.models import AgentCapabilities, RawAgentResult, RunStatus
@@ -201,6 +202,23 @@ def scan_workspace_integrity(workspace: Path) -> list[str]:
     return violations
 
 
+def _hash_workspace_files(workspace: Path) -> dict[str, str]:
+    """Compute SHA-256 digest of every file in the workspace excluding .git."""
+    file_hashes: dict[str, str] = {}
+    if not workspace.exists():
+        return file_hashes
+    for item in workspace.rglob("*"):
+        if ".git" in item.parts:
+            continue
+        if item.is_file():
+            try:
+                rel = item.relative_to(workspace).as_posix()
+                file_hashes[rel] = hashlib.sha256(item.read_bytes()).hexdigest()
+            except OSError:
+                pass
+    return file_hashes
+
+
 def _run_safe_git(
     args: list[str],
     cwd: Path,
@@ -213,6 +231,32 @@ def _run_safe_git(
         GIT_CONFIG_SYSTEM=os.devnull,
         GIT_TERMINAL_PROMPT="0",
     )
+    has_name = False
+    has_email = False
+    if (cwd / ".git").exists():
+        check_name = subprocess.run(
+            ["git", "-C", str(cwd), "config", "user.name"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        has_name = check_name.returncode == 0 and bool(check_name.stdout.strip())
+        check_email = subprocess.run(
+            ["git", "-C", str(cwd), "config", "user.email"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        has_email = check_email.returncode == 0 and bool(check_email.stdout.strip())
+
+    identity_args: list[str] = []
+    if not has_name:
+        identity_args.extend(["-c", "user.name=AIPC Host Finalizer"])
+    if not has_email:
+        identity_args.extend(["-c", "user.email=aipc-host@local"])
+
     full_cmd = [
         "git",
         "-c",
@@ -221,10 +265,7 @@ def _run_safe_git(
         "core.fsmonitor=false",
         "-c",
         "diff.external=",
-        "-c",
-        "user.name=AIPC Host Finalizer",
-        "-c",
-        "user.email=aipc-host@local",
+        *identity_args,
         "-C",
         str(cwd),
         *args,
@@ -344,6 +385,9 @@ class AntigravityCliTransport:
         verify_command: tuple[str, ...] | None = None,
         auto_commit_attempt: bool = False,
         allow_config_mutation: bool = False,
+        verification_isolation: Literal["blocked", "container", "unsafe_host_opt_in"] | None = None,
+        container_image: str | None = None,
+        container_runtime: str | None = None,
     ) -> None:
         self.config = GeminiAdapterConfig.model_validate(config).model_copy(deep=True)
         self._explicit_executable = Path(executable) if executable is not None else None
@@ -351,6 +395,29 @@ class AntigravityCliTransport:
         self.verify_command = tuple(verify_command) if verify_command is not None else None
         self.auto_commit_attempt = bool(auto_commit_attempt)
         self.allow_config_mutation = bool(allow_config_mutation)
+        self.verification_isolation: Literal["blocked", "container", "unsafe_host_opt_in"] = (
+            verification_isolation
+            if verification_isolation is not None
+            else self.config.verification_isolation
+        )
+        self.container_image = (
+            container_image if container_image is not None else self.config.container_image
+        )
+        self.container_runtime = (
+            container_runtime if container_runtime is not None else self.config.container_runtime
+        )
+        if (
+            self.verification_isolation != self.config.verification_isolation
+            or self.container_image != self.config.container_image
+            or self.container_runtime != self.config.container_runtime
+        ):
+            self.config = self.config.model_copy(
+                update={
+                    "verification_isolation": self.verification_isolation,
+                    "container_image": self.container_image,
+                    "container_runtime": self.container_runtime,
+                }
+            )
         self.version: str | None = None
         self.sessions: dict[str, str] = {}
         self.turns: dict[tuple[str, str], dict[str, object]] = {}
@@ -367,14 +434,15 @@ class AntigravityCliTransport:
         exe = self.executable
         if exe is None:
             return False
-        qual = qualify_antigravity_runtime(self.config, executable=exe)
-        if qual.qualified:
+        if self._explicit_executable is not None and self.runner != asyncio.create_subprocess_exec:
             return True
-        if qual.version is not None:
+        if (
+            self.verification_isolation == "unsafe_host_opt_in"
+            or not self.config.security_controls_verified
+        ):
             return False
-        return (
-            self._explicit_executable is not None and self.runner != asyncio.create_subprocess_exec
-        )
+        qual = qualify_antigravity_runtime(self.config, executable=exe)
+        return qual.qualified
 
     @property
     def _aipc_qualified_antigravity_filesystem(self) -> bool:
@@ -462,6 +530,9 @@ class AntigravityCliTransport:
         empty_hooks_dir.mkdir(parents=True, exist_ok=True)
         pre_turn_dirty = _get_dirty_paths(workspace, empty_hooks_dir)
         pre_turn_configs = snapshot_build_and_hook_configs(workspace)
+        pre_turn_hashes = _hash_workspace_files(workspace)
+        staged_res = _run_safe_git(["diff", "--cached", "--name-only"], workspace, empty_hooks_dir)
+        pre_turn_staged = set((staged_res.stdout or "").splitlines())
         pre_violations = scan_workspace_integrity(workspace)
         if pre_violations:
             raise GeminiAdapterError(
@@ -520,6 +591,8 @@ class AntigravityCliTransport:
             "cancelled": False,
             "pre_turn_dirty_paths": pre_turn_dirty,
             "pre_turn_config_digests": pre_turn_configs,
+            "pre_turn_file_hashes": pre_turn_hashes,
+            "pre_turn_staged_paths": pre_turn_staged,
         }
         state["task"] = asyncio.create_task(self._collect_process(session_id, turn_id, state))
         self.turns[(session_id, turn_id)] = state
@@ -788,6 +861,88 @@ sys.addaudithook(audit_hook)
         for pycache in list(workspace.rglob("__pycache__")):
             shutil.rmtree(pycache, ignore_errors=True)
 
+        log_text = (
+            "WARNING: verification_isolation='unsafe_host_opt_in' is active. "
+            "Python sys.addaudithook() is best-effort defense-in-depth, "
+            "not an OS-enforced security boundary. Untrusted code can bypass in-process hooks.\n"
+            + (res.stdout or "")
+            + ("\n" + res.stderr if res.stderr else "")
+        )
+        try:
+            summary = PytestResultParser().parse(log_text)
+        except Exception:
+            summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+        passed = res.returncode == 0 and summary.failed == 0 and summary.passed > 0
+        return passed, summary, log_text
+
+    def _run_container_verification(
+        self,
+        *,
+        turn_id: str,
+        workspace: Path,
+        command: tuple[str, ...],
+    ) -> tuple[bool, TestSummary, str]:
+        """Run verify_command inside a restricted OS container."""
+        runtime_bin = shutil.which(self.container_runtime)
+        if runtime_bin is None or not self.container_image:
+            return (
+                False,
+                TestSummary(total=1, passed=0, failed=1, skipped=0),
+                "BLOCKED: Container runtime or image unavailable",
+            )
+
+        ws_real = workspace.resolve()
+        container_cmd = [
+            self.container_runtime,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "64",
+            "--memory",
+            "512m",
+            "-e",
+            "HOME=/tmp",
+            "-e",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "-v",
+            f"{ws_real}:/workspace:rw",
+            "-w",
+            "/workspace",
+            self.container_image,
+            *command,
+        ]
+
+        try:
+            res = subprocess.run(
+                container_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.config.operation_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return (
+                False,
+                TestSummary(total=1, passed=0, failed=1, skipped=0),
+                "TIMEOUT: Container verification timed out",
+            )
+        except OSError as exc:
+            return (
+                False,
+                TestSummary(total=1, passed=0, failed=1, skipped=0),
+                f"ERROR: Container execution failed: {exc}",
+            )
+
+        shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
+        for pycache in list(workspace.rglob("__pycache__")):
+            shutil.rmtree(pycache, ignore_errors=True)
+
         log_text = (res.stdout or "") + ("\n" + res.stderr if res.stderr else "")
         try:
             summary = PytestResultParser().parse(log_text)
@@ -813,31 +968,56 @@ sys.addaudithook(audit_hook)
         (failed_dir / f"{turn_id}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     def _commit_turn_changes(
-        self, workspace: Path, turn_id: str, pre_dirty: set[str], empty_hooks_dir: Path
-    ) -> None:
+        self,
+        workspace: Path,
+        turn_id: str,
+        state: dict[str, object],
+        empty_hooks_dir: Path,
+    ) -> tuple[bool, str]:
         """Stage only files modified during the turn and commit with hooks disabled."""
         if not (workspace / ".git").exists():
-            return
+            return True, ""
         shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
         for pycache in list(workspace.rglob("__pycache__")):
             shutil.rmtree(pycache, ignore_errors=True)
 
-        current_dirty = _get_dirty_paths(workspace, empty_hooks_dir)
-        turn_modified = current_dirty - pre_dirty
-        if (workspace / ".aipc_test.log").exists():
-            turn_modified.add(".aipc_test.log")
+        pre_hashes = state.get("pre_turn_file_hashes", {})
+        assert isinstance(pre_hashes, dict)
+        post_hashes = _hash_workspace_files(workspace)
+
+        turn_modified: set[str] = set()
+        all_keys = set(pre_hashes.keys()) | set(post_hashes.keys())
+        for rel_path in all_keys:
+            if post_hashes.get(rel_path) != pre_hashes.get(rel_path):
+                turn_modified.add(rel_path)
 
         if not turn_modified:
-            return
+            return True, ""
 
         for path_str in sorted(turn_modified):
-            _run_safe_git(["add", path_str], workspace, empty_hooks_dir)
+            res_add = _run_safe_git(["add", "--", path_str], workspace, empty_hooks_dir)
+            if res_add.returncode != 0:
+                err = res_add.stderr or res_add.stdout or f"git add failed for {path_str}"
+                return False, err
 
-        _run_safe_git(
-            ["commit", "-m", f"AIPC Antigravity CLI turn {turn_id} changes", "--no-verify"],
+        res_commit = _run_safe_git(
+            [
+                "commit",
+                "-m",
+                f"AIPC Antigravity CLI turn {turn_id} changes",
+                "--no-verify",
+                "--only",
+                "--",
+                *sorted(turn_modified),
+            ],
             workspace,
             empty_hooks_dir,
         )
+        if res_commit.returncode != 0:
+            err = res_commit.stderr or res_commit.stdout or "git commit failed"
+            return False, err
+
+        return True, ""
 
     def _post_turn_host_finalize(
         self, session_id: str, turn_id: str, workspace: Path, state: dict[str, object]
@@ -860,12 +1040,35 @@ sys.addaudithook(audit_hook)
             return False
 
         if self.verify_command is not None:
-            passed, summary, log_text = self._run_isolated_verification(
-                turn_id=turn_id,
-                workspace=workspace,
-                command=self.verify_command,
-                timeout_seconds=self.config.operation_timeout,
-            )
+            if self.verification_isolation == "blocked":
+                log_text = (
+                    "BLOCKED: Host execution of untrusted verification code is disabled by "
+                    "default. Python sys.addaudithook() is not an OS security boundary. "
+                    "Configure verification_isolation='container' with a restricted "
+                    "container/VM/Windows Sandbox, or explicitly set "
+                    "verification_isolation='unsafe_host_opt_in' for trusted local testing."
+                )
+                passed = False
+                summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+            elif self.verification_isolation == "container":
+                passed, summary, log_text = self._run_container_verification(
+                    turn_id=turn_id,
+                    workspace=workspace,
+                    command=self.verify_command,
+                )
+            elif self.verification_isolation == "unsafe_host_opt_in":
+                passed, summary, log_text = self._run_isolated_verification(
+                    turn_id=turn_id,
+                    workspace=workspace,
+                    command=self.verify_command,
+                    timeout_seconds=self.config.operation_timeout,
+                )
+            else:
+                log_text = (
+                    f"BLOCKED: Unknown verification_isolation mode '{self.verification_isolation}'"
+                )
+                passed = False
+                summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
 
             verify_log_path = self.config.state_root / f"verify-{turn_id}.log"
             verify_log_path.write_text(log_text, encoding="utf-8")
@@ -884,9 +1087,12 @@ sys.addaudithook(audit_hook)
             }
 
         if self.auto_commit_attempt:
-            pre_dirty = state.get("pre_turn_dirty_paths", set())
-            assert isinstance(pre_dirty, set)
-            self._commit_turn_changes(workspace, turn_id, pre_dirty, empty_hooks_dir)
+            ok, commit_err = self._commit_turn_changes(workspace, turn_id, state, empty_hooks_dir)
+            if not ok:
+                self._save_failed_attempt(
+                    turn_id, f"Git commit failed: {commit_err}", workspace, empty_hooks_dir
+                )
+                return False
 
         return True
 

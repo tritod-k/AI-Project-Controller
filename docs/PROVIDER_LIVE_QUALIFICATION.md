@@ -62,10 +62,11 @@ This report records the concrete technical qualification of all AI providers in 
 - **`network`**: `BLOCKED` — outbound network communication from the workspace is prohibited both at agent settings level and at the host verification level via `sys.addaudithook`.
 - **`approval_events`**: `BLOCKED` — CLI does not support pre-mutation JSON-RPC approval roundtrips; fails closed by policy.
 - **`streaming_events`**: `AVAILABLE` — parses newline-delimited stream JSON for token telemetry and lifecycle status.
-- **Host Verification Process Isolation**: Verification tests execute under `_run_isolated_verification()` inside an ephemeral sandbox directory with isolated `home/` and `tmp/`, sanitized environment (Host secrets stripped), and an unremovable Python audit hook (`sys.addaudithook`) blocking `socket.*`, `subprocess.*`, and directory escapes.
+- **Verification Execution Isolation**: Host verification execution is **disabled by default (`verification_isolation='blocked'`)**. Python `sys.addaudithook()` is defense-in-depth, not an OS-enforced boundary. Verification requires an isolated OS container (`verification_isolation='container'`) with `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, and `--memory 512m`, or explicit local opt-in (`verification_isolation='unsafe_host_opt_in'`).
 - **Immutable Configuration Guard**: SHA-256 digests of `.git/config`, `pyproject.toml`, `conftest.py`, and related build files are snapshotted pre-turn; any modifications trigger immediate abort (`GeminiProtocolError`).
 - **Reparse Point / Junction Scanning**: `scan_workspace_integrity()` recursively scans the workspace before and after turns, aborting if symlinks or NTFS junctions point outside the workspace.
-- **Dynamic Qualification (`doctor.py`)**: `qualify_antigravity_runtime()` verifies exact CLI version `1.5.2`, required security arguments, and explicitly rejects `--yolo` execution.
+- **Dynamic Qualification (`doctor.py`)**: `qualify_antigravity_runtime()` verifies exact CLI version `1.5.2`, required security arguments, explicitly separates `cli_compatible` from `effective_security_verified`, marks `sandbox_verified=False` on bare Windows hosts, and fails closed (`LIVE_RUNTIME_BLOCKED`) on `--yolo` execution.
+- **Git Index & Dirty State Preservation**: Pre-turn staged files are preserved in the git index; turn modifications are tracked via SHA-256 workspace hashing; untouched dirty files are undisturbed; verification failure never creates a commit.
 - **Effective Security Classification**: `QUALIFIED_FILESYSTEM_ONLY`.
 
 ### Stage 4C — Headless Smoke Test

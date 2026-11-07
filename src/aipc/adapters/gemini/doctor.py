@@ -24,9 +24,12 @@ class AntigravityQualificationResult:
     qualified: bool
     version: str | None
     reason: str
+    cli_compatible: bool = False
+    sandbox_verified: bool = False
+    effective_security_verified: bool = False
 
 
-_qualification_cache: dict[tuple[str, float], AntigravityQualificationResult] = {}
+_cli_compat_cache: dict[tuple[str, float], tuple[bool, str | None, str]] = {}
 
 
 def find_agy_executable() -> Path | None:
@@ -46,7 +49,7 @@ def find_agy_executable() -> Path | None:
 
 
 def qualify_antigravity_runtime(
-    config=None, *, executable: Path | None = None
+    config=None, *, executable: Path | None = None, security_verified: bool = False
 ) -> AntigravityQualificationResult:
     """Dynamically verify Antigravity CLI executable, version, security flags, and configuration."""
     exe = executable or find_agy_executable()
@@ -55,6 +58,9 @@ def qualify_antigravity_runtime(
             qualified=False,
             version=None,
             reason="agy CLI executable not found on host",
+            cli_compatible=False,
+            sandbox_verified=False,
+            effective_security_verified=False,
         )
 
     try:
@@ -64,10 +70,13 @@ def qualify_antigravity_runtime(
             qualified=False,
             version=None,
             reason=f"cannot stat agy executable: {exc}",
+            cli_compatible=False,
+            sandbox_verified=False,
+            effective_security_verified=False,
         )
 
     cache_key = (str(Path(exe).resolve()), mtime)
-    cached = _qualification_cache.get(cache_key)
+    cached = _cli_compat_cache.get(cache_key)
 
     if cached is None:
         # 1. Verify exact version
@@ -82,10 +91,10 @@ def qualify_antigravity_runtime(
             raw_ver = (ver_res.stdout or ver_res.stderr or "").strip().split()
             version_str = raw_ver[0] if raw_ver else "unknown"
             if ver_res.returncode != 0 or version_str not in QUALIFIED_AGY_VERSIONS:
-                cached = AntigravityQualificationResult(
-                    qualified=False,
-                    version=version_str,
-                    reason=(
+                cached = (
+                    False,
+                    version_str,
+                    (
                         f"unqualified agy version '{version_str}', "
                         f"expected one of {sorted(QUALIFIED_AGY_VERSIONS)}"
                     ),
@@ -102,45 +111,99 @@ def qualify_antigravity_runtime(
                 help_text = (help_res.stdout or "") + (help_res.stderr or "")
                 missing = [flag for flag in REQUIRED_AGY_FLAGS if flag not in help_text]
                 if missing:
-                    cached = AntigravityQualificationResult(
-                        qualified=False,
-                        version=version_str,
-                        reason=f"agy CLI missing required security flags: {missing}",
+                    cached = (
+                        False,
+                        version_str,
+                        f"agy CLI missing required security flags: {missing}",
                     )
                 else:
-                    cached = AntigravityQualificationResult(
-                        qualified=True,
-                        version=version_str,
-                        reason="qualified",
-                    )
+                    cached = (True, version_str, "qualified")
         except (subprocess.TimeoutExpired, OSError) as exc:
-            cached = AntigravityQualificationResult(
-                qualified=False,
-                version=None,
-                reason=f"failed executing agy qualification probe: {exc}",
-            )
-        _qualification_cache[cache_key] = cached
+            cached = (False, None, f"failed executing agy qualification probe: {exc}")
+        _cli_compat_cache[cache_key] = cached
 
-    if not cached.qualified:
-        return cached
+    cli_compatible, version_str, reason = cached
 
-    # 3. Verify configuration constraints if config provided
-    if config is not None:
+    if not cli_compatible:
+        return AntigravityQualificationResult(
+            qualified=False,
+            version=version_str,
+            reason=reason,
+            cli_compatible=False,
+            sandbox_verified=False,
+            effective_security_verified=False,
+        )
+
+    sandbox_verified = False
+    effective_security_verified = False
+
+    if security_verified:
+        effective_security_verified = True
+    elif config is not None:
         mode = getattr(config, "approval_mode", "accept-edits")
+        slash = getattr(config, "disable_slash_commands", True)
+        isolation = getattr(config, "verification_isolation", "blocked")
+        ctrl_verified = getattr(config, "security_controls_verified", True)
+
         if mode not in ("plan", "accept-edits"):
             return AntigravityQualificationResult(
                 qualified=False,
-                version=cached.version,
+                version=version_str,
                 reason=f"unsafe approval_mode '{mode}' (only 'plan' or 'accept-edits' permitted)",
+                cli_compatible=True,
+                sandbox_verified=False,
+                effective_security_verified=False,
             )
-        if getattr(config, "disable_slash_commands", True) is False:
+        if slash is False:
             return AntigravityQualificationResult(
                 qualified=False,
-                version=cached.version,
+                version=version_str,
                 reason="disable_slash_commands must be True",
+                cli_compatible=True,
+                sandbox_verified=False,
+                effective_security_verified=False,
             )
+        if isolation == "unsafe_host_opt_in":
+            return AntigravityQualificationResult(
+                qualified=False,
+                version=version_str,
+                reason=(
+                    "verification_isolation='unsafe_host_opt_in' "
+                    "fails safe for production qualification"
+                ),
+                cli_compatible=True,
+                sandbox_verified=False,
+                effective_security_verified=False,
+            )
+        if not ctrl_verified:
+            return AntigravityQualificationResult(
+                qualified=False,
+                version=version_str,
+                reason="security_controls_verified is False",
+                cli_compatible=True,
+                sandbox_verified=False,
+                effective_security_verified=False,
+            )
+        effective_security_verified = True
 
-    return cached
+    qualified = bool(cli_compatible and effective_security_verified)
+    fail_reason = (
+        "qualified"
+        if qualified
+        else (
+            "security controls unverified (requires verified policy "
+            "and container/blocked verification isolation)"
+        )
+    )
+
+    return AntigravityQualificationResult(
+        qualified=qualified,
+        version=version_str,
+        reason=fail_reason,
+        cli_compatible=cli_compatible,
+        sandbox_verified=sandbox_verified,
+        effective_security_verified=effective_security_verified,
+    )
 
 
 def runtime_info():
@@ -161,7 +224,11 @@ def runtime_info():
     }
 
 
-def antigravity_runtime_info() -> dict[str, object]:
+def antigravity_runtime_info(
+    config=None,
+    *,
+    security_verified: bool = False,
+) -> dict[str, object]:
     """Inspect Antigravity presence and dynamic readiness qualification."""
     local_appdata = os.environ.get("LOCALAPPDATA", "")
     desktop_exe = (
@@ -178,8 +245,18 @@ def antigravity_runtime_info() -> dict[str, object]:
     except (ModuleNotFoundError, ValueError):
         sdk_installed = False
 
-    qual_result = qualify_antigravity_runtime(executable=agy_exe)
-    cli_ready = qual_result.qualified and oauth_present
+    qual_result = qualify_antigravity_runtime(
+        config=config, executable=agy_exe, security_verified=security_verified
+    )
+    sandbox_verified = False
+    effective_security_verified = bool(
+        qual_result.cli_compatible and oauth_present and qual_result.effective_security_verified
+    )
+
+    if qual_result.cli_compatible and oauth_present and effective_security_verified:
+        live_status = "QUALIFIED_FILESYSTEM_ONLY"
+    else:
+        live_status = "LIVE_RUNTIME_BLOCKED"
 
     return {
         "agy_cli_present": agy_exe is not None,
@@ -191,27 +268,38 @@ def antigravity_runtime_info() -> dict[str, object]:
         ).is_file(),
         "sdk_installed": sdk_installed,
         "headless_supported_by_desktop": False,
-        "headless_supported_by_cli": qual_result.qualified,
-        "effective_security_verified": cli_ready,
-        "sandbox_verified": cli_ready,
+        "headless_supported_by_cli": qual_result.cli_compatible,
+        "cli_compatible": qual_result.cli_compatible,
+        "effective_security_verified": effective_security_verified,
+        "sandbox_verified": sandbox_verified,
         "runtime_version": qual_result.version,
         "qualified_capabilities": {
-            "filesystem": "AVAILABLE" if cli_ready else "UNVERIFIED",
-            "filesystem_write": "AVAILABLE" if cli_ready else "UNVERIFIED",
-            "streaming_events": "AVAILABLE" if cli_ready else "UNVERIFIED",
+            "filesystem": (
+                "AVAILABLE"
+                if (qual_result.cli_compatible and effective_security_verified)
+                else "UNVERIFIED"
+            ),
+            "filesystem_write": (
+                "AVAILABLE"
+                if (qual_result.cli_compatible and effective_security_verified)
+                else "UNVERIFIED"
+            ),
+            "streaming_events": "AVAILABLE" if qual_result.cli_compatible else "UNVERIFIED",
             "shell": "BLOCKED",
             "git": "BLOCKED",
             "network": "BLOCKED",
             "resume_session": "UNVERIFIED",
         },
-        "live_status": "QUALIFIED_FILESYSTEM_ONLY" if cli_ready else "LIVE_RUNTIME_BLOCKED",
+        "live_status": live_status,
         "blocker_reason": (
             "Windows OS kernel terminal sandbox is not active for arbitrary shell commands; "
             "shell/git/network tools are blocked via permission deny rules while isolated "
             "workspace filesystem read/write is qualified via AntigravityCliTransport"
-            if cli_ready
+            if (qual_result.cli_compatible and effective_security_verified)
+            else "Security controls unverified on host runtime (fails closed)"
+            if (qual_result.cli_compatible and oauth_present and not effective_security_verified)
             else qual_result.reason
-            if not qual_result.qualified
+            if not qual_result.cli_compatible
             else "Antigravity OAuth session is not present on this host (~/.gemini/antigravity)"
         ),
     }

@@ -353,6 +353,8 @@ def test_t4_gemini_and_antigravity_doctor_reporting(
     monkeypatch.setattr("aipc.adapters.gemini.doctor.find_agy_executable", lambda: None)
     a_info_absent = antigravity_runtime_info()
     assert a_info_absent["agy_cli_present"] is False
+    assert a_info_absent["cli_compatible"] is False
+    assert a_info_absent["sandbox_verified"] is False
     assert a_info_absent["effective_security_verified"] is False
     assert a_info_absent["live_status"] == "LIVE_RUNTIME_BLOCKED"
     assert (
@@ -370,14 +372,31 @@ def test_t4_gemini_and_antigravity_doctor_reporting(
     )
     from aipc.adapters.gemini.doctor import AntigravityQualificationResult
 
-    monkeypatch.setattr(
-        "aipc.adapters.gemini.doctor.qualify_antigravity_runtime",
-        lambda *args, **kwargs: AntigravityQualificationResult(
-            qualified=True, version="1.5.2", reason="qualified"
-        ),
-    )
-    a_info_present = antigravity_runtime_info()
+    def _mock_qual(config=None, *, executable=None, security_verified=False):
+        return AntigravityQualificationResult(
+            qualified=bool(security_verified),
+            version="1.5.2",
+            reason="qualified" if security_verified else "security controls unverified",
+            cli_compatible=True,
+            sandbox_verified=False,
+            effective_security_verified=bool(security_verified),
+        )
+
+    monkeypatch.setattr("aipc.adapters.gemini.doctor.qualify_antigravity_runtime", _mock_qual)
+
+    # When agy v1.5.2 is present without security_verified=True -> fails closed
+    a_info_unverified = antigravity_runtime_info()
+    assert a_info_unverified["agy_cli_present"] is True
+    assert a_info_unverified["cli_compatible"] is True
+    assert a_info_unverified["sandbox_verified"] is False
+    assert a_info_unverified["effective_security_verified"] is False
+    assert a_info_unverified["live_status"] == "LIVE_RUNTIME_BLOCKED"
+
+    # When agy v1.5.2 is present AND security_verified=True -> QUALIFIED_FILESYSTEM_ONLY
+    a_info_present = antigravity_runtime_info(security_verified=True)
     assert a_info_present["agy_cli_present"] is True
+    assert a_info_present["cli_compatible"] is True
+    assert a_info_present["sandbox_verified"] is False
     assert a_info_present["effective_security_verified"] is True
     assert a_info_present["live_status"] == "QUALIFIED_FILESYSTEM_ONLY"
     assert a_info_present["qualified_capabilities"]["filesystem"] == "AVAILABLE"
@@ -469,6 +488,7 @@ def test_t4_antigravity_cli_transport_contract_and_fallback(
         runner=fake_runner,
         verify_command=(sys.executable, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
         auto_commit_attempt=True,
+        verification_isolation="unsafe_host_opt_in",
     )
     gemini_norm = AntigravityNormalizer(transport)
     gemini_w = GeminiAdapter(

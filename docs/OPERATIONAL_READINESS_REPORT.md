@@ -158,3 +158,58 @@ Following the initial operational validation, an independent security review ide
   - `test_antigravity_security_denies_env_and_git_tampering_and_prohibited_tools`: Unauthorized tool step (`run_command`) raises `GeminiProtocolError`.
 - **Review & Gate Result**: `PASS`.
 
+
+
+---
+
+## 6. Final Security Boundary & Git Integrity Hardening (Attempt 04)
+
+Attempt 04 resolved three critical architectural and security boundary requirements:
+
+### Issue 1 — Security Isolation & Host Verification Boundaries
+- **In-Process Limitations**: Acknowledged that Python sys.addaudithook() is in-process defense-in-depth and cannot serve as an OS-enforced security boundary (bypasses exist via ctypes, native binaries, and interpreter internals).
+- **Default-Blocked Verification**: Unsafe host verification is disabled by default (verification_isolation: Literal['blocked', 'container', 'unsafe_host_opt_in'] = 'blocked'). If verify_command is specified without an isolated container or explicit opt-in, verification halts immediately, records the block in test logs, and fails closed (passed = False).
+- **Restricted Container Runner (_run_container_verification)**: When verification_isolation='container', verification runs inside a restricted OS container (docker or podman) configured with --network none, --cap-drop ALL, --security-opt no-new-privileges, --pids-limit 64, and --memory 512m.
+- **Explicit Opt-In for Local Testing**: verification_isolation='unsafe_host_opt_in' is required to run the Python audit-hook sandbox on the host, emitting explicit warnings in logs and test reports.
+
+### Issue 2 — Runtime Qualification & Security Controls Verification
+- **Separation of Capabilities**: AntigravityQualificationResult explicitly separates cli_compatible (whether agy.exe executes and returns version) from effective_security_verified (whether verified isolation is established).
+- **Bare Host Sandbox State**: sandbox_verified is always reported as False on bare Windows hosts.
+- **Fail-Closed Gate**: qualify_antigravity_runtime() verifies that required security arguments are present and fails closed (LIVE_RUNTIME_BLOCKED) if unverified, if --yolo mode is configured, or if slash commands are enabled.
+
+### Issue 3 — Git Integrity & Safe Commit Implementation
+- **Staged Index Preservation**: Pre-existing staged files in the Git index prior to the agent turn are untouched and never included in the agent attempt commit.
+- **Delta-Only Turn Staging**: Turn modifications are detected by computing SHA-256 digests across the entire workspace before and after the turn. Only modified or newly added files (turn_modified) are staged and committed using git commit --only -- <files>. Pre-existing unstaged/dirty files that the agent did not touch remain undisturbed in the working tree.
+- **Fail-Closed Git Operations**: Non-zero exit codes from git add or git commit immediately fail closed.
+- **Commit Identity Protection**: Local repository user.name and user.email configurations are strictly preserved.
+- **Failure Atomicity**: Verification failures never create a Git commit, preserving diagnostics and attempt logs without polluting Git history.
+
+---
+
+### Record 8 — Attempt 04 Security & Git Integrity Test Suite
+- **Runtime**: Python 3.13.0, pytest 9.1.1 on Windows (H:\000ProjectCode\AI_Project_Controller)
+- **Execution Command**: .venv\Scripts\python.exe -m pytest tests/gemini/test_antigravity_transport.py tests/integration/test_cli.py -v
+- **Test Exit Code**: 0 (31 passed in 35.14s)
+- **Verified Scenarios**:
+  - test_verification_isolation_default_blocked_fails_closed: Default mode blocks host verification and fails closed.
+  - test_container_verification_builds_restricted_os_isolated_command: Container runner builds --network none command and fails closed when image/binary is unavailable.
+  - test_git_integrity_preserves_pre_existing_staged_files: Staged files remain in index without being committed.
+  - test_git_integrity_commits_only_modified_files_preserving_dirty: Untouched dirty files remain unstaged and uncommitted.
+  - test_git_integrity_failed_git_add_or_commit_marks_finalize_failed: Non-zero git exit codes fail closed.
+  - test_git_integrity_failed_verification_does_not_commit: Verification failure never creates a commit.
+  - test_git_integrity_preserves_worktree_and_commit_identity: Repo identity preserved.
+
+---
+
+## 7. Operational Deployment & Merge Recommendations
+
+Based on empirical validation across Attempt 01 through Attempt 04:
+
+1. **Experimental Merge Recommendation (validation/operational-readiness -> master)**: **GO**
+   - **Conditions**: Qualified for local development, interactive Controller sessions, and assisted workflows under QUALIFIED_FILESYSTEM_ONLY.
+   - **Protection**: Unsafe host verification is disabled by default (verification_isolation='blocked'). Git hook bypass is enforced via -c core.hooksPath=/dev/null. Build config tampering fails closed.
+
+2. **Unattended Production Autonomous Execution Recommendation**: **NO-GO**
+   - **Conditions**: Unattended execution on bare Windows hosts without human-in-the-loop oversight is NOT recommended until:
+     - An OS-enforced container boundary (docker, podman, or Windows Sandbox) is active for test verification (verification_isolation='container').
+     - Sandboxed shell execution is isolated within a dedicated disposable micro-VM or container environment.
