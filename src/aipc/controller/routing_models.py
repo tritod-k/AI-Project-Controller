@@ -6,6 +6,15 @@ from typing import Literal, Self
 from pydantic import model_validator
 
 from aipc.agents.models import AgentRunHandle
+from aipc.agents.routing_errors import RoutingProviderError
+
+__all__ = [
+    "RoutingProviderError",
+    "WorkerBinding",
+    "WorkerRoutingEvent",
+    "assignment_for",
+    "checked_history",
+]
 from aipc.agents.routing_models import Digest, OperationalFailure, RoutingDecision, digest
 from aipc.domain.models import CanonicalRecord, NonBlank, Timestamp
 from aipc.normalization.base import AgentResultNormalizer

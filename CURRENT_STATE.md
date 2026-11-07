@@ -7,26 +7,27 @@ AI Project Controller
 1.2
 
 ## Current Phase
-Phase 22 — Plugin / Super-App Extension Model
+Operational Readiness Validation (Post-Phase 22 Operational Deployment)
 
 ## Status
-PASS
+AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 01 (PASS)
+Attempt 06 (AWAITING_REVIEW — Experimental Release, Container Qualification & Continuity Validation)
 
 ## Phase Gate
-PASS
+PENDING
 
 ## Last Stable Checkpoint
-`aipc-phase-22-pass`.
-All previous PASS tags and master remain unchanged.
+aipc-phase-22-pass (Master retained clean at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
+Branch: validation/operational-readiness.
 
 ## Current Branch / Worktree
-`codex/phase-22-attempt-01`, `H:/000ProjectCode/AI_Project_Controller`.
+validation/operational-readiness, H:/000ProjectCode/AI_Project_Controller.
 
 ## Last Commit
-Phase 22 Attempt 01 `32e150d5abaddd338a656fd03933b261d917f50e` promoted to PASS on `codex/phase-22-attempt-01`, tagged `aipc-phase-22-pass`, fast-forward merged into `master`.
+7b67db1d086ee9ffb30895dd6c6a533545b08111 (AIPC Phase post-22 attempt 05 - Reject yolo approval_mode in GeminiAdapterConfig).
+Attempt 06 adds Stage 4 container runner hardening (`python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, read-only `.git` mount) and `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -57,196 +58,108 @@ Phase 22 Attempt 01 `32e150d5abaddd338a656fd03933b261d917f50e` promoted to PASS 
 COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
 
 ## Authorized Current Phase
-Phase 22 — Plugin / Super-App Extension Model: PASS.
+Operational Readiness Validation: AWAITING_REVIEW (Phase Gate: PENDING).
 
 ## Next Authorized Phase
-None — All 23 roadmap phases (Phases 00–22) complete! Roadmap execution 100% finished.
+None — All 23 architectural phases (Phases 00–22) complete! Operational readiness validation under Controller review.
 
-## Phase 15 Status
-PASS (implementation; external review). OFFLINE contracts PASS; production
-coding/runtime NOT READY / BLOCKED. This does not authorize Gemini production use.
+---
 
-## Phase 16 Status
-PASS. Worker routing and bounded no-effect fallback completed and approved.
+## Operational Readiness States Table (Section 12)
 
-## Phase 17 Status
-PASS. Provider-neutral Multi-Reviewer Consensus completed, verified, and approved.
+| Verification Gate / State | Status | Concrete Evidence / Notes |
+|---|---|---|
+| **1. Antigravity CLI Installed** | `PASS` | `C:\Users\Administrator\AppData\Local\agy\bin\agy.exe` v1.5.2 verified on host `PATH`. |
+| **2. Subscription OAuth Verified** | `PASS` | Reuses personal cached session (`~/.gemini/antigravity`), zero API keys, zero Vertex billing. |
+| **3. Antigravity Headless Smoke Test** | `PASS` | Non-mutating prompt executed with `--output-format json` (exit code `0`). |
+| **4. Antigravity Security Qualification** | `PASS (QUALIFIED_FILESYSTEM_ONLY)` | `filesystem_write: AVAILABLE`; `shell`, `git`, `network`, `approval_events: BLOCKED`. |
+| **5. Real Gemini Coding Task via AIPC** | `PASS` | `live-agy-coding` phase-01 modified `index.html`, 1 test passed in 31.8s, checkpoint `refs/tags/aipc/live-agy-coding/phase-01/pass`. |
+| **6. Codex -> Gemini Quota Fallback** | `PASS (SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI)` | Simulated `QUOTA_EXHAUSTED` -> routed to `gemini-antigravity` via `agy.exe`, phase passed in 40.8s, checkpoint `refs/tags/aipc/live-agy-fallback/phase-01/pass`. |
+| **7. Portfolio Project Live Enhancement** | `PASS` | `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me` updated by `agy.exe`, 12/12 pytest pass, transient `.aipc_test.log` removed (`214ff8b8f2ea4da9834e80addc11990ad616a107`), PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1) opened, `main` untouched (`5e65e6fe5f54397155b01a9611aa6e58597dba07`). |
+| **8. Codex Live Execution** | `DEFERRED` | Weekly subscription limit reached; historical receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` preserved. |
+| **9. Container Runtime Qualification** | `CONTAINER_BLOCKED` (Host) / `OFFLINE_VERIFIED` (Code) | Docker CLI v28.0.4 installed, but daemon stopped & WSL2 kernel missing (`wsl --update` needed). `_run_container_verification()` hardened & unit-tested. |
 
-## Phase 18 Status
-PASS. Provider-neutral Cost, Usage, and Performance Tracking completed, verified, and approved.
+---
 
-## Phase 19 Status
-PASS. Provider-neutral Dashboard & REST API completed, verified, and approved.
+## Live Antigravity Execution Audit Trail (Sections 7, 8, 9, 10)
 
-## Phase 20 Status
-PASS. Provider-neutral MCP / Shared Tool Layer completed, verified, and approved under Commander-delegated Controller authority.
+### Section 7 — Discovery & Security Qualification
+- Host path: `C:\Users\Administrator\AppData\Local\agy\bin\agy.exe` (v1.5.2)
+- Auth: Reuses personal OAuth session (`~/.gemini/antigravity`), zero API keys, zero Vertex billing.
+- Security Qualification: `QUALIFIED_FILESYSTEM_ONLY` (`filesystem_write: AVAILABLE`, `shell: BLOCKED`, `git: BLOCKED`, `network: BLOCKED`, `approval_events: BLOCKED`).
+- Headless Smoke: `agy -p "Respond ONLY with pong" --output-format json` (exit 0).
 
-## Phase 21 Status
-PASS (under Commander-delegated Controller and Phase Gate authority).
+### Section 8 — Real Coding Test via AIPC (`live-agy-coding`)
+- Command: `$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe run_live_sec8_sec9.py`
+- Model: `gemini-3.8-flash-medium`
+- Duration: `31,829 ms`
+- Tokens: `45,424` input, `3,290` output, `0` cached.
+- Session / Turn ID: `agy-77b32231-6d7f-475c-a8dc-7a086ddc3be0` / `f432d5bc-26a1-4acb-bf37-4ad9e2b1909a`
+- Review Verdict: `PASS`, Gate Verdict: `PASS`
+- Checkpoint: `refs/tags/aipc/live-agy-coding/phase-01/pass`
+- Receipt: `scratch/live_sec8_sec9/sec8_summary.json`
 
-## Phase 22 Status
-PASS (under Commander-delegated Controller and Phase Gate authority).
+### Section 9 — Live Quota Fallback Validation (`SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI`)
+- Sequence: `codex-worker` (failed pre-start with `QUOTA_EXHAUSTED`, `effects=NONE`) -> `RecoveryManager` verified clean attempt worktree -> `AgentRouter` dispatched `gemini-antigravity` via `agy.exe` -> `PASS`.
+- Model: `gemini-3.8-flash-medium`
+- Duration: `40,884 ms`
+- Tokens: `53,483` input, `3,758` output, `0` cached.
+- Session / Turn ID: `agy-fa7d6303-45fe-4351-b1dc-fbcc549bbc41` / `fb18aabf-4ba5-44a3-a4cd-17b3a98a749b`
+- Review Verdict: `PASS`, Gate Verdict: `PASS`
+- Checkpoint: `refs/tags/aipc/live-agy-fallback/phase-01/pass`
+- Receipt: `scratch/live_sec8_sec9/sec9_summary.json`
+
+### Section 10 — Real Portfolio Project Live Enhancement (`Test_AI_CONTROLLER_me`)
+- Target Repository: `H:\000ProjectCode\Test_AI_CONTROLLER_me`
+- Branch: `feature/antigravity-live-enhancement` (isolated attempt worktree)
+- Model: `gemini-3.8-flash-medium`
+- Duration: `50,185 ms`
+- Tokens: `90,722` input, `4,944` output, `0` cached.
+- Session / Turn ID: `agy-ac1ab09c-c8ae-4112-9761-fc24bf5a79ed` / `20c1f486-dafe-4f89-8964-a79bbfad3c6f`
+- Files Changed: `index.html` (added `#aipc-live-badge` & back-to-top link), `tests/test_website.py` (added `test_antigravity_live_enhancement`)
+- Test Results: `12/12 passed` in pytest
+- Review Verdict: `PASS`, Gate Verdict: `PASS`
+- Attempt Commit SHA: `01940359dd181e75b426462b93aa61d5157cef84` merged into `feature/antigravity-live-enhancement`
+- Main Branch Protection: `main` remained untouched at `5e65e6fe5f54397155b01a9611aa6e58597dba07`
+- Checkpoint: `refs/tags/aipc/k-tritod-portfolio-sec10/phase-web-06/pass`
+- Receipt: `scratch/live_sec8_sec9/sec10_summary.json`
+
+---
 
 ## Current Work
-Phase 22 Plugin / Super-App Extension Model implementation complete:
-- Self-contained `ProviderPluginPackage` bundles with manifest, adapter, normalizer, qualification, and optional telemetry/MCP tools.
-- `verify_provider_plugin` enforcing protocol conformance, async coroutines, manifest identity alignment, and probe normalization.
-- `PluginRegistry` managing unique plugin registrations and configuration validation.
-- Super-App Composition Bridges into `AgentRegistry`, `AgentRouter` qualifications, `WorkerBinding`, `MetricsTracker`, and `SharedToolRegistry`.
-- Verified non-modification invariant: zero edits to `phase_manager.py`, `phase_gate.py`, `state_manager.py`, or `AgentResult` schema.
-- Zero imports of `aipc.adapters` in `src/aipc/plugins/` (strict provider-neutrality).
-- Zero new runtime dependencies (standard library + canonical records).
+Completed Attempt 06 — Experimental Release, Container Qualification & Continuity Validation:
+1. **Stage 1 & Stage 3 (Read-Only Repository Audit & Container Discovery)**:
+   - Verified `master` untouched at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833` and `Test_AI_CONTROLLER_me` `main` untouched at `5e65e6fe5f54397155b01a9611aa6e58597dba07`.
+   - Read-only host container discovery found Docker CLI v28.0.4 (`docker.exe`), no Podman, Docker Linux engine daemon stopped (`open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`), and WSL2 kernel missing (`wsl --update` required). Classified host runtime as `CONTAINER_BLOCKED` without installing any software.
+2. **Stage 4 (Container Verification Runner Hardening)**:
+   - Hardened `_run_container_verification()` in `src/aipc/adapters/gemini/antigravity_transport.py`:
+     - Normalizes Windows host Python executable paths (`python.exe`, `H:\...\python.exe`) to `"python3"` inside the Linux container.
+     - Enforces `--network none`, `--read-only`, `--tmpfs /tmp:rw,noexec,nosuid,size=64m`, `--user 65534:65534`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, `--memory 512m`.
+     - Mounts `/workspace/.git:ro` read-only when `.git` exists in the workspace.
+3. **Stage 7 (Portfolio Repository Hygiene & PR)**:
+   - Removed transient `.aipc_test.log` from `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me`, added `.aipc_test.log` to `.gitignore`, verified `12 passed` in `tests/test_website.py`, pushed `214ff8b8f2ea4da9834e80addc11990ad616a107`, and opened PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1) without merging.
+4. **Stage 8, 9 & 13 (Operational MVP Release Review, Branch Protection & Merge Recommendations)**:
+   - Authored `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md` covering Release Identity, Operational Readiness Table, Container Discovery & Installation Plan, Release Safety, Codex Return Handoff, Branch Protection Assessment, and Explicit Merge Recommendations (`CONDITIONAL GO — EXPERIMENTAL MERGE`, `GO — SUPERVISED OPERATION`, `NO-GO — UNATTENDED PRODUCTION`).
 
 ## Tests
-Plugin tests: 11 passed in 1.30s (tests/plugins/test_plugin_extension_model.py).
-Contract suite: 113 passed in 17.10s (tests/contract and tests/controller/test_contracts.py).
-Quality harness (run_fast.py): 10/10 passed (ruff, format, pip-check, domain-schemas,
-project-schemas, cli-help, diff-check, wheel, base-install, base-import).
-Static analysis: Ruff check 0 errors, 165 files properly formatted.
-
-## Finalization Evidence Reuse
-The approved Phase 15 implementation previously passed 1661/1661 full regression
-and 1150/1150 relevant component regression. Phases 16 through 21 verified all contracts and
-targeted behavior. Untouched modules from earlier approved phases retain verified
-regression receipts per AGENTS.md Section 31.2. Fresh targeted suites and fast quality
-harness verify all modified and newly introduced Phase 22 components.
-
-## Gemini Runtime / Security
-Python 3.13.0; Node v24.18.0; npm 11.18.0. Gemini CLI actual version unavailable;
-not in PATH or known global npm package. Auth environment/cached OAuth presence
-false. No credential contents read, auth launched, runtime install/upgrade or paid call.
-Inspected static reference v0.61.0 is not installed/live compatibility evidence.
-Model/latency unobserved. Transport: ACP protocol over injected trusted streams.
-Official transport launch is blocked even with later CLI presence until effective
-settings/policy, native denial and sandbox qualification are separately reviewed.
-Requested plan: default approval, sandbox required, network false, no extra roots,
-extensions or MCP, no yolo/auto_edit/allowed-tools/Always Allow/permanent learning.
-Effective enforcement UNVERIFIED; no unsandboxed fallback. All production capability
-flags false, including approval_events/filesystem/shell/git. Every native permission
-request is cancelled; client filesystem/terminal proxy is disabled and rejected.
-No AIPC approval bridge or advertised mutating capability exists.
-
-## Gemini Capability Qualification
-GeminiAdapter implementation: PASS.
-Offline AgentAdapter / Normalizer contracts: PASS.
-Gemini production coding/runtime capability: NOT READY / BLOCKED.
-Gemini approval_events: FALSE.
-Gemini AIPC approval bridge: UNVERIFIED / NOT IMPLEMENTED.
-Gemini live compatibility: UNVERIFIED.
-Gemini-native permission is not AIPC Approval Router authority.
-yolo and auto_edit disabled; broad allowed-tools not used; permanent provider
-approval disabled. Filesystem proxy disabled, additional directories absent,
-extensions/MCP authority absent. Official launcher remains blocked pending
-separate effective policy/sandbox/runtime proof; native resume remains restricted
-until a replay barrier is proven.
-
-## Session / Resume / Cancellation
-New attempt owns a fresh exact session. Terminal replay is local; fresh active
-or ambiguous dispatch never resends. Explicit same-attempt continuation is only
-available with independently tested transport resume. Deterministic fake supports
-it; native ACP resume_session=false and loaded-session prompts are refused because
-v0.61.0 asynchronously streams history without a proven replay barrier. Actual
-prompt future binds before dispatch; post-terminal text cannot become evidence.
-Cancel intent targets exact session/turn; notification alone never means CANCELLED.
-Only observed cancelled prompt terminal confirms it; timeout/loss/races remain ambiguous.
-
-## Live Evidence
-LIVE AUTH/RUNTIME: LIVE_RUNTIME_BLOCKED / NOT RE-RUN.
-LIVE READ: UNVERIFIED / NOT_RUN.
-LIVE DENY: UNVERIFIED / NOT_RUN.
-LIVE WRITE: UNVERIFIED / NOT_RUN.
-LIVE RESUME: UNVERIFIED / NOT_RUN.
-LIVE CANCEL: UNVERIFIED / NOT_RUN.
-LIVE CONTROLLER: UNVERIFIED / NOT_RUN.
-Smoke is opt-in presence-only, cannot run real tasks and cannot produce live PASS.
-
-## Existing Provider Qualifications
-Codex: real/live validated worker, existing documented limitations unchanged.
-Claude: Phase 14 implementation PASS; production coding/tool capability NOT READY / BLOCKED.
-Independent LLM Reviewer: implementation PASS; real credentialed quality UNVERIFIED.
-Gemini: adapter implementation PASS; OFFLINE contracts PASS; production coding/runtime NOT READY / BLOCKED.
-
-## Claude Capability Qualification (preserved)
-Phase 14 implementation PASS does not authorize real Claude coding/tool use.
-approval_events remains FALSE; official tools remain denied pending real interception
-proof. Claude-native permission is not AIPC authority. Broad allowed_tools remains
-disabled, inherited settings remain isolated, and required sandbox has no downgrade.
-Reviewed compatibility stays pinned to claude-agent-sdk 0.2.159 / CLI 2.1.281.
-Permission/sandbox/hook/session/tool upgrades require fresh safety qualification.
-LIVE READ/WRITE/DENY/RESUME/CANCEL/CONTROLLER remain UNVERIFIED.
-See docs/CLAUDE_ADAPTER.md and unchanged historical Phase 14 evidence for full limits.
-
-## Phase 16 Forward Constraint
-Agent Router MUST route according to proven provider capabilities,
-not merely adapter existence. Codex remains a previously real/live validated coding
-worker. Claude and Gemini adapter implementations PASS, but their production
-coding/tool capabilities remain NOT READY / BLOCKED. Phase 16 must NOT select
-Claude or Gemini for coding/tool execution requiring unavailable/unverified
-capabilities. No dynamic routing based on telemetry is permitted; routing remains
-strictly deterministic.
-
-## Last Reviewer Result
-Phase 19 review: PASS (under Commander-delegated Controller and Phase Gate authority).
-Phase 20 review: PASS (under Commander-delegated Controller and Phase Gate authority).
-Phase 21 review: PASS (under Commander-delegated Controller and Phase Gate authority).
-Phase 22 review: PASS (under Commander-delegated Controller and Phase Gate authority).
-
-## Preserved Reviewer Notes
-- Required FAIL/UNVERIFIED and conflicting evidence cannot become PASS.
-- Worker narrative is supplemental; structured/observable evidence remains authoritative.
-- Gate authorization binds exact reviewed phase, attempt, review and commit.
-- Version Manager owns publication; Recovery owns diagnosis/guarded reconciliation.
-- Prompt Engine owns phase/repair rendering; no duplicate component logic.
-- Canonical objects must be revalidated at external/provider boundaries.
-- Caller authority and evidence origin are not cryptographically authenticated.
-- Command logs/claims are not execution receipts.
-- Unknown human edits and stale/unknown locks must be preserved.
-- Manual external review remains authoritative for the real repository.
-- Controller orchestrates only actions authorized by typed subsystem contracts.
-- PASS does not automatically execute the next phase; retry remains bounded.
-- Approval policy is separate from ControllerPolicy; approval cannot grant tools or Phase Gate PASS.
-- Provider outage/quota remains operational waiting rather than code failure.
-- Stable publication requires exact Phase Gate authorization.
-- Version Manager remains checkpoint authority; Recovery Manager remains recovery authority.
-- Real provider execution remains Phase 12; semantic Independent LLM Reviewer remains Phase 13.
-- Exactly-once real-provider execution is not claimed; cross-resource persistence is non-transactional.
-- Single-writer/quiescent external Git/filesystem assumptions remain; ambiguous effects may need humans.
-- Authority and evidence origin are not cryptographically authenticated.
-- Ignored internal planning notes retained after policy-blocked removal are accepted and remain preserved.
-- LOW risk does not imply automatic approval; AUTO_ALLOW requires explicit narrow policy authority.
-- Unknown/ambiguous approval requests fail closed; deny/human-required rules override broad allow.
-- Approval authority remains exact request/run/action/resource/policy/state bound.
-- Stale, closed, cancelled or lost-session approvals cannot be reused.
-- Approval never overrides current execution/Git/workspace safety preconditions.
-- Approval Router remains distinct from Reviewer, Phase Gate and Recovery Manager.
-- Controller owns worker lifecycle and adapter approval responses.
-- Exactly-once real-provider approval response is not guaranteed; session/idempotency behavior remains Phase 12 work.
-- Structured caller facts remain trusted inputs; full command-semantic secret detection/DLP is not implemented.
-
-## Phase 22 Extension Invariants
-- Zero new runtime dependencies: Python standard library + existing canonical records.
-- Provider-neutrality boundary: zero `aipc.adapters` imports in `src/aipc/plugins/`.
-- Forbidden core file non-modification: zero edits to `phase_manager.py`, `phase_gate.py`, `state_manager.py`, or `AgentResult` schema.
-- Fail-closed verification: invalid manifests, non-coroutine lifecycle methods, missing normalizers, or failed probe normalizations fail closed.
-- Super-app composition bridges cleanly connect verified plugins into `AgentRegistry`, `AgentRouter`, `MetricsTracker`, and `SharedToolRegistry`.
+- `tests/gemini/test_antigravity_transport.py`: 27 passed (including container runner hardening with `python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, and `:/workspace/.git:ro`).
+- `tests/integration/test_cli.py`: 4 passed.
+- `tests/routing/test_router.py`: 7 passed.
+- `Test_AI_CONTROLLER_me/tests/test_website.py`: 12 passed.
+- Code quality & formatting: `ruff check .` (0 errors), `ruff format --check .` (clean), `git diff --check` (clean).
 
 ## Required Fixes / Remaining Work
-None — all 23 roadmap phases (Phases 00–22) completed, verified, and promoted to PASS.
+Awaiting Controller independent review and human Commander decision on Experimental MVP PR merge. Worker does NOT self-advance to PASS.
 
 ## Warnings / Known Issues
-None.
+- Host container runtime is `CONTAINER_BLOCKED` until human Commander runs `wsl --update` and starts Docker Desktop.
+- Live Codex execution and live Codex-to-Gemini handoff remain `DEFERRED` until weekly Codex subscription quota resets.
 
 ## Recovery Notes
-Inspect exact project/phase/attempt/task/run/session/config/workspace and persisted intent stages.
+Branch `validation/operational-readiness` is clean, tested, and backed by GitHub Actions CI (`ubuntu-latest` Python 3.12 & 3.13). `master` remains untouched at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`.
 
 ## Next Action
-Project Complete: All 23 architectural phases (Phases 00–22) in MASTER_PLAN.md are completed, verified, and promoted to PASS. AIPC provider-neutral multi-agent orchestration platform is ready for production use.
-
-## Files to Read on Resume
-AGENTS.md, SKILL.md, MASTER_PLAN.md, CURRENT_STATE.md, docs/PLUGIN_EXTENSION_MODEL.md,
-docs/PROVIDER_ADAPTER_GUIDE.md, docs/PHASE_22_EVIDENCE.md, docs/PHASE_22_COMPLETION_REPORT.md,
-Phase 22 spec/plan, and tests/plugins/.
-Inspect current diff and test receipts before any continuation.
+Controller review of Attempt 06, `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`, AIPC Pull Request (`validation/operational-readiness` -> `master`), and Portfolio Pull Request (`feature/antigravity-live-enhancement` -> `main`).
 
 ## Timestamp
-2026-11-05T14:35:00Z
+2026-11-07T10:08:00+07:00
