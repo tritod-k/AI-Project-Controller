@@ -286,3 +286,141 @@ def test_collection_error_prevents_reference_pass(review_case):
     review = api().DeterministicReviewer().review(ctx)
     assert review.verdict == "REVISE"
     assert any("evidence" in fix.lower() for fix in review.required_fixes)
+
+
+def test_correction_b_required_file_absent_or_unchanged_fails_and_gate_cannot_pass(review_case):
+    """Correction B.1: Required file absent or unchanged: criterion fails; Gate cannot PASS."""
+    # 1. File absent from Git observations:
+    ctx = context(review_case).model_copy(
+        update={
+            "rules": (
+                api().CriterionRule(
+                    criterion_id="AC-tests", kind="file_changed", target="missing.py"
+                ),
+            )
+        }
+    )
+    review = api().DeterministicReviewer().review(ctx)
+    assert review.criteria[0].status == "FAIL"
+    assert review.verdict == "REVISE"
+    assert not review.next_phase_allowed
+    submission = api().bind_review(ctx, review, authority="trusted-reviewer")
+    gate_decision = api().PhaseGate().evaluate(submission, ctx)
+    assert gate_decision.verdict == "REVISE"
+    assert not gate_decision.next_phase_allowed
+    assert not gate_decision.stable_checkpoint_allowed
+
+    # 2. File declared but patch unchanged / not corroborating:
+    ctx_unchanged = context(review_case, patch=b"unrelated diff content").model_copy(
+        update={
+            "rules": (
+                api().CriterionRule(
+                    criterion_id="AC-tests", kind="file_changed", target="src/example.py"
+                ),
+            )
+        }
+    )
+    review_unchanged = api().DeterministicReviewer().review(ctx_unchanged)
+    assert review_unchanged.criteria[0].status == "UNVERIFIED"
+    assert review_unchanged.verdict == "REVISE"
+    sub_unchanged = api().bind_review(ctx_unchanged, review_unchanged, authority="trusted-reviewer")
+    gate_unchanged = api().PhaseGate().evaluate(sub_unchanged, ctx_unchanged)
+    assert gate_unchanged.verdict == "REVISE"
+    assert not gate_unchanged.next_phase_allowed
+    assert not gate_unchanged.stable_checkpoint_allowed
+
+
+def test_correction_b_required_artifact_missing_does_not_pass(review_case):
+    """Correction B.2: Required artifact missing: criterion does not PASS and gate cannot pass."""
+    ctx = context(review_case, artifacts=()).model_copy(
+        update={
+            "rules": (
+                api().CriterionRule(
+                    criterion_id="AC-tests", kind="artifact", target="required_output"
+                ),
+            )
+        }
+    )
+    review = api().DeterministicReviewer().review(ctx)
+    assert review.criteria[0].status == "UNVERIFIED"
+    assert review.verdict == "REVISE"
+    assert not review.next_phase_allowed
+    submission = api().bind_review(ctx, review, authority="trusted-reviewer")
+    gate_decision = api().PhaseGate().evaluate(submission, ctx)
+    assert gate_decision.verdict == "REVISE"
+    assert not gate_decision.next_phase_allowed
+    assert not gate_decision.stable_checkpoint_allowed
+
+
+def test_correction_b_failed_tests_prevent_reviewer_pass(review_case):
+    """Correction B.3: Failed tests: Reviewer cannot PASS."""
+    ctx = context(review_case, log="10 passed, 2 failed in 0.2s\n")
+    review = api().DeterministicReviewer().review(ctx)
+    assert review.criteria[0].status == "FAIL"
+    assert review.verdict == "REVISE"
+    assert not review.next_phase_allowed
+    submission = api().bind_review(ctx, review, authority="trusted-reviewer")
+    gate_decision = api().PhaseGate().evaluate(submission, ctx)
+    assert gate_decision.verdict == "REVISE"
+    assert not gate_decision.next_phase_allowed
+
+
+def test_correction_b_generic_passing_tests_alone_do_not_establish_functional_completeness(
+    review_case,
+):
+    """Correction B.4: Generic passing tests alone do not establish functional completeness."""
+    # Case A: Generic test rule alone passes tests, but only proves aggregate test suite execution.
+    generic_ctx = context(review_case).model_copy(
+        update={
+            "rules": (api().CriterionRule(criterion_id="AC-tests", kind="tests", minimum_passed=1),)
+        }
+    )
+    generic_review = api().DeterministicReviewer().review(generic_ctx)
+    assert generic_review.criteria[0].status == "PASS"
+
+    # Case B: When explicit deliverable rule is checked for the missing functional file,
+    # the criterion fails closed and prevents Phase Gate PASS.
+    explicit_ctx = context(review_case).model_copy(
+        update={
+            "rules": (
+                api().CriterionRule(criterion_id="AC-tests", kind="tests", minimum_passed=1),
+                api().CriterionRule(
+                    criterion_id="AC-optional", kind="file_changed", target="src/calculator.py"
+                ),
+            ),
+            "require_optional": True,
+        }
+    )
+    explicit_review = api().DeterministicReviewer().review(explicit_ctx)
+    assert explicit_review.criteria[0].status == "PASS"
+    assert explicit_review.criteria[1].status == "FAIL"  # src/calculator.py was not modified
+    assert explicit_review.verdict == "REVISE"
+    assert not explicit_review.next_phase_allowed
+    sub = api().bind_review(explicit_ctx, explicit_review, authority="trusted-reviewer")
+    assert api().PhaseGate().evaluate(sub, explicit_ctx).verdict == "REVISE"
+
+
+def test_correction_b_valid_explicit_rules_are_evaluated_by_canonical_reviewer(review_case):
+    """Correction B.5: Valid explicit rules are evaluated by the canonical Reviewer."""
+    ctx = context(review_case, artifacts=(("phase_manifest", b'{"status": "ok"}'),))
+    rules = (
+        api().CriterionRule(criterion_id="AC-tests", kind="tests", minimum_passed=5),
+        api().CriterionRule(
+            criterion_id="AC-optional", kind="file_changed", target="src/example.py"
+        ),
+    )
+    ctx = ctx.model_copy(update={"rules": rules, "require_optional": True})
+    review = api().DeterministicReviewer().review(ctx)
+    assert review.verdict == "PASS"
+    assert review.next_phase_allowed is True
+    assert len(review.criteria) == 2
+    assert review.criteria[0].status == "PASS"
+    assert review.criteria[0].evidence == ["test.log"]
+    assert review.criteria[1].status == "PASS"
+    assert review.criteria[1].evidence == ["git_diff", "git_status"]
+
+    submission = api().bind_review(ctx, review, authority="trusted-reviewer")
+    gate_decision = api().PhaseGate().evaluate(submission, ctx)
+    assert gate_decision.verdict == "PASS"
+    assert gate_decision.next_phase_allowed is True
+    assert gate_decision.stable_checkpoint_allowed is True
