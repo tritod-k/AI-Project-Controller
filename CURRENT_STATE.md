@@ -10,24 +10,23 @@ AI Project Controller
 Operational Readiness Validation (Post-Phase 22 Operational Deployment)
 
 ## Status
-AWAITING_REVIEW
+PASS (Experimental / Supervised Release — PR #1 & PR #2 Accepted by Commander)
 
 ## Current Attempt
-Attempt 07 (AWAITING_REVIEW — Real Docker Container Qualification & End-to-End Execution)
+Attempt 08 (PASS — Real Docker Container Qualification, Read-Only Mount Hardening & Experimental Merge)
 
 ## Phase Gate
-PENDING
+PASS (Experimental / Supervised Merge Authorized; Unattended Production remains NO-GO)
 
 ## Last Stable Checkpoint
-aipc-phase-22-pass (Master retained clean at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
-Branch: validation/operational-readiness.
+- `master` baseline prior to PR #2: `9a74822d50dad88e54590e4904af5f56dfd329c1` (Merge PR #1 from `validation/operational-readiness` `4eb671e6c1fd534621547b736652067543491a08`; Historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
+- Source qualification branch: `validation/docker-container-qualification`.
 
 ## Current Branch / Worktree
-validation/docker-container-qualification, H:/000ProjectCode/AI_Project_Controller.
+`validation/docker-container-qualification`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-7b67db1d086ee9ffb30895dd6c6a533545b08111 (AIPC Phase post-22 attempt 05 - Reject yolo approval_mode in GeminiAdapterConfig).
-Attempt 06 adds Stage 4 container runner hardening (`python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, read-only `.git` mount) and `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`.
+`10e861dc8b64a28f3f709537e49a88448b2b7353` (`AIPC Phase post-22 attempt 08 - Harden container verification read-only mount and worktree git pointer masking`), following `924e5dd574e5a0cb13674ce78b9b57d839fca637` (`AIPC Phase post-22 attempt 07 - Qualify live Docker container verification`).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -55,13 +54,13 @@ Attempt 06 adds Stage 4 container runner hardening (`python3` normalization, `--
 - Phase 22 — Plugin / Super-App Extension Model: PASS (external/controller approval).
 
 ## Documentation Alignment
-COMPLETED — `59a5121458cd1f1dcc4f72425fd925a53531756a`.
+COMPLETED — Synchronized with PR #1 (`9a74822d50dad88e54590e4904af5f56dfd329c1`) and PR #2 (`validation/docker-container-qualification`).
 
 ## Authorized Current Phase
-Operational Readiness Validation: AWAITING_REVIEW (Phase Gate: PENDING).
+Operational Readiness Validation: EXPERIMENTAL / SUPERVISED RELEASE (`UNATTENDED_PRODUCTION = NO-GO`).
 
 ## Next Authorized Phase
-None — All 23 architectural phases (Phases 00–22) complete! Operational readiness validation under Controller review.
+None — All 23 architectural phases (Phases 00–22) complete. Next operational milestone: bounded live Codex-to-Gemini handoff validation once weekly Codex subscription quota resets.
 
 ---
 
@@ -69,125 +68,99 @@ None — All 23 architectural phases (Phases 00–22) complete! Operational read
 
 | Verification Gate / State | Status | Concrete Evidence / Notes |
 |---|---|---|
-| **1. Antigravity CLI Installed** | `PASS` | `C:\Users\Administrator\AppData\Local\agy\bin\agy.exe` v1.5.2 verified on host `PATH`. |
+| **1. Antigravity CLI Installed** | `PASS` | `agy.exe` (`v1.5.2` / `v1.5.3`) verified via dynamic lookup in `src/aipc/adapters/gemini/doctor.py`. |
 | **2. Subscription OAuth Verified** | `PASS` | Reuses personal cached session (`~/.gemini/antigravity`), zero API keys, zero Vertex billing. |
 | **3. Antigravity Headless Smoke Test** | `PASS` | Non-mutating prompt executed with `--output-format json` (exit code `0`). |
 | **4. Antigravity Security Qualification** | `PASS (QUALIFIED_FILESYSTEM_ONLY)` | `filesystem_write: AVAILABLE`; `shell`, `git`, `network`, `approval_events: BLOCKED`. |
 | **5. Real Gemini Coding Task via AIPC** | `PASS` | `live-agy-coding` phase-01 modified `index.html`, 1 test passed in 31.8s, checkpoint `refs/tags/aipc/live-agy-coding/phase-01/pass`. |
 | **6. Codex -> Gemini Quota Fallback** | `PASS (SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI)` | Simulated `QUOTA_EXHAUSTED` -> routed to `gemini-antigravity` via `agy.exe`, phase passed in 40.8s, checkpoint `refs/tags/aipc/live-agy-fallback/phase-01/pass`. |
-| **7. Portfolio Project Live Enhancement** | `PASS` | `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me` updated by `agy.exe`, 12/12 pytest pass, transient `.aipc_test.log` removed (`214ff8b8f2ea4da9834e80addc11990ad616a107`), PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1) opened, `main` untouched (`5e65e6fe5f54397155b01a9611aa6e58597dba07`). |
+| **7. Portfolio Project Live Enhancement** | `PASS` | `feature/antigravity-live-enhancement` (`214ff8b8f2ea4da9834e80addc11990ad616a107`) merged into `main` (`a4b388cc9f9b0c6c199743ffc0abee364f28d296`) on `Test_AI_CONTROLLER_me` via PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1), post-merge CI Run `42335012730` `success`. |
 | **8. Codex Live Execution** | `DEFERRED` | Weekly subscription limit reached; historical receipt `.superpowers/sdd/2026-10-03-phase-12/live-final-receipt.json` preserved. |
-| **9. Container Runtime Qualification** | `CONTAINER_LIVE_VERIFIED` | Docker Desktop 4.98.0 / Engine 29.9.2 & WSL2 6.18.54.1 live verified. Built reproducible image `aipc-verify:py313-v1`. All 9 Stage 4 isolation checks PASS. Stage 5 live E2E with real `agy.exe 1.5.3` + real container verification PASS (`refs/tags/aipc/docker-e2e/phase-01/pass`). |
+| **9. Container Runtime Qualification (Host-Specific Live vs. Offline CI)** | `CONTAINER_LIVE_VERIFIED` *(Host-Specific)* / `OFFLINE_VERIFIED` *(GitHub Actions CI)* | **Local Host Live Evidence**: Qualified on personal Windows PC (Docker Desktop 4.98.0 / Engine 29.9.2 & WSL2 Kernel 6.18.54.1) with digest-pinned image `aipc-verify:py313-v1`. All 9 Stage 4 checks + read-only `/workspace:ro` + worktree `.git` pointer masking `PASS`. Stage 5 live E2E with `agy.exe 1.5.3` + real container verification `PASS` (`refs/tags/aipc/docker-e2e/phase-01/pass`).<br>**GitHub Actions CI**: Executes offline unit/contract/integration tests on `ubuntu-latest` (Python 3.12 & 3.13); live Docker smoke test skips cleanly when `aipc-verify:py313-v1` is not pre-built on the runner. |
 
 ---
 
-## Live Antigravity Execution Audit Trail (Sections 7, 8, 9, 10)
+## Live Antigravity & Docker Execution Audit Trail (Sections 7–11)
 
 ### Section 7 — Discovery & Security Qualification
-- Host path: `C:\Users\Administrator\AppData\Local\agy\bin\agy.exe` (v1.5.2)
+- Binary discovery: `find_agy_executable()` (`v1.5.2` / `v1.5.3`).
 - Auth: Reuses personal OAuth session (`~/.gemini/antigravity`), zero API keys, zero Vertex billing.
 - Security Qualification: `QUALIFIED_FILESYSTEM_ONLY` (`filesystem_write: AVAILABLE`, `shell: BLOCKED`, `git: BLOCKED`, `network: BLOCKED`, `approval_events: BLOCKED`).
 - Headless Smoke: `agy -p "Respond ONLY with pong" --output-format json` (exit 0).
 
 ### Section 8 — Real Coding Test via AIPC (`live-agy-coding`)
-- Command: `$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe run_live_sec8_sec9.py`
-- Model: `gemini-3.8-flash-medium`
-- Duration: `31,829 ms`
-- Tokens: `45,424` input, `3,290` output, `0` cached.
+- Model: `gemini-3.8-flash-medium` | Duration: `31,829 ms` | Tokens: `45,424` input, `3,290` output.
 - Session / Turn ID: `agy-77b32231-6d7f-475c-a8dc-7a086ddc3be0` / `f432d5bc-26a1-4acb-bf37-4ad9e2b1909a`
-- Review Verdict: `PASS`, Gate Verdict: `PASS`
-- Checkpoint: `refs/tags/aipc/live-agy-coding/phase-01/pass`
-- Receipt: `scratch/live_sec8_sec9/sec8_summary.json`
+- Review Verdict: `PASS`, Gate Verdict: `PASS`, Checkpoint: `refs/tags/aipc/live-agy-coding/phase-01/pass`.
 
 ### Section 9 — Live Quota Fallback Validation (`SIMULATED_CODEX_FAILURE_TO_LIVE_GEMINI`)
 - Sequence: `codex-worker` (failed pre-start with `QUOTA_EXHAUSTED`, `effects=NONE`) -> `RecoveryManager` verified clean attempt worktree -> `AgentRouter` dispatched `gemini-antigravity` via `agy.exe` -> `PASS`.
-- Model: `gemini-3.8-flash-medium`
-- Duration: `40,884 ms`
-- Tokens: `53,483` input, `3,758` output, `0` cached.
+- Model: `gemini-3.8-flash-medium` | Duration: `40,884 ms` | Tokens: `53,483` input, `3,758` output.
 - Session / Turn ID: `agy-fa7d6303-45fe-4351-b1dc-fbcc549bbc41` / `fb18aabf-4ba5-44a3-a4cd-17b3a98a749b`
-- Review Verdict: `PASS`, Gate Verdict: `PASS`
-- Checkpoint: `refs/tags/aipc/live-agy-fallback/phase-01/pass`
-- Receipt: `scratch/live_sec8_sec9/sec9_summary.json`
+- Review Verdict: `PASS`, Gate Verdict: `PASS`, Checkpoint: `refs/tags/aipc/live-agy-fallback/phase-01/pass`.
 
 ### Section 10 — Real Portfolio Project Live Enhancement (`Test_AI_CONTROLLER_me`)
 - Target Repository: `H:\000ProjectCode\Test_AI_CONTROLLER_me`
-- Branch: `feature/antigravity-live-enhancement` (isolated attempt worktree)
-- Model: `gemini-3.8-flash-medium`
-- Duration: `50,185 ms`
-- Tokens: `90,722` input, `4,944` output, `0` cached.
-- Session / Turn ID: `agy-ac1ab09c-c8ae-4112-9761-fc24bf5a79ed` / `20c1f486-dafe-4f89-8964-a79bbfad3c6f`
-- Files Changed: `index.html` (added `#aipc-live-badge` & back-to-top link), `tests/test_website.py` (added `test_antigravity_live_enhancement`)
-- Test Results: `12/12 passed` in pytest
-- Review Verdict: `PASS`, Gate Verdict: `PASS`
-- Attempt Commit SHA: `01940359dd181e75b426462b93aa61d5157cef84` merged into `feature/antigravity-live-enhancement`
-- Main Branch Protection: `main` remained untouched at `5e65e6fe5f54397155b01a9611aa6e58597dba07`
-- Checkpoint: `refs/tags/aipc/k-tritod-portfolio-sec10/phase-web-06/pass`
-- Receipt: `scratch/live_sec8_sec9/sec10_summary.json`
-
----
-
-## Current Work
-Completed Attempt 06 — Experimental Release, Container Qualification & Continuity Validation:
-1. **Stage 1 & Stage 3 (Read-Only Repository Audit & Container Discovery)**:
-   - Verified `master` untouched at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833` and `Test_AI_CONTROLLER_me` `main` untouched at `5e65e6fe5f54397155b01a9611aa6e58597dba07`.
-   - Read-only host container discovery found Docker CLI v28.0.4 (`docker.exe`), no Podman, Docker Linux engine daemon stopped (`open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`), and WSL2 kernel missing (`wsl --update` required). Classified host runtime as `CONTAINER_BLOCKED` without installing any software.
-2. **Stage 4 (Container Verification Runner Hardening)**:
-   - Hardened `_run_container_verification()` in `src/aipc/adapters/gemini/antigravity_transport.py`:
-     - Normalizes Windows host Python executable paths (`python.exe`, `H:\...\python.exe`) to `"python3"` inside the Linux container.
-     - Enforces `--network none`, `--read-only`, `--tmpfs /tmp:rw,noexec,nosuid,size=64m`, `--user 65534:65534`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, `--memory 512m`.
-     - Mounts `/workspace/.git:ro` read-only when `.git` exists in the workspace.
-3. **Stage 7 (Portfolio Repository Hygiene & PR)**:
-   - Removed transient `.aipc_test.log` from `feature/antigravity-live-enhancement` on `Test_AI_CONTROLLER_me`, added `.aipc_test.log` to `.gitignore`, verified `12 passed` in `tests/test_website.py`, pushed `214ff8b8f2ea4da9834e80addc11990ad616a107`, and opened PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1) without merging.
-4. **Stage 8, 9 & 13 (Operational MVP Release Review, Branch Protection & Merge Recommendations)**:
-   - Authored `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md` covering Release Identity, Operational Readiness Table, Container Discovery & Installation Plan, Release Safety, Codex Return Handoff, Branch Protection Assessment, and Explicit Merge Recommendations (`CONDITIONAL GO — EXPERIMENTAL MERGE`, `GO — SUPERVISED OPERATION`, `NO-GO — UNATTENDED PRODUCTION`).
-
-## Tests
-- `tests/gemini/test_antigravity_transport.py`: 31 passed (including container runner hardening with `python3` normalization, `--read-only`, `--tmpfs`, `--user 65534:65534`, `/workspace:ro`, worktree `.git` pointer protection, timeout killer `docker rm -f`, and live Docker security qualification).
-- `tests/integration/test_cli.py`: 4 passed.
-- `tests/routing/test_router.py`: 7 passed.
-- `Test_AI_CONTROLLER_me/tests/test_website.py`: 12 passed.
-- Code quality & formatting: `ruff check .` (0 errors), `ruff format --check .` (clean), `git diff --check` (clean).
-
-## Required Fixes / Remaining Work
-Awaiting Controller independent review and human Commander decision on Experimental MVP PR merge. Worker does NOT self-advance to PASS.
-
-## Warnings / Known Issues
-- Host container runtime is `CONTAINER_BLOCKED` until human Commander runs `wsl --update` and starts Docker Desktop.
-- Live Codex execution and live Codex-to-Gemini handoff remain `DEFERRED` until weekly Codex subscription quota resets.
-
-## Recovery Notes
-Branch `validation/operational-readiness` is clean, tested, and backed by GitHub Actions CI (`ubuntu-latest` Python 3.12 & 3.13). `master` remains untouched at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`.
-
-## Next Action
-Controller review of Attempt 06, `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md`, AIPC Pull Request (`validation/operational-readiness` -> `master`), and Portfolio Pull Request (`feature/antigravity-live-enhancement` -> `main`).
-
-## Timestamp
-2026-11-07T10:08:00+07:00
+- Branch: `feature/antigravity-live-enhancement` (`214ff8b8f2ea4da9834e80addc11990ad616a107`) merged into `main` (`a4b388cc9f9b0c6c199743ffc0abee364f28d296`) via PR [#1](https://github.com/tritod-k/Test_AI_CONTROLLER_me/pull/1).
+- Test Results: `12/12 passed` in pytest; GitHub Actions CI Run `42335012730` `success`.
 
 ### Section 11 — Real Docker Container Qualification & End-to-End Audit Trail (Stages 1–6)
-- **Branch**: `validation/docker-container-qualification`
-- **Host Docker Engine**: Docker Desktop 4.98.0 (245422), Engine 29.9.2, WSL2 6.18.54.1 (`desktop-linux` context). Configured `"UseResourceSaver": false` to eliminate idle VM pauses.
+- **Branch**: `validation/docker-container-qualification` (PR [#2](https://github.com/tritod-k/AI-Project-Controller/pull/2))
+- **Host Docker Engine (Host-Specific Qualification)**: Docker Desktop 4.98.0 (245422), Engine 29.9.2, WSL2 6.18.54.1 (`desktop-linux` context). Configured `"UseResourceSaver": false` to eliminate idle VM pauses.
 - **Stage 2 Beginner Validation**: `hello-world` (exit 0), `python:3.13-slim` (Python 3.13.18, exit 0), Python one-liner (`PYTHON_OK 3.13.18 Linux`), exit code propagation (`sys.exit(42)` -> 42), zero leftover containers.
 - **Stage 3 Verification Image (`aipc-verify:py313-v1`) & Mount Security Hardening**:
-  - Created `docker/Dockerfile.verify` pinned by SHA-256 digest `python:3.13-slim@sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc` with `pytest==8.3.5`, user `65534:65534`, workdir `/workspace`. Tested offline execution with `--network none` -> `pytest 8.3.5` (exit 0).
+  - Created `docker/Dockerfile.verify` pinned by SHA-256 digest `python:3.13-slim@sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc` with `pytest==8.3.5`, user `65534:65534`, workdir `/workspace`. Verified `--no-cache` build and offline execution with `--network none` -> `pytest 8.3.5` (exit 0).
   - Hardened `/workspace:ro` read-only mount with isolated `/workspace-out:rw` output scratch dir.
   - Git worktree pointer protection: When `workspace/.git` is a git worktree pointer file, masked with an empty read-only file at `/workspace/.git:ro` preventing container leak of host repository path.
   - Zero private host paths: Resolved dynamically via `_resolve_docker_executable()` and verified via `check_docker()` in `doctor.py`. Zero `Administrator` occurrences in `src/`, `tests/`, and `docker/`.
   - Host workspace mutation guard: `_hash_workspace_files(workspace)` checked before and after container execution.
-- **Stage 4 Security Qualification (9/9 PASS)**:
+- **Stage 4 Security Qualification (9/9 + Read-Only Source & Worktree Pointer Checks PASS)**:
   - 4A (Authorized execution): `passed=True`, `summary.passed=1`.
-  - 4B (External filesystem access denial): Host `H:\000ProjectCode\...` and `C:\Users\Administrator` raise `FileNotFoundError`; host `~/.gemini/antigravity` OAuth credentials inaccessible.
-  - 4C (Read-only root filesystem): Writing `/etc/exploit` raises `OSError: [Errno 30] Read-only file system` (`--read-only`); `/tmp` is writable tmpfs.
+  - 4B (External filesystem access denial): Host folders and OAuth credentials `~/.gemini/antigravity` raise `FileNotFoundError` inside container.
+  - 4C (Read-only root & workspace filesystem): Writing `/etc/exploit` or `/workspace/src_file.py` raises `OSError: [Errno 30] Read-only file system` (`--read-only` + `-v <ws>:/workspace:ro`); `/tmp` and `/workspace-out` are writable.
   - 4D (Network isolation): Outbound connection to `1.1.1.1:80` raises `OSError: [Errno 101] Network is unreachable` (`--network none`).
   - 4E (Non-root execution & privilege drop): `os.getuid() == 65534`, `os.setuid(0)` raises `PermissionError` (`--user 65534:65534`, `--cap-drop ALL`, `--security-opt no-new-privileges`).
-  - 4F (Protection of Git metadata): Writing `/workspace/.git/HEAD` raises `OSError: [Errno 30] Read-only file system` (`/workspace/.git:ro`); host `.git` untouched.
+  - 4F (Protection of Git metadata & worktree `.git` pointer): Writing `/workspace/.git/HEAD` or `/workspace/.git` raises `OSError: [Errno 30] Read-only file system`, and worktree `gitdir:` pointer content is masked as empty inside the container.
   - 4G (Memory & process limits): `/sys/fs/cgroup/memory.max == 536870912` (512 MiB), `/sys/fs/cgroup/pids.max == 64`.
   - 4H (Container timeout & cleanup): 15-second hang with 2-second timeout returned `passed=False` (`TIMEOUT`), container killed and removed cleanly via `docker rm -f`, `docker ps -a` confirmed 0 leftover containers.
   - 4I (Failed verification prevents Phase Gate PASS): Failing test returns `passed=False`, creates zero Git commit, and prevents Phase Gate `PASS`.
 - **Stage 5 Live End-to-End Execution**:
   - Dispatched `agy.exe 1.5.3` (`gemini-3.8-flash-medium`) to create `index.html` with `<!DOCTYPE html><html><body><h1>AIPC Docker Verified</h1></body></html>`.
   - Independent Docker container `aipc-verify:py313-v1` executed `pytest` on attempt worktree (`exit_code=0`, `1 passed in 0.05s`).
-  - Reviewer & PhaseGate returned `PASS`.
-  - Checkpoint `refs/tags/aipc/docker-e2e/phase-01/pass` created and state marked `COMPLETED` / `PASS`.
-  - `RecoveryManager.inspect` confirmed clean state (`NO_RECOVERY_NEEDED`).
+  - Reviewer & PhaseGate returned `PASS`; checkpoint `refs/tags/aipc/docker-e2e/phase-01/pass` created and `RecoveryManager.inspect` confirmed `NO_RECOVERY_NEEDED`.
 - **Global Policy Safety**: `verification_isolation="blocked"` remains the global default in `GeminiAdapterConfig`.
+
+---
+
+## Current Work
+Completed Attempt 08 — Final PR #2 Documentation Alignment & Experimental / Supervised Merge Preparation:
+1. Corrected all historical and current Git references in `CURRENT_STATE.md` and `docs/OPERATIONAL_MVP_RELEASE_REVIEW.md` (`master` at `9a74822d50dad88e54590e4904af5f56dfd329c1`, PR #2 source branch `validation/docker-container-qualification`).
+2. Explicitly distinguished **host-specific local Docker live verification (`CONTAINER_LIVE_VERIFIED`)** from **offline GitHub Actions CI verification (`OFFLINE_VERIFIED`)**.
+3. Confirmed global default `verification_isolation="blocked"`, zero unsafe host verification opt-ins, and `UNATTENDED_PRODUCTION = NO-GO`.
+
+## Tests
+- **Local `.venv` Suites**:
+  - `tests/gemini/test_antigravity_transport.py`: `31 passed` (unit + contract + host live Docker security qualification).
+  - `tests/integration/test_cli.py`: `4 passed`.
+  - `tests/routing/test_router.py`: `7 passed`.
+  - `ruff check .` & `ruff format --check .`: `0 errors`, clean.
+- **GitHub Actions CI (`ubuntu-latest`, Python 3.12 & 3.13)**:
+  - Runs offline unit, contract, and integration suites automatically on every push and PR; live Docker smoke test is skipped unless `aipc-verify:py313-v1` is built on the runner.
+
+## Required Fixes / Remaining Work
+- None for Experimental / Supervised Release.
+- Full live Codex-to-Gemini handoff (`FULL_LIVE_CODEX_TO_GEMINI_HANDOFF_DEFERRED`) remains deferred until weekly Codex subscription quota resets.
+
+## Warnings / Known Issues
+- `CONTAINER_LIVE_VERIFIED` requires a running Docker Desktop / Linux Engine daemon and local `aipc-verify:py313-v1` image on the host machine; if Docker is stopped, `verification_isolation="container"` fails closed (`BLOCKED`).
+- Live Codex execution and live Codex-to-Gemini handoff remain `DEFERRED` due to Codex weekly quota exhaustion.
+- Unattended production execution remains `NO-GO`.
+
+## Recovery Notes
+- Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`) and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`) are preserved intact.
+
+## Next Action
+Merge PR [#2](https://github.com/tritod-k/AI-Project-Controller/pull/2) into `master` via Merge Commit as authorized by Commander, verify post-merge CI on `master`, and wait for Codex weekly quota reset for bounded live Codex-to-Gemini handoff testing.
+
+## Timestamp
+2026-11-08T07:55:00+07:00
