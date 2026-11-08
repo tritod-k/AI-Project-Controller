@@ -13,7 +13,7 @@ Phase 23 — Operational CLI & Multi-Phase Live Validation
 AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 02 (Independent Review Fixes: Git sync failure handling, acceptance verification, Docker qualification reporting)
+Attempt 02 (Final Independent Review Corrections: Acceptance rules documentation, accurate Reviewer claims, deterministic tests)
 
 ## Phase Gate
 PENDING
@@ -25,7 +25,7 @@ PENDING
 `feature/operational-cli-live-runner`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-`8c1d08b12da3e4af76e4bbf91366d7ad34727840` (AIPC Phase 23 attempt 02 - Fix Git sync failure handling, acceptance verification, and Docker qualification reporting).
+`5070baeec46e4b7bd8c6ad6ca7f1ffa5efff1845` (AIPC Phase 23 attempt 02 - Fix acceptance rules documentation, accurate reviewer claims, and deterministic tests).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -154,29 +154,35 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
    - **Priority 1 (Git Fast-Forward Failure Handling)**: Replaced fragile merge call with `sync_primary_to_stable()` enforcing clean tree check, ancestor validation, `--ff-only`, stat cache refresh (`update-index -q --refresh`), and HEAD SHA verification. Returns `SYNC_EXIT_CODE = 3` and reports `outcome="RECONCILIATION_REQUIRED"` on failure, preserving Phase Gate PASS and checkpoint tags without data loss.
    - **Priority 2 (Independent Acceptance Verification)**: Added `load_acceptance_rules()`, `--acceptance-rules`, and `--require-explicit-acceptance` enforcing that operator-defined rules reside outside the repository/worktree roots. Outputs `_acceptance_report` distinguishing `EXPLICIT_CRITERION_RULES` from `GENERIC_TEST_EXECUTION_ONLY`. Added tests proving missing functionality cannot receive a misleading acceptance PASS.
    - **Priority 3 (Accurate Docker Qualification Reporting)**: Added `classify_container_readiness()` accurately distinguishing `CONTAINER_READY`, `CONTAINER_LIVE_VERIFIED`, `CONTAINER_BLOCKED`, and `CONTAINER_FAILED`, with `live_verification_rerun: false`.
+7. **Final Review Corrections (Correction A & B)**:
+   - **Correction A (Acceptance Rules Documentation & Guide Validation)**: Corrected `docs/OPERATIONAL_CLI_GUIDE.md` Section 4.3 with valid YAML schema matching `load_acceptance_rules()` (`schema_version: "1.0"`, `phases` mapping, phase ID keys, valid `CriterionRule` fields). Removed unsupported `target_test`. Added `test_acceptance_rules_guide_example_loads_successfully` verifying that the exact guide YAML example parses cleanly.
+   - **Correction B (Accurate Acceptance Reporting & Deterministic Reviewer Tests)**: Refined `_acceptance_report()` to report `explicit_rules_evaluated`, `verification_scope`, and `semantic_limitation` without overstating independence. Explicitly documented that `file_changed` verifies Git modifications (not semantic functional correctness) and `tests` verifies suite pass counts (not named test isolation). Added 5 deterministic Reviewer tests in `tests/review/test_reviewer.py` proving: (1) missing/unmodified files prevent Phase Gate PASS, (2) missing artifacts do not PASS, (3) failed tests prevent Reviewer PASS, (4) generic passing tests alone do not establish functional completeness without explicit criterion evaluation, and (5) valid explicit rules are evaluated by the canonical Reviewer. Documented semantic acceptance limitations and proposed bounded acceptance test harness.
 
 ## Tests
 - **Local `.venv` Suites**:
-  - `tests/integration/test_cli.py`: `20 passed` (10 baseline Stage 5 tests + 10 Attempt 02 regression tests covering sync, acceptance verification, and Docker readiness classification).
-  - `tests/e2e/test_full_mock_e2e.py`: `3 passed` (full mock E2E and CLI lifecycle compatibility).
+  - `tests/review/test_reviewer.py`: `45 passed` (including 5 new Correction B deterministic tests).
+  - `tests/integration/test_cli.py`: `21 passed` (including `test_acceptance_rules_guide_example_loads_successfully`).
   - `tests/gemini/test_antigravity_transport.py`: `31 passed` (unit + contract + host live Docker security qualification).
-  - `tests/routing/test_router.py`: `7 passed`.
-  - `ruff check src/ tests/` & `ruff format --check src/ tests/`: `0 errors`, clean.
+  - `tests/routing/test_router.py`: `34 passed`.
+  - `tests/controller/test_contracts.py`: `15 passed`.
+  - `tests/contract/`: `98 passed`.
+  - `ruff check src/ tests/ docs/` & `ruff format --check src/ tests/ docs/`: `0 errors`, clean (`283 files already formatted`).
 
 ## Required Fixes / Remaining Work
-- Awaiting Commander / Phase Gate review of Phase 23 PR #3 (`feature/operational-cli-live-runner` -> `master`).
+- Awaiting Commander / Phase Gate review and final merge authorization of Phase 23 PR #3 (`feature/operational-cli-live-runner` -> `master`).
 - Full live Codex-to-Gemini handoff (`FULL_LIVE_CODEX_TO_GEMINI_HANDOFF_DEFERRED`) remains deferred until weekly Codex subscription quota resets.
 
 ## Warnings / Known Issues
 - `CONTAINER_LIVE_VERIFIED` requires a running Docker Desktop / Linux Engine daemon and local `aipc-verify:py313-v1` image on the host machine; if Docker is stopped, `verification_isolation="container"` fails closed (`BLOCKED`).
 - Live Codex execution and live Codex-to-Gemini handoff remain `DEFERRED` due to Codex weekly quota exhaustion.
 - Unattended production execution remains `NO-GO`.
+- Semantic code acceptance is bounded by structural verification (file modifications, artifact collections, aggregate test execution); full per-criterion behavioral isolation is a documented future consideration.
 
 ## Recovery Notes
 - Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`0c4e9466f0a31330637565ebdef204a184cd44e0`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`) are preserved intact.
 
 ## Next Action
-Review Phase 23 Pull Request #3 (`feature/operational-cli-live-runner` targeting `master`).
+Review updated Phase 23 Pull Request #3 (`feature/operational-cli-live-runner` targeting `master`).
 
 ## Timestamp
-2026-11-08T14:48:00+07:00
+2026-11-08T15:23:00+07:00

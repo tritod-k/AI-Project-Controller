@@ -754,6 +754,52 @@ def test_acceptance_rules_inside_repo_rejected(tmp_path: Path) -> None:
     assert "must live outside the repository" in str(rep["reason"])
 
 
+def test_acceptance_rules_guide_example_loads_successfully(tmp_path: Path) -> None:
+    """Correction A: Exact YAML example from OPERATIONAL_CLI_GUIDE.md loads successfully."""
+    import re
+
+    from aipc.cli import _acceptance_report
+
+    guide_path = Path(__file__).resolve().parents[2] / "docs" / "OPERATIONAL_CLI_GUIDE.md"
+    assert guide_path.is_file(), f"Guide file {guide_path} not found"
+    guide_text = guide_path.read_text(encoding="utf-8")
+
+    # Extract the YAML block under "Example external `acceptance.yaml`:"
+    pattern = (
+        r"Example external `acceptance\.yaml`:\s*```yaml\s+"
+        r"(schema_version:\s*\"1\.0\"[\s\S]*?)```"
+    )
+    match = re.search(pattern, guide_text)
+    assert match is not None, "Failed to find valid YAML example in OPERATIONAL_CLI_GUIDE.md"
+    yaml_snippet = match.group(1)
+
+    repo_dir, proj_yaml = _create_disposable_project(tmp_path / "app_repo")
+    rules_file = tmp_path / "extracted_guide_rules.yaml"
+    rules_file.write_text(yaml_snippet, encoding="utf-8")
+
+    project = load_project(proj_yaml)
+    phase_01 = next(p for p in project.phases if p.id == "01")
+    rules, mode = load_acceptance_rules(str(rules_file), phase_01, repo_dir, tmp_path / "worktrees")
+
+    assert mode == "EXPLICIT_CRITERION_RULES"
+    assert len(rules) == 1
+    rule = rules[0]
+    assert rule.criterion_id == "AC-01"
+    assert rule.kind == "tests"
+    assert rule.minimum_passed == 1
+    assert rule.target is None
+
+    # Verify accurate _acceptance_report terminology
+    report_explicit = _acceptance_report("EXPLICIT_CRITERION_RULES", None)
+    assert report_explicit["explicit_rules_evaluated"] is True
+    assert report_explicit["verification_scope"] == "OBJECTIVE_EVIDENCE_EVALUATION"
+    assert "semantic_limitation" in report_explicit
+
+    report_generic = _acceptance_report("GENERIC_TEST_EXECUTION_ONLY", None)
+    assert report_generic["explicit_rules_evaluated"] is False
+    assert report_generic["verification_scope"] == "AGGREGATE_TEST_SUITE_ONLY"
+
+
 def test_docker_readiness_classification_distinguishes_all_states(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

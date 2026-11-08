@@ -434,14 +434,26 @@ def _acceptance_report(mode: str, review) -> dict[str, object]:
             {"criterion_id": c.criterion_id, "status": str(c.status), "notes": c.notes}
             for c in review.criteria
         ]
+    explicit = mode == "EXPLICIT_CRITERION_RULES"
     return {
         "mode": mode,
-        "criteria_independently_verified": mode == "EXPLICIT_CRITERION_RULES",
+        "explicit_rules_evaluated": explicit,
+        "verification_scope": (
+            "OBJECTIVE_EVIDENCE_EVALUATION" if explicit else "AGGREGATE_TEST_SUITE_ONLY"
+        ),
         "note": (
-            "Generic rule: verification suite passed; individual criteria are NOT "
-            "independently proven. Supply --acceptance-rules for criterion-specific checks."
-            if mode == "GENERIC_TEST_EXECUTION_ONLY"
-            else "Operator-owned criterion rules evaluated by the canonical Reviewer."
+            "Operator-configured criterion rules evaluated by the canonical Reviewer against "
+            "objective evidence (tests pass counts, Git modifications, or collected artifacts). "
+            "Note: file_changed verifies Git diff changes, not semantic function correctness; "
+            "test rules verify aggregate suite pass counts, not named individual tests."
+            if explicit
+            else "Generic suite check: verification suite executed and passed; individual "
+            "criteria are not separately evaluated against distinct evidence. Supply external "
+            "--acceptance-rules for explicit per-criterion rules."
+        ),
+        "semantic_limitation": (
+            "Objective structural evidence verified; isolated behavioral acceptance requires "
+            "a separate trusted acceptance test harness."
         ),
         "criteria": criteria,
     }

@@ -189,14 +189,49 @@ To prevent coding agents from altering or weakening their own verification crite
 
 Example external `acceptance.yaml`:
 ```yaml
-rules:
-  - criterion_id: "AC-01"
-    kind: "tests"
-    minimum_passed: 1
-    target_test: "tests/test_calculator.py::test_add"
+schema_version: "1.0"
+phases:
+  "01":
+    - criterion_id: "AC-01"
+      kind: "tests"
+      minimum_passed: 1
 ```
 
+Or for multi-criterion phases requiring specific structural deliverables:
+```yaml
+schema_version: "1.0"
+phases:
+  "01":
+    - criterion_id: "AC-01"
+      kind: "tests"
+      minimum_passed: 1
+  "02":
+    - criterion_id: "AC-02"
+      kind: "file_changed"
+      target: "calculator.py"
+  "03":
+    - criterion_id: "AC-03"
+      kind: "tests"
+      minimum_passed: 3
+```
+
+#### Supported Rule Kinds & Verification Scope
+The canonical Reviewer evaluates objective evidence against explicit criterion rules:
+1. **`kind: "tests"`**:
+   - Fields: `criterion_id`, `kind: "tests"`, `minimum_passed` (integer >= 1).
+   - Scope: Verifies aggregate parsed test suite observations (`tests.parsed.passed >= minimum_passed` and `failed == 0`).
+   - Limitation: Verifies overall test suite execution; it does **not** isolate or target individual named test functions (`target` must be omitted).
+2. **`kind: "file_changed"`**:
+   - Fields: `criterion_id`, `kind: "file_changed"`, `target: "<relative_path>"`.
+   - Scope: Verifies that the specified file path was declared and corroborated by a valid patch header in the retained Git diff.
+   - Limitation: Verifies the presence of the Git file modification; it does **not** prove semantic correctness of functions or algorithms inside the file.
+3. **`kind: "artifact"`**:
+   - Fields: `criterion_id`, `kind: "artifact"`, `target: "<evidence_id>"`.
+   - Scope: Verifies that the named artifact was successfully collected in the immutable evidence bundle.
+
 > **Security Guardrail**: Preflight Stage `2b_acceptance_rules` strictly rejects any rules file located inside the target repository root or inside attempt worktrees to guarantee tamper-proofing.
+>
+> **Semantic Acceptance Note**: Full criterion-specific behavioral verification (e.g. executing a separate trusted acceptance test harness outside the agent-writable worktree) is a bounded future enhancement. The current system evaluates objective structural evidence (retained diffs, artifact collections, aggregate test results) without making unsubstantiated semantic completeness claims.
 
 
 ---
