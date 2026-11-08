@@ -22,7 +22,12 @@ from aipc.normalization.validation import validate_agent_result
 from aipc.storage.json_store import _unique_object
 
 from .config import GeminiAdapterConfig
-from .doctor import antigravity_runtime_info, find_agy_executable, qualify_antigravity_runtime
+from .doctor import (
+    _resolve_docker_executable,
+    antigravity_runtime_info,
+    find_agy_executable,
+    qualify_antigravity_runtime,
+)
 from .errors import (
     GeminiAdapterError,
     GeminiProtocolError,
@@ -883,7 +888,8 @@ sys.addaudithook(audit_hook)
         command: tuple[str, ...],
     ) -> tuple[bool, TestSummary, str]:
         """Run verify_command inside a restricted OS container."""
-        runtime_bin = shutil.which(self.container_runtime)
+        runtime_bin = _resolve_docker_executable(self.container_runtime)
+
         if runtime_bin is None or not self.container_image:
             return (
                 False,
@@ -904,15 +910,40 @@ sys.addaudithook(audit_hook)
             ):
                 normalized_cmd[0] = "python3"
 
-        mount_args = ["-v", f"{ws_real}:/workspace:rw"]
+        if any("pytest" in arg for arg in normalized_cmd):
+            has_cache_opt = any(
+                arg in ("-o", "-p") or "cache_dir" in arg or "no:cacheprovider" in arg
+                for arg in normalized_cmd
+            )
+            if not has_cache_opt:
+                normalized_cmd.extend(["-o", "cache_dir=/tmp/.pytest_cache"])
+
+        safe_turn_id = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(turn_id))
+        out_dir = self.config.state_root / f"verify-out-{safe_turn_id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        mount_args = [
+            "-v",
+            f"{ws_real}:/workspace:ro",
+            "-v",
+            f"{out_dir.resolve()}:/workspace-out:rw",
+        ]
         git_path = workspace / ".git"
-        if git_path.exists():
+        if git_path.is_dir():
             mount_args.extend(["-v", f"{git_path.resolve()}:/workspace/.git:ro"])
+        elif git_path.is_file():
+            empty_git_file = self.config.state_root / "empty_git_pointer"
+            empty_git_file.write_text("", encoding="utf-8")
+            mount_args.extend(["-v", f"{empty_git_file.resolve()}:/workspace/.git:ro"])
+
+        container_name = f"aipc-verify-{safe_turn_id}"
 
         container_cmd = [
-            self.container_runtime,
+            runtime_bin,
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--network",
             "none",
             "--read-only",
@@ -931,6 +962,12 @@ sys.addaudithook(audit_hook)
             "-e",
             "HOME=/tmp",
             "-e",
+            "TMPDIR=/tmp",
+            "-e",
+            "TEMP=/tmp",
+            "-e",
+            "TMP=/tmp",
+            "-e",
             "PYTHONDONTWRITEBYTECODE=1",
             *mount_args,
             "-w",
@@ -948,6 +985,15 @@ sys.addaudithook(audit_hook)
                 timeout=self.config.operation_timeout,
             )
         except subprocess.TimeoutExpired:
+            try:
+                subprocess.run(
+                    [runtime_bin, "rm", "-f", container_name],
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+            except Exception:
+                pass
             return (
                 False,
                 TestSummary(total=1, passed=0, failed=1, skipped=0),
@@ -959,6 +1005,8 @@ sys.addaudithook(audit_hook)
                 TestSummary(total=1, passed=0, failed=1, skipped=0),
                 f"ERROR: Container execution failed: {exc}",
             )
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
 
         shutil.rmtree(workspace / ".pytest_cache", ignore_errors=True)
         for pycache in list(workspace.rglob("__pycache__")):
@@ -1061,6 +1109,7 @@ sys.addaudithook(audit_hook)
             return False
 
         if self.verify_command is not None:
+            pre_verify_hashes = _hash_workspace_files(workspace)
             if self.verification_isolation == "blocked":
                 log_text = (
                     "BLOCKED: Host execution of untrusted verification code is disabled by "
@@ -1090,6 +1139,13 @@ sys.addaudithook(audit_hook)
                 )
                 passed = False
                 summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+
+            post_verify_hashes = _hash_workspace_files(workspace)
+            if post_verify_hashes != pre_verify_hashes:
+                passed = False
+                summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+                err_msg = "Security violation: workspace files were mutated during verification"
+                log_text = f"{err_msg}\n{log_text}" if log_text else err_msg
 
             verify_log_path = self.config.state_root / f"verify-{turn_id}.log"
             verify_log_path.write_text(log_text, encoding="utf-8")
@@ -1170,13 +1226,17 @@ sys.addaudithook(audit_hook)
             elif event_type in ("tool_step", "step_update"):
                 step_obj = frame.get("step") or frame.get("step_update")
                 if isinstance(step_obj, dict):
-                    self._process_tool_step(
-                        step=step_obj,
-                        workspace=workspace,
-                        observations=observations,
-                        edited_paths=edited_paths,
-                        denial_reasons=denial_reasons,
-                    )
+                    step_type = step_obj.get("step_type")
+                    if step_type == "tool" or (
+                        step_type is None and ("tool" in step_obj or "tool_name" in step_obj)
+                    ):
+                        self._process_tool_step(
+                            step=step_obj,
+                            workspace=workspace,
+                            observations=observations,
+                            edited_paths=edited_paths,
+                            denial_reasons=denial_reasons,
+                        )
             elif event_type in ("text_delta", "message"):
                 pass
             elif event_type == "result":
@@ -1311,9 +1371,17 @@ sys.addaudithook(audit_hook)
                     f"prohibited Antigravity tool execution detected: {tool_name}"
                 )
             denial_reasons.append(f"unauthorized_tool:{tool_name}")
-            observations.append(
-                ToolObservation(tool_call_id=tool_id, kind="execute", status="failed", paths=())
+            existing_idx = next(
+                (i for i, o in enumerate(observations) if o.tool_call_id == tool_id),
+                None,
             )
+            unauth_obs = ToolObservation(
+                tool_call_id=tool_id, kind="execute", status="failed", paths=()
+            )
+            if existing_idx is not None:
+                observations[existing_idx] = unauth_obs
+            else:
+                observations.append(unauth_obs)
             return
 
         kind = "read"
@@ -1349,14 +1417,21 @@ sys.addaudithook(audit_hook)
                 paths = ()
 
         obs_status = "completed" if state == "DONE" else "failed"
-        observations.append(
-            ToolObservation(
-                tool_call_id=tool_id,
-                kind=kind,  # type: ignore[arg-type]
-                status=obs_status,  # type: ignore[arg-type]
-                paths=paths,
-            )
+        obs = ToolObservation(
+            tool_call_id=tool_id,
+            kind=kind,  # type: ignore[arg-type]
+            status=obs_status,  # type: ignore[arg-type]
+            paths=paths,
         )
+        existing_idx = next(
+            (i for i, o in enumerate(observations) if o.tool_call_id == tool_id),
+            None,
+        )
+        if existing_idx is not None:
+            if state == "DONE" or obs_status == "completed":
+                observations[existing_idx] = obs
+        else:
+            observations.append(obs)
 
     async def wait(self, session_id: str, turn_id: str) -> GeminiRawResult:
         state = self.turns.get((session_id, turn_id))

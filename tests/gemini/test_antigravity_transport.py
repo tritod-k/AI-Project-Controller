@@ -25,6 +25,8 @@ from aipc.adapters.gemini.antigravity_transport import (
     snapshot_build_and_hook_configs,
 )
 from aipc.adapters.gemini.doctor import (
+    _resolve_docker_executable,
+    check_docker,
     qualify_antigravity_runtime,
 )
 from aipc.adapters.gemini.errors import (
@@ -996,9 +998,11 @@ def test_container_verification_builds_restricted_os_isolated_command(
         ),
     )
     assert passed is True
-    assert captured_cmd[0] == "docker"
+    assert captured_cmd[0].lower().endswith(("docker", "docker.exe"))
     assert captured_cmd[1] == "run"
     assert "--rm" in captured_cmd
+    assert "--name" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--name") + 1] == "aipc-verify-turn-c-ok"
     assert "--network" in captured_cmd
     assert captured_cmd[captured_cmd.index("--network") + 1] == "none"
     assert "--read-only" in captured_cmd
@@ -1015,7 +1019,8 @@ def test_container_verification_builds_restricted_os_isolated_command(
     assert "-w" in captured_cmd
     assert captured_cmd[captured_cmd.index("-w") + 1] == "/workspace"
     cmd_str = " ".join(captured_cmd)
-    assert f"{ws.resolve()}:/workspace:rw" in cmd_str
+    assert f"{ws.resolve()}:/workspace:ro" in cmd_str
+    assert "/workspace-out:rw" in cmd_str
     assert f"{git_dir.resolve()}:/workspace/.git:ro" in cmd_str
     assert "python:3.13-slim" in captured_cmd
     image_idx = captured_cmd.index("python:3.13-slim")
@@ -1023,6 +1028,51 @@ def test_container_verification_builds_restricted_os_isolated_command(
     assert captured_cmd[image_idx + 2 :] == ["-m", "pytest", "-q", "-p", "no:cacheprovider"]
     assert ".gemini" not in cmd_str
     assert "OPENAI_API_KEY" not in cmd_str
+
+
+def test_container_verification_git_worktree_pointer_protection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When workspace/.git is a git worktree pointer file, mask it with an empty file."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    git_file = ws / ".git"
+    git_file.write_text("gitdir: /outside/repo/.git/worktrees/w1\n", encoding="utf-8")
+
+    captured_cmd: list[str] = []
+
+    def _mock_run(cmd, **kwargs):
+        nonlocal captured_cmd
+        captured_cmd = list(cmd)
+
+        class _Res:
+            returncode = 0
+            stdout = "1 passed in 0.05s\n"
+            stderr = ""
+
+        return _Res()
+
+    monkeypatch.setattr(shutil, "which", lambda r: f"/usr/bin/{r}")
+    monkeypatch.setattr(subprocess, "run", _mock_run)
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image="python:3.13-slim",
+        container_runtime="docker",
+    )
+    passed, summary, log_text = transport._run_container_verification(
+        turn_id="turn-worktree-pointer",
+        workspace=ws,
+        command=("python3", "-m", "pytest", "-q"),
+    )
+    assert passed is True
+    cmd_str = " ".join(captured_cmd)
+    assert f"{ws.resolve()}:/workspace:ro" in cmd_str
+    assert "/workspace-out:rw" in cmd_str
+    assert "/empty_git_pointer:/workspace/.git:ro" in cmd_str.replace("\\", "/")
+    assert "outside/repo" not in cmd_str
 
 
 def test_git_integrity_preserves_pre_existing_staged_files(tmp_path: Path) -> None:
@@ -1221,3 +1271,158 @@ def test_git_integrity_preserves_worktree_and_commit_identity(tmp_path: Path) ->
 
     log_author = _run_safe_git(["log", "-1", "--format=%an <%ae>"], ws, empty_hooks).stdout.strip()
     assert log_author == "Custom Dev <dev@example.com>"
+
+
+def test_container_verification_timeout_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When container verification times out, it forcefully kills and removes the container."""
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    calls: list[list[str]] = []
+
+    def _mock_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if "rm" in cmd:
+
+            class _RmRes:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _RmRes()
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    monkeypatch.setattr(shutil, "which", lambda r: f"/usr/bin/{r}")
+    monkeypatch.setattr(subprocess, "run", _mock_run)
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image="aipc-verify:py313-v1",
+        container_runtime="docker",
+    )
+    passed, summary, log_text = transport._run_container_verification(
+        turn_id="turn-timeout-check",
+        workspace=ws,
+        command=("python3", "-m", "pytest", "-q"),
+    )
+    assert passed is False
+    assert "TIMEOUT: Container verification timed out" in log_text
+    assert len(calls) == 2
+    assert calls[1][0].lower().endswith(("docker", "docker.exe"))
+    assert calls[1][1:] == ["rm", "-f", "aipc-verify-turn-timeout-check"]
+
+
+def test_container_verification_live_smoke(tmp_path: Path) -> None:
+    """Live Docker smoke test with aipc-verify:py313-v1 if engine and image are present."""
+    docker_bin = _resolve_docker_executable("docker")
+    if not docker_bin:
+        pytest.skip("Docker CLI not available")
+
+    inspect_res = subprocess.run(
+        [docker_bin, "image", "inspect", "aipc-verify:py313-v1"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if inspect_res.returncode != 0:
+        pytest.skip("aipc-verify:py313-v1 image not built locally")
+
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "test_smoke.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image="aipc-verify:py313-v1",
+        container_runtime="docker",
+    )
+    passed, summary, log_text = transport._run_container_verification(
+        turn_id="live-smoke",
+        workspace=ws,
+        command=("python3", "-m", "pytest", "-q"),
+    )
+    assert passed is True
+    assert summary.passed == 1
+    assert summary.failed == 0
+
+
+def test_container_verification_live_security(tmp_path: Path) -> None:
+    """Live Docker security: workspace read-only, git pointer protection, check_docker."""
+    docker_check = check_docker(runtime="docker", image="aipc-verify:py313-v1")
+    if not docker_check["qualified"]:
+        pytest.skip(f"Docker engine or aipc-verify:py313-v1 not qualified: {docker_check}")
+
+    assert docker_check["qualified"] is True
+    assert docker_check["server_version"] is not None
+
+    cfg = _make_config(tmp_path)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    # Pre-existing source file
+    src_file = ws / "src_file.py"
+    src_file.write_text("x = 42\n", encoding="utf-8")
+
+    # Git worktree pointer file simulating git worktree
+    git_file = ws / ".git"
+    git_file.write_text("gitdir: /host/private/secret/path/.git/worktrees/w1\n", encoding="utf-8")
+
+    # Test file that verifies:
+    # 1. /workspace/src_file.py cannot be modified (OSError: Read-only file system)
+    # 2. /workspace/.git is masked and cannot reveal host gitdir path
+    # 3. /workspace/.git cannot be written or unlinked (OSError: Read-only file system)
+    test_code = """import os
+import pytest
+
+def test_source_file_immutable():
+    with pytest.raises(OSError) as excinfo:
+        with open("/workspace/src_file.py", "w") as f:
+            f.write("malicious = True\\n")
+    assert "Read-only file system" in str(excinfo.value) or excinfo.value.errno == 30
+
+def test_git_pointer_file_masked_and_immutable():
+    # Reading .git gives empty mask, not the host path
+    with open("/workspace/.git", "r") as f:
+        content = f.read()
+    assert content == ""
+    assert "private" not in content
+
+    # Writing to .git raises OSError
+    with pytest.raises(OSError) as excinfo:
+        with open("/workspace/.git", "w") as f:
+            f.write("corrupted")
+    assert "Read-only file system" in str(excinfo.value) or excinfo.value.errno == 30
+
+    # Unlinking .git raises OSError
+    with pytest.raises(OSError) as excinfo:
+        os.unlink("/workspace/.git")
+    assert "Read-only file system" in str(excinfo.value) or excinfo.value.errno == 30
+"""
+    (ws / "test_sec.py").write_text(test_code, encoding="utf-8")
+
+    transport = AntigravityCliTransport(
+        cfg,
+        verification_isolation="container",
+        container_image="aipc-verify:py313-v1",
+        container_runtime="docker",
+    )
+    passed, summary, log_text = transport._run_container_verification(
+        turn_id="live-security",
+        workspace=ws,
+        command=("python3", "-m", "pytest", "-q"),
+    )
+    assert passed is True
+    assert summary.passed == 2
+    assert summary.failed == 0
+
+    # Verify on host: src_file.py was NOT modified
+    assert src_file.read_text(encoding="utf-8") == "x = 42\n"
+    # Verify on host: .git pointer file was NOT modified
+    expected_git = "gitdir: /host/private/secret/path/.git/worktrees/w1\n"
+    assert git_file.read_text(encoding="utf-8") == expected_git

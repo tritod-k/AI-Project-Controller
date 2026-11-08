@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2"})
+QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2", "1.5.3"})
 REQUIRED_AGY_FLAGS: tuple[str, ...] = (
     "--sandbox",
     "--mode",
@@ -46,6 +46,109 @@ def find_agy_executable() -> Path | None:
     if posix_candidate.is_file():
         return posix_candidate.resolve()
     return None
+
+
+def _resolve_docker_executable(runtime: str = "docker") -> str | None:
+    """Locate the container runtime executable without invoking it."""
+    which_path = shutil.which(runtime)
+    if which_path and Path(which_path).is_file():
+        return str(Path(which_path).resolve())
+    if os.name == "nt":
+        candidates: list[Path] = []
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            candidates.append(
+                Path(local_appdata)
+                / "Programs"
+                / "DockerDesktop"
+                / "resources"
+                / "bin"
+                / f"{runtime}.exe"
+            )
+        candidates.append(
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "DockerDesktop"
+            / "resources"
+            / "bin"
+            / f"{runtime}.exe"
+        )
+        prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        candidates.append(
+            Path(prog_files) / "Docker" / "Docker" / "resources" / "bin" / f"{runtime}.exe"
+        )
+        for c in candidates:
+            if c.is_file():
+                return str(c.resolve())
+    return None
+
+
+def check_docker(
+    runtime: str = "docker",
+    image: str = "aipc-verify:py313-v1",
+) -> dict[str, object]:
+    """Check container runtime CLI presence, daemon readiness, and verification image."""
+    exe = _resolve_docker_executable(runtime)
+    if exe is None:
+        return {
+            "cli_present": False,
+            "executable": None,
+            "daemon_ready": False,
+            "server_version": None,
+            "image_present": False,
+            "image_id": None,
+            "qualified": False,
+        }
+
+    daemon_ready = False
+    server_version: str | None = None
+    try:
+        info_res = subprocess.run(
+            [exe, "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if info_res.returncode == 0:
+            out = (info_res.stdout or "").strip()
+            if out:
+                daemon_ready = True
+                server_version = out
+    except (subprocess.TimeoutExpired, OSError):
+        daemon_ready = False
+
+    image_present = False
+    image_id: str | None = None
+    if daemon_ready and image:
+        try:
+            img_res = subprocess.run(
+                [exe, "image", "inspect", image, "--format", "{{.Id}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if img_res.returncode == 0:
+                img_out = (img_res.stdout or "").strip()
+                if img_out:
+                    image_present = True
+                    image_id = img_out
+        except (subprocess.TimeoutExpired, OSError):
+            image_present = False
+
+    qualified = bool(daemon_ready and image_present)
+    return {
+        "cli_present": True,
+        "executable": exe,
+        "daemon_ready": daemon_ready,
+        "server_version": server_version,
+        "image_present": image_present,
+        "image_id": image_id,
+        "qualified": qualified,
+    }
 
 
 def qualify_antigravity_runtime(
@@ -309,7 +412,9 @@ __all__ = [
     "AntigravityQualificationResult",
     "QUALIFIED_AGY_VERSIONS",
     "REQUIRED_AGY_FLAGS",
+    "_resolve_docker_executable",
     "antigravity_runtime_info",
+    "check_docker",
     "find_agy_executable",
     "qualify_antigravity_runtime",
     "runtime_info",
