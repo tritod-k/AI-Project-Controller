@@ -56,8 +56,13 @@ Key sections in the JSON output:
   - Confirms `agy.exe` (`v1.5.2` / `v1.5.3`) and your personal OAuth session (`~/.gemini/antigravity`) are active with zero API keys or extra billing.
 - **`docker`**:
   - `"available": true`
-  - `"qualification": "CONTAINER_LIVE_VERIFIED"`
-  - Confirms the Docker daemon is running and `aipc-verify:py313-v1` is present locally.
+  - `"qualification": "CONTAINER_LIVE_VERIFIED"` (or `"CONTAINER_READY"`)
+  - `"live_verification_rerun": false` (preserves historical host qualification evidence without claiming `--providers` re-executed live containers).
+  - Classification semantics:
+    - `CONTAINER_LIVE_VERIFIED`: Docker daemon running, verification image present, and host qualification audit trail recorded.
+    - `CONTAINER_READY`: Docker daemon running and verification image present (ready for isolated test execution).
+    - `CONTAINER_BLOCKED`: Docker daemon stopped or verification image not built.
+    - `CONTAINER_FAILED`: Container runtime verification failed.
 - **`codex`**:
   - `"current_live_status": "DEFERRED_QUOTA_LIMIT"` (while weekly subscription quota is exhausted).
 
@@ -168,6 +173,32 @@ To run subsequent dependent phases after Phase `01` achieves `PASS`:
   --container-image aipc-verify:py313-v1
 ```
 
+### Step 4.3 — Supplying Operator-Owned Acceptance Rules (Optional / Recommended)
+To prevent coding agents from altering or weakening their own verification criteria, acceptance rules can be loaded from an external file located **outside** the target repository:
+
+```powershell
+.\.venv\Scripts\python.exe -m aipc `
+  --project H:\path\to\PROJECT.yaml `
+  --run-phase 01 `
+  --provider gemini-antigravity `
+  --verification-isolation container `
+  --container-image aipc-verify:py313-v1 `
+  --acceptance-rules C:\safe_operator_rules\acceptance.yaml `
+  --require-explicit-acceptance
+```
+
+Example external `acceptance.yaml`:
+```yaml
+rules:
+  - criterion_id: "AC-01"
+    kind: "tests"
+    minimum_passed: 1
+    target_test: "tests/test_calculator.py::test_add"
+```
+
+> **Security Guardrail**: Preflight Stage `2b_acceptance_rules` strictly rejects any rules file located inside the target repository root or inside attempt worktrees to guarantee tamper-proofing.
+
+
 ---
 
 ## 5. How Docker Verification Isolation Works
@@ -206,6 +237,29 @@ Each `--run-phase` execution prints a structured JSON receipt containing:
 git -C H:\path\to\my_calculator_repo tag -l
 git -C H:\path\to\my_calculator_repo log --oneline
 ```
+
+### Safe Primary Git Workspace Synchronization & Reconciliation
+
+When a phase gate achieves `PASS`, AIPC safely fast-forwards the primary repository branch to the newly accepted stable checkpoint commit:
+
+1. **Preconditions Enforced**:
+   - Primary workspace must have a clean working tree (no uncommitted edits).
+   - Primary HEAD must not be detached.
+   - Stable commit must be an ancestor or direct descendant of the current primary branch.
+2. **Atomic Synchronization**:
+   - Executes `git merge --ff-only <stable_commit>` and `git update-index -q --refresh`.
+   - Confirms the final primary HEAD SHA matches the exact stable checkpoint.
+3. **Reconciliation Handling (`SYNC_EXIT_CODE = 3`)**:
+   - If the primary repository cannot be cleanly fast-forwarded (e.g. uncommitted operator edits exist, detached HEAD, or divergent branch):
+     - Controller returns exit code `3` (`SYNC_EXIT_CODE`).
+     - Output JSON reports `"outcome": "RECONCILIATION_REQUIRED"` and `"primary_sync": {"success": false, "reason": "...", "action_required": "reconcile_primary_branch_with_stable_checkpoint"}`.
+     - **Safety Invariant**: The Phase Gate `PASS` verdict, stable tag (`refs/tags/aipc/<project_id>/phase-<id>/pass`), and all controller state/evidence are **safely preserved**. No work is discarded.
+     - The operator can manually inspect and fast-forward the branch:
+       ```powershell
+       git -C H:\path\to\my_calculator_repo status
+       git -C H:\path\to\my_calculator_repo merge --ff-only refs/tags/aipc/<project_id>/phase-<id>/pass
+       ```
+
 
 ---
 

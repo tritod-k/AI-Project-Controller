@@ -13,7 +13,7 @@ Phase 23 — Operational CLI & Multi-Phase Live Validation
 AWAITING_REVIEW
 
 ## Current Attempt
-Attempt 01
+Attempt 02 (Independent Review Fixes: Git sync failure handling, acceptance verification, Docker qualification reporting)
 
 ## Phase Gate
 PENDING
@@ -25,7 +25,7 @@ PENDING
 `feature/operational-cli-live-runner`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-`0c4e9466f0a31330637565ebdef204a184cd44e0` (Merge pull request #2 from `tritod-k/validation/docker-container-qualification`, pre-Phase 23 commit baseline).
+`8c1d08b12da3e4af76e4bbf91366d7ad34727840` (AIPC Phase 23 attempt 02 - Fix Git sync failure handling, acceptance verification, and Docker qualification reporting).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -144,23 +144,27 @@ None — Awaiting review and approval of Phase 23 (`feature/operational-cli-live
 ---
 
 ## Current Work
-Completed Phase 23 Attempt 01 (`feature/operational-cli-live-runner`):
+Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner`):
 1. **Stage 1 & 2 (Live Provider CLI)**: Extended `src/aipc/cli.py` with `--run-phase`, `--provider`, `--verification-isolation` (default `"blocked"`), `--container-image`, `--container-runtime`, `--verify-command`, `--model`, `--timeout`, `--max-attempts`, `--auto-repair`, and `--preflight`, while preserving 100% backward compatibility with all existing CLI flags and `--providers` contracts.
 2. **Stage 3 (10-Stage Preflight Safety)**: Implemented `run_live_preflight()` verifying project definition validity, disjoint workspace/runtime roots, Git worktree cleanliness & phase dependency order, provider qualification, Antigravity OAuth session, Docker daemon readiness, verification image presence, container security configuration, approval requirements, and recovery state.
 3. **Stage 4 (Three-Phase Live Validation)**: Executed Phases 01, 02, and 03 consecutively via the official `aipc` CLI with live Gemini (`agy.exe 1.5.3`) and Docker container verification (`aipc-verify:py313-v1`), achieving `PASS` across all 3 phases and `COMPLETED` project status.
 4. **Stage 5 (Recovery & Failure Validation)**: Added deterministic CLI tests in `tests/integration/test_cli.py` verifying that failed tests prevent Phase Gate PASS, interrupted execution preserves recovery state, duplicate dispatch is idempotent, uncommitted user edits are preserved, invalid providers/blocked isolation fail closed, missing Docker images block execution, and completed phases are not accidentally replayed.
 5. **Stage 6 (Documentation)**: Created beginner-friendly `docs/OPERATIONAL_CLI_GUIDE.md` with verified PowerShell commands and updated `CURRENT_STATE.md`.
+6. **Attempt 02 Review Corrections (Priorities 1, 2, 3)**:
+   - **Priority 1 (Git Fast-Forward Failure Handling)**: Replaced fragile merge call with `sync_primary_to_stable()` enforcing clean tree check, ancestor validation, `--ff-only`, stat cache refresh (`update-index -q --refresh`), and HEAD SHA verification. Returns `SYNC_EXIT_CODE = 3` and reports `outcome="RECONCILIATION_REQUIRED"` on failure, preserving Phase Gate PASS and checkpoint tags without data loss.
+   - **Priority 2 (Independent Acceptance Verification)**: Added `load_acceptance_rules()`, `--acceptance-rules`, and `--require-explicit-acceptance` enforcing that operator-defined rules reside outside the repository/worktree roots. Outputs `_acceptance_report` distinguishing `EXPLICIT_CRITERION_RULES` from `GENERIC_TEST_EXECUTION_ONLY`. Added tests proving missing functionality cannot receive a misleading acceptance PASS.
+   - **Priority 3 (Accurate Docker Qualification Reporting)**: Added `classify_container_readiness()` accurately distinguishing `CONTAINER_READY`, `CONTAINER_LIVE_VERIFIED`, `CONTAINER_BLOCKED`, and `CONTAINER_FAILED`, with `live_verification_rerun: false`.
 
 ## Tests
 - **Local `.venv` Suites**:
-  - `tests/integration/test_cli.py`: `10 passed` (CLI contract, preflight safety, recovery, and failure validation).
+  - `tests/integration/test_cli.py`: `20 passed` (10 baseline Stage 5 tests + 10 Attempt 02 regression tests covering sync, acceptance verification, and Docker readiness classification).
   - `tests/e2e/test_full_mock_e2e.py`: `3 passed` (full mock E2E and CLI lifecycle compatibility).
   - `tests/gemini/test_antigravity_transport.py`: `31 passed` (unit + contract + host live Docker security qualification).
   - `tests/routing/test_router.py`: `7 passed`.
   - `ruff check src/ tests/` & `ruff format --check src/ tests/`: `0 errors`, clean.
 
 ## Required Fixes / Remaining Work
-- Awaiting Commander / Phase Gate review of Phase 23 PR (`feature/operational-cli-live-runner` -> `master`).
+- Awaiting Commander / Phase Gate review of Phase 23 PR #3 (`feature/operational-cli-live-runner` -> `master`).
 - Full live Codex-to-Gemini handoff (`FULL_LIVE_CODEX_TO_GEMINI_HANDOFF_DEFERRED`) remains deferred until weekly Codex subscription quota resets.
 
 ## Warnings / Known Issues
@@ -172,7 +176,7 @@ Completed Phase 23 Attempt 01 (`feature/operational-cli-live-runner`):
 - Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`0c4e9466f0a31330637565ebdef204a184cd44e0`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`) are preserved intact.
 
 ## Next Action
-Review Phase 23 Pull Request (`feature/operational-cli-live-runner` targeting `master`).
+Review Phase 23 Pull Request #3 (`feature/operational-cli-live-runner` targeting `master`).
 
 ## Timestamp
-2026-11-08T12:38:30+07:00
+2026-11-08T14:48:00+07:00

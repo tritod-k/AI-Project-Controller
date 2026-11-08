@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -185,42 +186,335 @@ def _resolve_runtime_paths(
     )
 
 
-def _safe_git_merge_ff(repo_root: Path, commit: str) -> None:
-    """Fast-forward primary checkout to approved stable commit with clean Git config."""
-    import os
+SYNC_EXIT_CODE = 3
+"""CLI exit code: Controller recorded PASS but the primary checkout is not synchronized."""
 
+_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def _git_sync_run(repo_root: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run one hardened Git command for primary synchronization (hooks/filters neutralized)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_CONFIG_SYSTEM=os.devnull,
         GIT_TERMINAL_PROMPT="0",
     )
-    base_cmd = [
-        "git",
-        "--no-pager",
-        "-c",
-        "core.hooksPath=" + os.devnull,
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.untrackedCache=false",
-        "-c",
-        "core.autocrlf=false",
-        "-C",
-        str(repo_root),
-    ]
-    subprocess.run(
-        [*base_cmd, "merge", "--ff-only", commit],
-        check=False,
+    return subprocess.run(
+        [
+            "git",
+            "--no-pager",
+            "-c",
+            "core.hooksPath=" + os.devnull,
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.autocrlf=false",
+            "-C",
+            str(repo_root),
+            *args,
+        ],
         capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
         env=env,
     )
-    subprocess.run(
-        [*base_cmd, "update-index", "-q", "--refresh"],
-        check=False,
-        capture_output=True,
-        env=env,
-    )
+
+
+def sync_primary_to_stable(repo_root: Path, commit: str) -> dict[str, object]:
+    """Fast-forward the primary checkout to an approved stable commit, failing closed.
+
+    Never resets, force-merges, switches branches, or touches uncommitted work. Every Git
+    command's exit status is checked and the final HEAD is verified against ``commit``.
+    Returns a structured receipt whose ``status`` is ``SYNCHRONIZED``,
+    ``ALREADY_SYNCHRONIZED`` or ``RECONCILIATION_REQUIRED``.
+    """
+    receipt: dict[str, object] = {
+        "status": "RECONCILIATION_REQUIRED",
+        "expected_commit": commit,
+        "primary_head_before": None,
+        "primary_head_after": None,
+        "branch": None,
+        "reason": None,
+    }
+
+    def _fail(reason: str) -> dict[str, object]:
+        receipt["reason"] = reason
+        return receipt
+
+    def _run(step: str, args: Sequence[str]) -> subprocess.CompletedProcess[str] | str:
+        try:
+            res = _git_sync_run(repo_root, args)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"git {step} could not run: {type(exc).__name__}: {exc}"
+        return res
+
+    if not isinstance(commit, str) or not _COMMIT_RE.fullmatch(commit):
+        return _fail(f"invalid stable commit identity {commit!r}")
+
+    head = _run("rev-parse", ["rev-parse", "--verify", "HEAD"])
+    if isinstance(head, str):
+        return _fail(head)
+    if head.returncode != 0:
+        return _fail(f"git rev-parse HEAD failed (exit {head.returncode}): {head.stderr.strip()}")
+    before = head.stdout.strip()
+    receipt["primary_head_before"] = before
+
+    branch = _run("symbolic-ref", ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if isinstance(branch, str):
+        return _fail(branch)
+    if branch.returncode != 0:
+        return _fail("primary checkout is on a detached HEAD; refusing to move it")
+    branch_name = branch.stdout.strip()
+    receipt["branch"] = branch_name
+
+    if before == commit:
+        receipt["status"] = "ALREADY_SYNCHRONIZED"
+        receipt["primary_head_after"] = before
+        return receipt
+
+    exists = _run("cat-file", ["cat-file", "-e", f"{commit}^{{commit}}"])
+    if isinstance(exists, str):
+        return _fail(exists)
+    if exists.returncode != 0:
+        return _fail(f"stable commit {commit} is missing from the primary repository")
+
+    status = _run("status", ["status", "--porcelain=v1", "--untracked-files=all"])
+    if isinstance(status, str):
+        return _fail(status)
+    if status.returncode != 0:
+        return _fail(f"git status failed (exit {status.returncode}): {status.stderr.strip()}")
+    if status.stdout.strip():
+        return _fail(
+            "primary checkout has uncommitted/untracked changes; preserving user work and "
+            "refusing to fast-forward"
+        )
+
+    ancestor = _run("merge-base", ["merge-base", "--is-ancestor", before, commit])
+    if isinstance(ancestor, str):
+        return _fail(ancestor)
+    if ancestor.returncode == 1:
+        return _fail(
+            f"non-fast-forward: primary HEAD {before} is not an ancestor of stable {commit}"
+        )
+    if ancestor.returncode != 0:
+        return _fail(
+            f"git merge-base failed (exit {ancestor.returncode}): {ancestor.stderr.strip()}"
+        )
+
+    merge = _run("merge", ["merge", "--ff-only", "--no-edit", commit])
+    if isinstance(merge, str):
+        return _fail(merge)
+    if merge.returncode != 0:
+        detail = (merge.stderr or merge.stdout).strip()
+        return _fail(f"git merge --ff-only failed (exit {merge.returncode}): {detail}")
+
+    refresh = _run("update-index", ["update-index", "-q", "--refresh"])
+    if isinstance(refresh, str):
+        return _fail(refresh)
+    if refresh.returncode != 0:
+        return _fail(
+            f"git update-index --refresh failed (exit {refresh.returncode}): "
+            f"{refresh.stderr.strip()}"
+        )
+
+    after = _run("rev-parse", ["rev-parse", "--verify", "HEAD"])
+    if isinstance(after, str):
+        return _fail(after)
+    if after.returncode != 0:
+        return _fail(f"git rev-parse HEAD failed after merge (exit {after.returncode})")
+    head_after = after.stdout.strip()
+    receipt["primary_head_after"] = head_after
+    if head_after != commit:
+        return _fail(f"primary HEAD {head_after} does not match stable checkpoint {commit}")
+
+    branch_after = _run("symbolic-ref", ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if isinstance(branch_after, str) or branch_after.returncode != 0:
+        return _fail("primary branch could not be confirmed after fast-forward")
+    if branch_after.stdout.strip() != branch_name:
+        return _fail("primary branch changed during synchronization")
+
+    receipt["status"] = "SYNCHRONIZED"
+    return receipt
+
+
+def load_acceptance_rules(
+    rules_path: str | None,
+    phase,
+    repo_root: Path,
+    worktree_root: Path,
+) -> tuple[tuple[CriterionRule, ...], str]:
+    """Build trusted CriterionRules for one phase.
+
+    Without ``rules_path`` the legacy generic rule (``kind="tests", minimum_passed=1``) is used
+    for every criterion and labelled ``GENERIC_TEST_EXECUTION_ONLY``: it proves the verification
+    suite passed, not that each criterion is satisfied. With ``rules_path`` (an operator-owned
+    file outside the repository and attempt worktrees, so the coding agent cannot edit it),
+    every required criterion must have exactly one explicit rule (``EXPLICIT_CRITERION_RULES``).
+    """
+    import yaml
+
+    if not rules_path:
+        return (
+            tuple(
+                CriterionRule(criterion_id=c.id, kind="tests", minimum_passed=1)
+                for c in phase.acceptance_criteria
+            ),
+            "GENERIC_TEST_EXECUTION_ONLY",
+        )
+    path = Path(rules_path).resolve()
+    for root in (repo_root, worktree_root):
+        if path == root or path.is_relative_to(root):
+            raise ValueError(
+                f"acceptance rules file '{path}' must live outside the repository/attempt "
+                "worktrees so the coding agent cannot redefine its own acceptance expectations"
+            )
+    if not path.is_file():
+        raise ValueError(f"acceptance rules file '{path}' not found")
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema_version") != "1.0":
+        raise ValueError("acceptance rules file requires schema_version: '1.0'")
+    phases = data.get("phases")
+    if not isinstance(phases, dict):
+        raise ValueError("acceptance rules file requires a 'phases' mapping")
+    entries = phases.get(phase.id)
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"acceptance rules file has no rules for phase '{phase.id}'")
+    known = {c.id: c for c in phase.acceptance_criteria}
+    rules: list[CriterionRule] = []
+    seen: set[str] = set()
+    for entry in entries:
+        rule = CriterionRule.model_validate(entry)
+        if rule.criterion_id not in known:
+            raise ValueError(f"unknown acceptance criterion '{rule.criterion_id}'")
+        if rule.criterion_id in seen:
+            raise ValueError(
+                f"duplicate rule for criterion '{rule.criterion_id}' "
+                "(the Reviewer evaluates exactly one rule per criterion)"
+            )
+        seen.add(rule.criterion_id)
+        rules.append(rule)
+    missing = [c.id for c in phase.acceptance_criteria if c.required and c.id not in seen]
+    if missing:
+        raise ValueError(f"required acceptance criteria lack explicit rules: {missing}")
+    return tuple(rules), "EXPLICIT_CRITERION_RULES"
+
+
+def classify_container_readiness(
+    docker_info: dict[str, object],
+    live_verification: dict[str, object] | None = None,
+) -> str:
+    """Classify container verification readiness without overstating qualification.
+
+    - ``CONTAINER_BLOCKED``: runtime CLI, daemon, or required image unavailable.
+    - ``CONTAINER_READY``: daemon and image available; no isolation tests executed here.
+    - ``CONTAINER_LIVE_VERIFIED``: a supplied live isolation run passed with recorded evidence.
+    - ``CONTAINER_FAILED``: a supplied live isolation run failed.
+    """
+    if not (
+        docker_info.get("cli_present")
+        and docker_info.get("daemon_ready")
+        and docker_info.get("image_present")
+    ):
+        return "CONTAINER_BLOCKED"
+    if live_verification is None:
+        return "CONTAINER_READY"
+    if live_verification.get("passed") is True and live_verification.get("evidence"):
+        return "CONTAINER_LIVE_VERIFIED"
+    return "CONTAINER_FAILED"
+
+
+def _acceptance_report(mode: str, review) -> dict[str, object]:
+    criteria = []
+    if review is not None:
+        criteria = [
+            {"criterion_id": c.criterion_id, "status": str(c.status), "notes": c.notes}
+            for c in review.criteria
+        ]
+    return {
+        "mode": mode,
+        "criteria_independently_verified": mode == "EXPLICIT_CRITERION_RULES",
+        "note": (
+            "Generic rule: verification suite passed; individual criteria are NOT "
+            "independently proven. Supply --acceptance-rules for criterion-specific checks."
+            if mode == "GENERIC_TEST_EXECUTION_ONLY"
+            else "Operator-owned criterion rules evaluated by the canonical Reviewer."
+        ),
+        "criteria": criteria,
+    }
+
+
+def _presync_prior_stable(versions, existing_state, repo_root: Path) -> dict[str, object] | None:
+    """Ensure primary checkout is aligned with the prior completed phase before dispatch."""
+    if not existing_state.completed_phases:
+        return None
+    last_completed = existing_state.completed_phases[-1]
+    try:
+        prior_stable = versions.inspect_checkpoint(f"phase-{last_completed}-pass")
+    except Exception as exc:
+        return {
+            "outcome": "RECONCILIATION_REQUIRED",
+            "phase_id": existing_state.current_phase or last_completed,
+            "error": f"Cannot inspect prior checkpoint 'phase-{last_completed}-pass': {exc}",
+            "primary_sync": {
+                "status": "RECONCILIATION_REQUIRED",
+                "expected_commit": None,
+                "reason": f"Checkpoint inspection failed: {exc}",
+            },
+        }
+    sync_res = sync_primary_to_stable(repo_root, prior_stable.git_commit)
+    if sync_res.get("status") == "RECONCILIATION_REQUIRED":
+        return {
+            "outcome": "RECONCILIATION_REQUIRED",
+            "phase_id": existing_state.current_phase or last_completed,
+            "error": (
+                "Primary workspace is not synchronized with the prior completed phase "
+                f"'{last_completed}' ({sync_res.get('reason')}); manual reconciliation required"
+            ),
+            "primary_sync": sync_res,
+        }
+    return None
+
+
+def _postsync_stable(result, repo_root: Path) -> dict[str, object] | None:
+    """Fast-forward primary workspace to the newly approved stable checkpoint if PASS."""
+    if result.outcome != "PASS" or not result.stable_checkpoint:
+        return None
+    commit = getattr(result.stable_checkpoint, "git_commit", None)
+    if not commit:
+        return {
+            "status": "RECONCILIATION_REQUIRED",
+            "expected_commit": None,
+            "reason": "Stable checkpoint has no git_commit attribute",
+        }
+    return sync_primary_to_stable(repo_root, commit)
+
+
+def _final_outcome_fields(
+    result,
+    primary_sync: dict[str, object] | None,
+    acceptance_report: dict[str, object],
+) -> dict[str, object]:
+    """Compile final outcome fields including synchronization and acceptance diagnostics."""
+    fields: dict[str, object] = {
+        "acceptance": acceptance_report,
+        "primary_sync": primary_sync,
+    }
+    if primary_sync and primary_sync.get("status") == "RECONCILIATION_REQUIRED":
+        fields["outcome"] = "RECONCILIATION_REQUIRED"
+        fields["synchronization_failed"] = True
+        fields["synchronization_error"] = primary_sync.get("reason")
+    return fields
+
+
+def _exit_code(result, primary_sync: dict[str, object] | None) -> int:
+    """Return process exit code: 0 only when Controller PASS AND primary workspace synchronized."""
+    if primary_sync and primary_sync.get("status") == "RECONCILIATION_REQUIRED":
+        return SYNC_EXIT_CODE
+    return 0 if result.outcome == "PASS" else 1
 
 
 def run_live_preflight(
@@ -238,6 +532,8 @@ def run_live_preflight(
     model: str | None,
     timeout_seconds: int,
     run_id: str,
+    acceptance_rules: str | None = None,
+    require_explicit_acceptance: bool = False,
 ) -> tuple[bool, dict[str, object]]:
     """Execute the 10-stage preflight safety verification before running a live phase."""
     checks: dict[str, dict[str, object]] = {}
@@ -321,6 +617,20 @@ def run_live_preflight(
         "worktree_root": str(worktree_root),
         "evidence_root": str(evidence_root),
     }
+
+    # 2b. Trusted acceptance rules (operator-owned, outside agent-writable roots)
+    if require_explicit_acceptance and not acceptance_rules:
+        return _fail(
+            "2b_acceptance_rules",
+            "--require-explicit-acceptance is set but no --acceptance-rules file was supplied",
+        )
+    try:
+        _, acceptance_mode = load_acceptance_rules(
+            acceptance_rules, phase, repo_root, worktree_root
+        )
+    except Exception as exc:
+        return _fail("2b_acceptance_rules", f"Invalid acceptance rules: {exc}")
+    checks["2b_acceptance_rules"] = {"passed": True, "mode": acceptance_mode}
 
     # 3. Git worktree integrity & phase ordering
     try:
@@ -680,6 +990,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Path to directory for immutable evidence collection",
     )
+    parser.add_argument(
+        "--acceptance-rules",
+        type=str,
+        default=None,
+        help=(
+            "Operator-owned YAML/JSON file (outside the repository) mapping each phase's "
+            "acceptance criteria to explicit Reviewer rules (tests/file_changed/artifact)"
+        ),
+    )
+    parser.add_argument(
+        "--require-explicit-acceptance",
+        action="store_true",
+        help="Refuse to run unless --acceptance-rules supplies criterion-specific rules",
+    )
 
     args = parser.parse_args(argv)
 
@@ -754,11 +1078,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
             "docker": {
                 "available": bool(docker_info.get("qualified")),
-                "qualification": (
-                    "CONTAINER_LIVE_VERIFIED" if docker_info.get("qualified") else "BLOCKED"
-                ),
+                "qualification": classify_container_readiness(docker_info),
+                "live_verification_rerun": False,
+                "historical_host_qualification": {
+                    "status": "CONTAINER_LIVE_VERIFIED",
+                    "scope": "host-specific",
+                    "rerun_by_this_command": False,
+                    "evidence": (
+                        "PR #2 (validation/docker-container-qualification) Stage 4 9/9 "
+                        "isolation checks; see CURRENT_STATE.md Section 11"
+                    ),
+                },
                 "runtime_info": docker_info,
-                "notes": ("Docker container verification engine and reproducible image readiness."),
+                "notes": (
+                    "CONTAINER_READY means the daemon and image are available only; this "
+                    "command does not execute isolation tests. CONTAINER_LIVE_VERIFIED is "
+                    "reported solely as recorded historical host evidence."
+                ),
             },
         }
         print(json.dumps(payload, indent=2))
@@ -901,6 +1237,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             timeout_seconds=args.timeout,
             run_id=args.run_id,
+            acceptance_rules=args.acceptance_rules,
+            require_explicit_acceptance=args.require_explicit_acceptance,
         )
         if args.preflight or not ok:
             print(json.dumps(preflight_report, indent=2))
@@ -933,13 +1271,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         recovery = RecoveryManager(project, state_mgr, versions)
 
         existing_state = state_mgr.load(project)
-        if existing_state.completed_phases:
-            last_completed = existing_state.completed_phases[-1]
-            try:
-                prior_stable = versions.inspect_checkpoint(f"phase-{last_completed}-pass")
-                _safe_git_merge_ff(repo_root, prior_stable.git_commit)
-            except Exception:
-                pass
+        presync = _presync_prior_stable(versions, existing_state, repo_root)
+        if presync is not None:
+            print(json.dumps(presync, indent=2))
+            reason = presync.get("primary_sync", {}).get("reason", "unknown")
+            sys.stderr.write(f"Primary synchronization failed: {reason}\n")
+            return SYNC_EXIT_CODE
 
         verify_cmd_tuple = tuple(shlex.split(args.verify_command))
         cfg = GeminiAdapterConfig(
@@ -970,9 +1307,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         registry = AgentRegistry()
         registry.register(worker)
 
-        rules = tuple(
-            CriterionRule(criterion_id=c.id, kind="tests", minimum_passed=1)
-            for c in phase.acceptance_criteria
+        rules, acceptance_mode = load_acceptance_rules(
+            args.acceptance_rules, phase, repo_root, worktree_root
         )
         prompt_context = PromptContext(
             implementation_constraints=(
@@ -1019,12 +1355,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         result = asyncio.run(_execute_live())
         current_state = state_mgr.load(project)
-
-        if result.outcome == "PASS" and result.stable_checkpoint:
-            try:
-                _safe_git_merge_ff(repo_root, result.stable_checkpoint.git_commit)
-            except Exception:
-                pass
+        primary_sync = _postsync_stable(result, repo_root)
 
         # Collect rich execution & verification telemetry from the Controller journal
         journal_record = controller_engine.journal(current_state.run_id, phase_id).load()
@@ -1156,8 +1487,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "state_path": str(state_path),
             "evidence_root": str(evidence_root),
         }
+        payload.update(
+            _final_outcome_fields(
+                result,
+                primary_sync,
+                _acceptance_report(
+                    acceptance_mode, last_att.review.review if last_att.review else None
+                ),
+            )
+        )
         print(json.dumps(payload, indent=2))
-        return 0 if result.outcome == "PASS" else 1
+        return _exit_code(result, primary_sync)
 
     # 6. --run-mock-phase
     if args.run_mock_phase is not None:
@@ -1225,22 +1565,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         existing_state = state_mgr.load(project)
-        if existing_state.completed_phases:
-            last_completed = existing_state.completed_phases[-1]
-            try:
-                prior_stable = versions.inspect_checkpoint(f"phase-{last_completed}-pass")
-                _safe_git_merge_ff(repo_root, prior_stable.git_commit)
-            except Exception:
-                pass
+        presync = _presync_prior_stable(versions, existing_state, repo_root)
+        if presync is not None:
+            print(json.dumps(presync, indent=2))
+            reason = presync.get("primary_sync", {}).get("reason", "unknown")
+            sys.stderr.write(f"Primary synchronization failed: {reason}\n")
+            return SYNC_EXIT_CODE
 
         result = asyncio.run(controller_engine.run_phase(project, phase_id, policy=policy))
         current_state = state_mgr.load(project)
-
-        if result.outcome == "PASS" and result.stable_checkpoint:
-            try:
-                _safe_git_merge_ff(repo_root, result.stable_checkpoint.git_commit)
-            except Exception:
-                pass
+        primary_sync = _postsync_stable(result, repo_root)
 
         gate_action = None
         if result.gate_decision and result.gate_decision.actions:
@@ -1254,12 +1588,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         payload = {
-            "outcome": result.outcome,
+            "outcome": (
+                "RECONCILIATION_REQUIRED"
+                if primary_sync and primary_sync.get("status") == "RECONCILIATION_REQUIRED"
+                else result.outcome
+            ),
             "phase_id": result.phase_id,
             "attempt": result.attempts,
             "review_verdict": result.review_verdict,
             "gate_action": gate_action,
             "stable_checkpoint": stable_ckpt,
+            "primary_sync": primary_sync,
             "state_status": (
                 current_state.status.value
                 if hasattr(current_state.status, "value")
@@ -1268,7 +1607,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "evidence_root": str(evidence_root),
         }
         print(json.dumps(payload, indent=2))
-        return 0 if result.outcome == "PASS" else 1
+        return _exit_code(result, primary_sync)
 
     # Default: display help
     parser.print_help()
