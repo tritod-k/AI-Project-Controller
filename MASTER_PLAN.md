@@ -3272,3 +3272,24 @@ The controller is the stable product.
 Individual AI providers are replaceable workers.
 
 That separation is the central architectural decision of the project.
+
+---
+
+# 38. Post-Phase 24 Evolution — AIPC 2.0 Milestone A Activation
+
+## 38.1 Completed Foundation Phases (Phases 23–24)
+
+- **Phase 23 — Operational CLI & Multi-Phase Live Validation**: Accepted and merged into `master` via PR #3 (`83578a4e56b4e549d33e8c941ea1679992ab4ebc`).
+- **Phase 24 — Self-Development Automation & Independent Reviewer Integration (`24.0`–`24.5`)**: Accepted and merged into `master` via PR #4 (`26f455fd40d7728d99dcf5494c1cad9353e45988`), establishing child-process credential isolation (`src/aipc/hardening/env_isolation.py`, `tools/sanitized_exec.py`), `PersistentTaskQueue`, `SubscriptionIndependentReviewer`, `BoundedRepairCoordinator`, and `SafeSelfDevelopmentRunner`.
+
+## 38.2 AIPC 2.0 Milestone A Authorization (`A01`–`A04`)
+
+Following verification of the Phase 24 merge (`26f455fd40d7728d99dcf5494c1cad9353e45988`) and execution of the Section 12 Phase 24 Handoff Protocol in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (v0.2), the Human Commander explicitly authorized **AIPC 2.0 — Milestone A** on feature branch `gemini/aipc-2.0-milestone-a`:
+
+- **Workstream A01 — Subscription Authentication & Runtime Qualification**: Reproducible, secret-free subscription qualification across Codex and Antigravity runtimes separating Desktop/UI presence from headless worker and reviewer execution under the `subscription_only` operating profile.
+- **Workstream A02 — Multi-Provider Operational Integration**: Qualified end-to-end execution and role-specific modes across both subscription-backed providers (`Antigravity` and `Codex`) with exact identity and normalized evidence.
+- **Workstream A03 — Role-Based Provider/Model Registry**: Typed, schema-validated role configurations, capabilities, preferences, exclusions, fallback policies, and provenance tracking (`model_requested` vs `model_used`) for `Planner`, `Worker`, and `Reviewer`.
+- **Workstream A04 — Planner Orchestration Engine**: Canonical, versioned plan/task graph generation and cross-provider resumability integrated with `PersistentTaskQueue` and bounded to human-authorized milestone scope.
+
+Milestones B (`B01`–`B04`), C (`C01`–`C03`), and D (`D01`–`D03`) remain planning-only until Milestone A is independently reviewed and accepted by the Human Commander.
+
