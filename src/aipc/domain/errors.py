@@ -143,6 +143,14 @@ class SecretExposureError(HardeningError):
     """Unredacted sensitive credential or secret detected."""
 
 
+class ChildEnvironmentIsolationError(HardeningError):
+    """Child subprocess environment or arguments failed credential isolation verification."""
+
+
+class SubscriptionBoundaryError(HardeningError):
+    """An inner AIPC component attempted to configure or use prohibited API-key billing."""
+
+
 class AIPCError(Exception):
     """Base error for all AIPC operations."""
 

@@ -6,7 +6,7 @@ from typing import Any
 from aipc.hardening.errors import SecretExposureError
 
 _BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9_.\-]+", re.IGNORECASE)
-_SK_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
+_SK_PATTERN = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}")
 _AIZA_PATTERN = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
 _KV_PATTERN = re.compile(
     r"""(?i)(api[_-]?key|token|password|secret)\s*([:=])\s*['"]?([^\s'"]+)['"]?"""
