@@ -489,11 +489,15 @@ class AntigravityCliTransport:
         if not info.get("oauth_session_present") and self._explicit_executable is None:
             raise GeminiUnavailableError("AUTH_REQUIRED")
         if self.version is None:
+            from aipc.hardening.env_isolation import build_sanitized_child_env
+
+            child_env = build_sanitized_child_env()
             try:
                 proc = await self.runner(
                     str(exe),
                     "--version",
                     cwd=str(resolved_ws),
+                    env=child_env,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -575,10 +579,14 @@ class AntigravityCliTransport:
         if self.config.model:
             argv.extend(["--model", self.config.model])
 
+        from aipc.hardening.env_isolation import build_sanitized_child_env
+
+        child_env = build_sanitized_child_env()
         try:
             proc = await self.runner(
                 *argv,
                 cwd=str(workspace),
+                env=child_env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -976,6 +984,23 @@ sys.addaudithook(audit_hook)
             *normalized_cmd,
         ]
 
+        from aipc.hardening.env_isolation import (
+            ChildEnvironmentIsolationError,
+            assert_argv_no_credentials,
+            build_sanitized_child_env,
+        )
+
+        try:
+            assert_argv_no_credentials(container_cmd)
+            sanitized_env = build_sanitized_child_env()
+        except ChildEnvironmentIsolationError as exc:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            return (
+                False,
+                TestSummary(total=1, passed=0, failed=1, skipped=0),
+                f"BLOCKED: {exc}",
+            )
+
         try:
             res = subprocess.run(
                 container_cmd,
@@ -983,6 +1008,7 @@ sys.addaudithook(audit_hook)
                 text=True,
                 check=False,
                 timeout=self.config.operation_timeout,
+                env=sanitized_env,
             )
         except subprocess.TimeoutExpired:
             try:
@@ -991,6 +1017,7 @@ sys.addaudithook(audit_hook)
                     capture_output=True,
                     check=False,
                     timeout=10,
+                    env=sanitized_env,
                 )
             except Exception:
                 pass

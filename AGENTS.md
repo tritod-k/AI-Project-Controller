@@ -857,6 +857,8 @@ Phase 19 — Dashboard/API
 Phase 20 — MCP / Shared Tool Layer
 Phase 21 — Production Hardening
 Phase 22 — Plugin / Super-App Extension Model
+Phase 23 — Operational CLI & Multi-Phase Live Validation
+Phase 24 — Self-Development Automation & Independent Reviewer Integration
 ```
 
 Do not skip the Mock Agent and Normalization phases.
@@ -922,3 +924,28 @@ To maintain architectural rigor, eliminate self-advancement, and enable seamless
      - Commit coherent attempt progress on a dedicated branch (`codex/phase-<id>-attempt-<nn>`).
      - Push to `origin` when authorized by the human Commander.
      - On the receiving agent/platform: fetch and checkout the attempt branch, inspect `CURRENT_STATE.md`, `git diff`, and recent commits, and resume execution without starting from scratch.
+
+---
+
+# 32. Phase 24 Self-Development Automation & Subscription-Only Boundary
+
+## 32.1 100% Subscription-Only Inner AIPC Architecture
+1. Every operational AI integration inside AIPC (Coding Workers, Independent Reviewers, Provider Router, Fallback, and Repair workflows) must use explicitly qualified **subscription-authenticated developer runtimes only** (such as Google Antigravity CLI `agy` via `~/.gemini/antigravity` OAuth or OpenAI Codex via subscription login).
+2. Separately billed API-key authentication (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, Vertex AI) is strictly prohibited inside AIPC operational workflows and fallback paths.
+3. If an external development supervisor session uses a temporary Commander-authorized API key, that credential is an **Outer Orchestrator** tool only and must never be inherited by, configured in, or passed to any Inner AIPC subprocess, adapter, worker, reviewer, Docker container, test fixture, log, or Git artifact.
+
+## 32.2 Mandatory Child-Process Environment Sanitation
+1. Every child process launched from a supervisor session or by AIPC (`python -m aipc`, `pytest`, `agy`, `codex`, `docker`) must run with a sanitized environment constructed via `aipc.hardening.env_isolation.build_sanitized_child_env` (or `tools/sanitized_exec.py`).
+2. Environment sanitation must account for case-insensitive variable names on Windows and fail closed (`CHILD_ENVIRONMENT_ISOLATION_BLOCKED`) if prohibited variables or CLI credential arguments are detected.
+
+## 32.3 Stable Controller vs. Candidate AIPC Isolation
+1. The **Stable Controller** runs from the pinned stable checkout and must never import modules from a **Candidate AIPC** worktree or automatically upgrade itself.
+2. **Candidate AIPC** modifications and tests run in an isolated `VersionManager` Git worktree.
+3. Before candidate test verification is accepted, Python import origins must be verified to resolve to the Candidate worktree (`candidate/src/aipc`) rather than leaking into the Stable Controller checkout via shared editable `.venv` `.pth` files (`IMPORT_ORIGIN_MISMATCH` fails closed).
+
+## 32.4 Independent Review & Merge Governance
+1. A coding worker may never approve its own implementation.
+2. Independent review must bind to the exact candidate commit SHA in a fresh, read-only session with no worker conversation reuse.
+3. When live subscription review is unavailable due to provider quota exhaustion, record `LIVE_REVIEW_UNVERIFIED`, mark dependent live acceptance `DEFERRED` / `BLOCKED`, and prepare a **Draft PR** without claiming Phase 24 PASS or falling back to paid API keys.
+4. Final merge authority belongs exclusively to the Human Commander. Future roadmaps (`docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md`) remain planning-only until explicitly authorized.
+

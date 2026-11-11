@@ -7,7 +7,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2", "1.5.3"})
+from aipc.hardening.env_isolation import build_sanitized_child_env
+
+QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2", "1.5.3", "1.5.5"})
 REQUIRED_AGY_FLAGS: tuple[str, ...] = (
     "--sandbox",
     "--mode",
@@ -104,6 +106,7 @@ def check_docker(
 
     daemon_ready = False
     server_version: str | None = None
+    sanitized_env = build_sanitized_child_env()
     try:
         info_res = subprocess.run(
             [exe, "info", "--format", "{{.ServerVersion}}"],
@@ -111,6 +114,7 @@ def check_docker(
             text=True,
             check=False,
             timeout=10,
+            env=sanitized_env,
         )
         if info_res.returncode == 0:
             out = (info_res.stdout or "").strip()
@@ -130,6 +134,7 @@ def check_docker(
                 text=True,
                 check=False,
                 timeout=10,
+                env=sanitized_env,
             )
             if img_res.returncode == 0:
                 img_out = (img_res.stdout or "").strip()
@@ -183,6 +188,7 @@ def qualify_antigravity_runtime(
 
     if cached is None:
         # 1. Verify exact version
+        sanitized_env = build_sanitized_child_env()
         try:
             ver_res = subprocess.run(
                 [str(exe), "--version"],
@@ -190,6 +196,7 @@ def qualify_antigravity_runtime(
                 text=True,
                 check=False,
                 timeout=5,
+                env=sanitized_env,
             )
             raw_ver = (ver_res.stdout or ver_res.stderr or "").strip().split()
             version_str = raw_ver[0] if raw_ver else "unknown"
@@ -210,6 +217,7 @@ def qualify_antigravity_runtime(
                     text=True,
                     check=False,
                     timeout=5,
+                    env=sanitized_env,
                 )
                 help_text = (help_res.stdout or "") + (help_res.stderr or "")
                 missing = [flag for flag in REQUIRED_AGY_FLAGS if flag not in help_text]

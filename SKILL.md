@@ -1005,3 +1005,30 @@ When this skill is used for a phase, work is complete only when:
 4. architecture constraints remain intact
 5. completion report is returned
 6. agent stops before the next phase
+
+---
+
+# 31. Phase 24 Self-Development & Subscription Reviewer Pattern
+
+When operating or extending Phase 24 self-development automation:
+
+```text
+Approved Milestone Task
+  -> PersistentTaskQueue (dependency + scope check)
+  -> Isolated Candidate Worktree (VersionManager)
+  -> Sanitized Child Environment (build_sanitized_child_env)
+  -> Subscription Coding Worker (Antigravity Flash via agy)
+  -> Import-Origin Verification (reject IMPORT_ORIGIN_MISMATCH)
+  -> Isolated Test Verification (Docker container / isolated subprocess)
+  -> EvidenceCollector (exact candidate SHA)
+  -> Subscription Independent Reviewer (fresh read-only session)
+  -> PhaseGate -> Bounded Repair or Draft PR -> Human Merge Approval
+```
+
+Mandatory checks:
+
+1. Never propagate `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` into child processes, workers, reviewers, or Docker containers.
+2. Use synthetic dummy credential markers (never real keys) in secret-isolation tests.
+3. Verify `aipc.__file__` resolves to the Candidate worktree before trusting candidate test results on Windows.
+4. If live subscription Reviewer quota is exhausted, record `LIVE_REVIEW_UNVERIFIED` and prepare a Draft PR rather than substituting an API-key reviewer or self-approving.
+
