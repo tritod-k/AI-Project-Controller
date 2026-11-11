@@ -10,6 +10,16 @@ from aipc.controller.repair_coordinator import (
     RepairCycleEvaluation,
     RepairDispatchPlan,
 )
+from aipc.controller.self_dev_runner import (
+    IMPORT_ORIGIN_MISMATCH,
+    VERIFICATION_ISOLATION_BLOCKED,
+    CandidateImportOriginReport,
+    CandidateVerificationReceipt,
+    SafeSelfDevelopmentRunner,
+    StableCandidateConfig,
+    assert_stable_process_free_of_candidate_imports,
+    verify_candidate_import_origin,
+)
 from aipc.controller.task_queue import (
     ApprovedTaskContract,
     PersistentTaskQueue,
@@ -22,12 +32,15 @@ from aipc.controller.task_queue import (
 __all__ = [
     "ApprovedTaskContract",
     "BoundedRepairCoordinator",
+    "CandidateImportOriginReport",
+    "CandidateVerificationReceipt",
     "Controller",
     "ControllerError",
     "ControllerJournal",
     "ControllerJournalError",
     "ControllerPolicy",
     "ControllerResult",
+    "IMPORT_ORIGIN_MISMATCH",
     "PersistentTaskQueue",
     "ProviderInterruption",
     "QueuedTaskRecord",
@@ -35,6 +48,11 @@ __all__ = [
     "RepairAction",
     "RepairCycleEvaluation",
     "RepairDispatchPlan",
+    "SafeSelfDevelopmentRunner",
+    "StableCandidateConfig",
     "TaskAttemptLedger",
     "TaskQueueSnapshot",
+    "VERIFICATION_ISOLATION_BLOCKED",
+    "assert_stable_process_free_of_candidate_imports",
+    "verify_candidate_import_origin",
 ]
