@@ -2,7 +2,7 @@
 
 - **Baseline `master` Commit (Phase 24 Merge)**: `26f455fd40d7728d99dcf5494c1cad9353e45988`
 - **Feature Branch**: `gemini/aipc-2.0-milestone-a`
-- **Implementation Candidate Commit**: `c9008772d42f02b6696510fda98587a7cea30a97`
+- **Implementation Candidate Commit**: `12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c` (following `c9008772d42f02b6696510fda98587a7cea30a97`)
 - **Date**: 2026-11-11
 - **Operating Profile**: `subscription_only` (100% Subscription-Only inside AIPC; all child processes launched via `tools.sanitized_exec`)
 
@@ -37,13 +37,15 @@ All subprocesses were executed via `.\.venv\Scripts\python.exe -m tools.sanitize
    - Also confirmed that `agy.exe` custom agent frontmatter parser requires `model: flash` in `.agents/agents/*.md` while `--model gemini-3.8-flash-medium` overrides the runtime model via CLI flags.
    - Unverified/unavailable models (`"argon"`, `"gemini-argon"`) and Desktop-only surfaces (`antigravity-desktop`, `codex-desktop`) are deterministically classified as `UNAVAILABLE` / `BLOCKED` by `src/aipc/adapters/subscription_qualification.py` and rejected by `src/aipc/agents/role_registry.py`.
 
-2. **Live Subscription-Authenticated Independent Review Receipt (`c900877`)**:
+2. **Live Subscription-Authenticated Independent Review Receipts (`c900877` & `12efdcc`)**:
    - Executed via `.\.venv\Scripts\python.exe -m tools.sanitized_exec C:\Users\Administrator\AppData\Local\agy\bin\agy.exe --agent aipc-test-auditor --model gemini-3.8-flash-medium --mode plan --sandbox --disable-slash-commands --output-format json --print-timeout 60s`
-   - **Conversation ID**: `2276e36d-5e9f-45ff-ba55-c90acb48467e`
-   - **Review ID**: `REV-20261112-AIPC20-MILA-c900877`
-   - **Candidate SHA**: `c900877` (`c9008772d42f02b6696510fda98587a7cea30a97`)
-   - **Verdict**: `PASS` (confidence `0.98`, `required_fixes: []`)
-   - **Duration / Token Usage**: `11.6037717s`, `input_tokens: 10000`, `output_tokens: 1085`, `thinking_tokens: 698`, `total_tokens: 11085`
+   - **Attempt 1 Review (`c900877`)**: `conversation_id: 2276e36d-5e9f-45ff-ba55-c90acb48467e`, `review_id: REV-20261112-AIPC20-MILA-c900877`, verdict `PASS` (`0.98`, `11.6037717s`, `total_tokens: 11085`).
+   - **Attempt 2 Fresh Review on Formatted Candidate (`12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c`)**:
+     - **Conversation ID**: `56c29c7e-e3d3-45b5-b81a-c2f508f597ab`
+     - **Review ID**: `rev-aipc2-milestone-a-12efdcc7`
+     - **Candidate SHA**: `12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c`
+     - **Verdict**: `PASS` (confidence `0.98`, `required_fixes: []`)
+     - **Duration / Token Usage**: `15.199468s`, `input_tokens: 10003`, `output_tokens: 1750`, `thinking_tokens: 1445`, `total_tokens: 11753`
    - **Independence Classification Note**: Live subscription review on this Windows host was executed in an isolated read-only `--mode plan --sandbox` session via Antigravity CLI (`gemini-3.8-flash-medium`); cross-provider Codex subscription review (`gpt-5.3-codex`) is verified deterministically in offline unit/contract tests (`tests/unit/test_a02_operational_integration.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_a04_planner_engine.py`, `tests/review/test_subscription_reviewer.py`) and remains `DEFERRED` for live host execution until an active local `~/.codex/auth.json` subscription session is provisioned on the host.
 
 ---
@@ -52,12 +54,16 @@ All subprocesses were executed via `.\.venv\Scripts\python.exe -m tools.sanitize
 
 All verification commands were executed in a sanitized child environment via `tools.sanitized_exec`:
 
-- **Ruff Linter**:
-  - Command: `.\.venv\Scripts\python.exe -m tools.sanitized_exec .\.venv\Scripts\python.exe -m ruff check src/ tests/ tools/`
-  - Result: **`All checks passed!` (exit code `0`)**
+- **Ruff Linter & Formatter**:
+  - Command: `.\.venv\Scripts\python.exe -m tools.sanitized_exec .\.venv\Scripts\python.exe -m ruff check .` -> **`All checks passed!` (exit code `0`)**
+  - Command: `.\.venv\Scripts\python.exe -m tools.sanitized_exec .\.venv\Scripts\python.exe -m ruff format --check .` -> **`307 files already formatted` (exit code `0`)**
+- **Canonical & Project JSON Schemas**:
+  - `python -m aipc.domain.schemas --check` -> **`Checked 4 canonical schemas.`**
+  - `python -m aipc.project.schemas --check` -> **`Checked 2 project schemas.`**
 - **Milestone A Focused Unit & Architecture Boundary Suite**:
   - Command: `.\.venv\Scripts\python.exe -m tools.sanitized_exec .\.venv\Scripts\python.exe -m pytest -q tests/unit/test_a01_subscription_qualification.py tests/unit/test_a02_operational_integration.py tests/unit/test_a03_role_registry.py tests/unit/test_a04_planner_engine.py tests/routing/test_structure.py`
   - Result: **30 passed (0 failures)**
 - **Comprehensive Regression Suite (`tests/unit/`, `tests/routing/`, `tests/review/`, `tests/hardening/`, `tests/controller/`, `tests/llm/test_integrations.py`)**:
-  - Command: `.\.venv\Scripts\python.exe -m tools.sanitized_exec .\.venv\Scripts\python.exe -m pytest -q tests/unit/ tests/routing/ tests/review/ tests/hardening/ tests/controller/test_task_queue.py tests/controller/test_repair_and_rereview.py tests/controller/test_self_dev_runner.py tests/controller/test_boundaries.py tests/llm/test_integrations.py`
   - Result: **895 passed in 1407.91s (0 failures)**
+- **CI Contract, Gemini, CLI, Consensus, Observability, Dashboard, MCP, Plugin & E2E Suite**:
+  - Result: **343 passed, 2 skipped in 1050.72s (0 failures)**

@@ -10,10 +10,10 @@ AI Project Controller
 AIPC 2.0 — Milestone A (`A01`–`A04`: Subscription-Only Multi-Provider Foundations)
 
 ## Status
-AWAITING_HUMAN_MERGE (Milestone A `A01`–`A04` implemented, verified with 895 passing tests & `ruff check` under `tools.sanitized_exec`, and reviewed via subscription-authenticated independent reviewer `REV-20261112-AIPC20-MILA-c900877` `PASS` on `gemini/aipc-2.0-milestone-a`)
+AWAITING_HUMAN_MERGE (Milestone A `A01`–`A04` implemented, verified with 895 + 343 passing tests, `ruff check .`, & `ruff format --check .` under `tools.sanitized_exec`, and reviewed via subscription-authenticated independent reviewer `rev-aipc2-milestone-a-12efdcc7` `PASS` on `gemini/aipc-2.0-milestone-a`)
 
 ## Current Attempt
-Milestone A Attempt 01 (`gemini/aipc-2.0-milestone-a`, candidate commit `c9008772d42f02b6696510fda98587a7cea30a97`)
+Milestone A Attempt 01 (`gemini/aipc-2.0-milestone-a`, candidate commit `12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c`)
 
 ## Phase Gate
 MILESTONE_A_VERIFIED_AWAITING_PR_MERGE (Final merge authority belongs exclusively to Human Commander)
@@ -25,7 +25,7 @@ MILESTONE_A_VERIFIED_AWAITING_PR_MERGE (Final merge authority belongs exclusivel
 `gemini/aipc-2.0-milestone-a`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-Milestone A Workstream A04 commit `c9008772d42f02b6696510fda98587a7cea30a97` on `gemini/aipc-2.0-milestone-a` (following `146763e`, `8df8d59`, `a4acd2d`, `0de2e4c`).
+Milestone A formatted candidate commit `12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c` on `gemini/aipc-2.0-milestone-a` (following `146763e`, `8df8d59`, `a4acd2d`, `0de2e4c`, `c900877`).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
