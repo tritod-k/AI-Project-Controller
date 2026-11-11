@@ -116,9 +116,11 @@ class TaskAttemptLedger(CanonicalRecord):
     candidate_sha: Commit | None = None
     checkpoint_id: Identifier | None = None
     evidence_root: NonEmptyStr | None = None
-    review_id: Identifier | None = None
+    review_id: NonEmptyStr | None = None
     review_verdict: Literal["PASS", "REVISE", "BLOCKED", "ERROR", "DEFERRED"] | None = None
-    gate_verdict: Literal["PASS", "REVISE_REQUIRED", "BLOCKED", "DEFERRED"] | None = None
+    gate_verdict: (
+        Literal["PASS", "REVISE", "REVISE_REQUIRED", "BLOCKED", "ERROR", "DEFERRED"] | None
+    ) = None
     failure_reason: NonEmptyStr | None = None
     started_at: datetime
     completed_at: datetime | None = None
@@ -523,6 +525,28 @@ class PersistentTaskQueue:
         self._replace_task(snap, updated)
         return updated
 
+    def defer_task(
+        self,
+        task_id: str,
+        *,
+        candidate_sha: str,
+        checkpoint_id: str,
+        evidence_root: str,
+        review_id: str,
+        reason: str,
+    ) -> QueuedTaskRecord:
+        """Mark a running task DEFERRED when live independent review is unverified."""
+        return self.record_attempt_outcome(
+            task_id,
+            candidate_sha=candidate_sha,
+            checkpoint_id=checkpoint_id,
+            evidence_root=evidence_root,
+            review_id=review_id,
+            review_verdict="DEFERRED",
+            gate_verdict="DEFERRED",
+            failure_reason=reason,
+        )
+
     def record_attempt_outcome(
         self,
         task_id: str,
@@ -532,7 +556,9 @@ class PersistentTaskQueue:
         evidence_root: str,
         review_id: str,
         review_verdict: Literal["PASS", "REVISE", "BLOCKED", "ERROR", "DEFERRED"],
-        gate_verdict: Literal["PASS", "REVISE_REQUIRED", "BLOCKED", "DEFERRED"],
+        gate_verdict: Literal[
+            "PASS", "REVISE", "REVISE_REQUIRED", "BLOCKED", "ERROR", "DEFERRED"
+        ],
         failure_reason: str | None = None,
     ) -> QueuedTaskRecord:
         """Record candidate SHA, evidence, and review/gate verdicts for a running attempt."""
@@ -562,13 +588,13 @@ class PersistentTaskQueue:
         elif gate_verdict == "DEFERRED" or review_verdict == "DEFERRED":
             next_status = QueuedTaskStatus.DEFERRED
             blocker = failure_reason or "LIVE_REVIEW_UNVERIFIED"
-        elif gate_verdict == "REVISE_REQUIRED" and review_verdict == "REVISE":
+        elif gate_verdict in ("REVISE", "REVISE_REQUIRED") and review_verdict == "REVISE":
             if target.current_attempt < target.contract.max_attempts:
                 next_status = QueuedTaskStatus.REPAIR_REQUIRED
                 blocker = None
             else:
                 next_status = QueuedTaskStatus.BLOCKED
-                blocker = failure_reason or "RETRY_LIMIT_REACHED"
+                blocker = "RETRY_LIMIT_REACHED"
         else:
             next_status = QueuedTaskStatus.BLOCKED
             blocker = failure_reason or f"Gate={gate_verdict}, Review={review_verdict}"
