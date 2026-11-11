@@ -1,12 +1,12 @@
 # AIPC 2.0 — Universal Subscription-Based Multi-Agent Orchestration
 
 > **Document ID:** AIPC-ROADMAP-2.0  
-> **Version:** 0.1 — Preserved Future Roadmap (Proposal)  
-> **Prepared:** 2026-11-10  
+> **Version:** 0.2 — Phase 24 Handoff Executed; Milestone A (`A01`–`A04`) Authorized  
+> **Prepared:** 2026-11-10 (Updated: 2026-11-11)  
 > **Project:** [AI Project Controller](https://github.com/tritod-k/AI-Project-Controller)  
 > **Project owner / attribution:** K.TRITOD  
-> **Status:** **PLANNING ONLY — NOT IMPLEMENTATION AUTHORIZATION**  
-> **Dependency:** Phase 24 — Self-Development Automation & Independent Reviewer Integration — must be independently accepted and merged by the Human Commander before AIPC 2.0 implementation begins.  
+> **Status:** **MILESTONE A (`A01`–`A04`) AUTHORIZED FOR IMPLEMENTATION ON `gemini/aipc-2.0-milestone-a` (MILESTONES B, C, D REMAIN PLANNING ONLY)**  
+> **Dependency:** Phase 24 — Self-Development Automation & Independent Reviewer Integration — independently reviewed, accepted, and merged by the Human Commander via PR #4 (`26f455fd40d7728d99dcf5494c1cad9353e45988`).  
 > **Release policy:** EXPERIMENTAL / SUPERVISED until independently qualified for another classification.  
 > **Billing policy:** Subscription-authenticated Codex and Antigravity integrations only; **no separately billed AI APIs**.
 
@@ -24,13 +24,14 @@ This file permanently preserves the **intended AIPC 2.0 target architecture, ope
 - Merely placing this roadmap in the repository **does not** approve starting AIPC 2.0.
 - Historical Phase 00–23 approvals, commits, tags, and artifacts must remain intact.
 
-### Latest verified repository baseline at document creation
+### Latest verified repository baseline at Milestone A activation (2026-11-11)
 
-- Branch: `master`
-- HEAD: `1699f553f94e1ca39e2b8d8c4bde4236e916e33d`
-- Phase 23 PR #3: merged, merge commit `83578a4e56b4e549d33e8c941ea1679992ab4ebc`
-- Phase 23 state: `PASS`, Experimental / Supervised; unattended production `NO-GO`
-- **This is a historical snapshot, not a permanently expected HEAD.** Always verify `origin/master` and current `CURRENT_STATE.md` before acting.
+- Branch: `master` (active feature branch: `gemini/aipc-2.0-milestone-a`)
+- HEAD (`origin/master`): `26f455fd40d7728d99dcf5494c1cad9353e45988`
+- Phase 24 PR #4: merged into `master`, merge commit `26f455fd40d7728d99dcf5494c1cad9353e45988` (`docs/PHASE_24_COMPLETION_REPORT.md`, `docs/PHASE_24_EVIDENCE.md`)
+- Historical Phase 23 PR #3: merged, merge commit `83578a4e56b4e549d33e8c941ea1679992ab4ebc` (prior baseline `1699f553f94e1ca39e2b8d8c4bde4236e916e33d`)
+- Release state: `PASS`, Experimental / Supervised; unattended production `NO-GO`
+- **Authorized Scope:** Human Commander explicitly authorized **Milestone A (Workstreams `A01`, `A02`, `A03`, `A04`)** on branch `gemini/aipc-2.0-milestone-a`. Milestones B, C, and D remain planning-only until Milestone A is independently reviewed and accepted.
 
 ## 1. Product vision and mental model
 
@@ -389,16 +390,48 @@ AIPC 2.0 should **not** be considered complete until all of the following have c
 5. Request **explicit Human Commander authorization** for the first AIPC 2.0 milestone. Do not treat the Phase 24 authorization as permission to start AIPC 2.0.
 6. Leave the running AIPC release as `EXPERIMENTAL / SUPERVISED` until independently requalified.
 
+### 12.1 Phase 24 Handoff Execution & Workstream Gap Evaluation (2026-11-11)
+
+- **Verified `origin/master` SHA:** `26f455fd40d7728d99dcf5494c1cad9353e45988` (Merge PR #4 from `tritod-k/gemini/phase-24-self-development`, commit `76e05b4`).
+- **Phase 24 Acceptance Evidence:** `docs/PHASE_24_COMPLETION_REPORT.md` and `docs/PHASE_24_EVIDENCE.md` (380 passed regression tests, live Antigravity Flash worker + live Codex subscription Independent Reviewer verified in sanitized child environments via `tools/sanitized_exec.py`).
+- **Changed Assumptions:** Both Antigravity CLI (`agy.exe 1.5.3`) and Codex CLI (`codex-cli 0.118.0`) are live-qualified subscription runtimes on the host machine under sanitized child environments (`tools.sanitized_exec`), whereas Antigravity Argon remains unavailable on the current personal subscription account and Desktop GUI sessions remain separate from headless CLI transports.
+
+| Workstream | Post-Phase 24 Classification | Existing Code & Evidence Citations | Remaining Gap / Milestone Scope |
+|---|---|---|---|
+| **A01 — Subscription Auth & Runtime Qualification** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/adapters/gemini/doctor.py`, `src/aipc/adapters/codex/transport.py`, `src/aipc/hardening/env_isolation.py`, `src/aipc/cli.py` (`--providers`) | Unify Codex + Antigravity subscription qualification into reproducible, secret-free eligibility reports separating Desktop/UI presence from headless worker/reviewer capability, model IDs, sandbox constraints, and deterministic `BLOCKED`/`UNAVAILABLE` states under `subscription_only`. |
+| **A02 — Multi-Provider Operational Integration** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/adapters/gemini/antigravity_transport.py`, `src/aipc/adapters/codex/adapter.py`, `src/aipc/review/llm/subscription_transports.py` | Extend adapters to support qualified role-specific execution across both subscription-backed providers (`Antigravity` and `Codex`) with exact runtime/model/session identity and normalized canonical evidence. |
+| **A03 — Role-Based Provider/Model Registry** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/agents/registry.py`, `src/aipc/agents/router.py`, `src/aipc/project/models.py` (`ProjectAgents`) | Implement typed, schema-validated role registry for `Planner`, `Worker`, and `Reviewer` with capabilities, preferences, exclusions, fallback policies, requested-vs-actual model tracking, and negative eligibility tests without hardcoded provider names in core orchestration. |
+| **A04 — Planner Orchestration Engine** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/controller/task_queue.py` (`PersistentTaskQueue`, `ApprovedTaskContract`), `src/aipc/prompts/prompt_engine.py` | Implement canonical Planner Orchestration Engine producing versioned plan/task graphs bounded to human-authorized milestone scope, persisting criteria, dependencies, owner roles, prompts, and approval lineage so plans are cross-provider resumable from canonical state. |
+| **B01 — Independent Multi-Model Reviewer** | `PARTIAL` *(Deferred to Milestone B)* | `src/aipc/review/llm/subscription_transports.py`, `src/aipc/review/consensus/`, `src/aipc/review/gate.py` | Connect subscription reviewer transports and role registry to Multi-Reviewer Consensus and cross-provider policy enforcement in Milestone B. |
+| **B02 — Quota-Aware Role Fallback** | `PARTIAL` *(Deferred to Milestone B)* | `src/aipc/agents/router.py`, `src/aipc/controller/repair_coordinator.py` (`WAITING_PROVIDER`, `LIVE_REVIEW_UNVERIFIED`) | Extend pre-start quota fallback across Planner/Worker/Reviewer roles under Role Registry policy in Milestone B. |
+| **B03 — Session Isolation & Context Separation** | `ALREADY_AVAILABLE` *(Core) / `PARTIAL` (Milestone B)* | `src/aipc/review/llm/subscription_transports.py` (`IndependencePolicy`, `snapshot_candidate_workspace`), `src/aipc/controller/repair_coordinator.py` | Core fresh-session, read-only snapshot, reduced-independence labeling, and stale-SHA rejection are available from Phase 24.2/24.3; multi-role registry integration deferred to Milestone B. |
+| **B04 — Cross-Provider State Handoff & Recovery** | `PARTIAL` *(Deferred to Milestone B)* | `src/aipc/recovery/recovery_manager.py`, `src/aipc/controller/task_queue.py` | Implement canonical cross-provider handoff receipt package and full boundary fault-injection matrix in Milestone B. |
+| **C01 — Universal Project Adapters, Profiles & Templates** | `PARTIAL` *(Deferred to Milestone C)* | `src/aipc/project/models.py`, `src/aipc/plugins/` | Add multi-language project onboarding profiles and templates (Python, Node/JS, GAS offline mocks) in Milestone C. |
+| **C02 — Multi-Language Isolated Verification** | `PARTIAL` *(Deferred to Milestone C)* | `docker/Dockerfile.verify`, `src/aipc/controller/self_dev_runner.py`, `src/aipc/adapters/gemini/antigravity_transport.py` | Python container verification (`aipc-verify:py313-v1`) is `ALREADY_AVAILABLE`; Node/JS and multi-language verification profiles deferred to Milestone C. |
+| **C03 — Trusted Acceptance Test Harness & Behavioral Isolation** | `PARTIAL` *(Deferred to Milestone C)* | `src/aipc/cli.py` (`load_acceptance_rules`), `src/aipc/review/reviewer.py` | Operator-external rule loading exists; isolated per-criterion behavioral test mounts and worker-tampering harness deferred to Milestone C. |
+| **D01 — Codex Desktop / Antigravity / AIPC Interface Bridges** | `PARTIAL` *(Deferred to Milestone D)* | `src/aipc/cli.py`, `src/aipc/mcp/` | Documented CLI and MCP bridges exist; unified multi-surface task intake and state bridge deferred to Milestone D. |
+| **D02 — Multi-Project Dashboard & Subscription Usage Monitor** | `PARTIAL` *(Deferred to Milestone D)* | `src/aipc/dashboard/`, `src/aipc/observability/` | Single-project read-only dashboard and usage ledger exist; multi-project registry and subscription usage monitor deferred to Milestone D. |
+| **D03 — Production Readiness & End-to-End Qualification** | `PARTIAL` *(Deferred to Milestone D)* | `src/aipc/hardening/`, `docs/PHASE_24_COMPLETION_REPORT.md` | Full AIPC 2.0 multi-provider release qualification and operator sign-off deferred to Milestone D. |
+
+### 12.2 Staged Implementation & Pull Request Strategy
+
+1. **PR 1 — Milestone A (`gemini/aipc-2.0-milestone-a`) [IMPLEMENTED & VERIFIED — AWAITING HUMAN MERGE]:** Sequentially implemented Workstreams `A01` (`8df8d59`), `A02` (`a4acd2d`), `A03` (`0de2e4c`), and `A04` (`c900877`) under `tools.sanitized_exec`, verified 895 passing pytest tests and `ruff check`, and completed live subscription-authenticated independent review (`REV-20261112-AIPC20-MILA-c900877`, verdict `PASS`). See `docs/AIPC_2_0_MILESTONE_A_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_A_COMPLETION_REPORT.md`.
+2. **PR 2 — Milestone B (`gemini/aipc-2.0-milestone-b`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `B01`–`B04` (multi-model reviewer consensus integration, quota-aware role fallback, and cross-provider state handoff packages).
+3. **PR 3 — Milestone C (`gemini/aipc-2.0-milestone-c`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `C01`–`C03` (universal project profiles, multi-language isolated container verification, and trusted behavioral acceptance test harness).
+4. **PR 4 — Milestone D (`gemini/aipc-2.0-milestone-d`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `D01`–`D03` (multi-surface CLI/MCP bridges, multi-project dashboard & subscription usage monitor, and end-to-end AIPC 2.0 qualification).
+
 ### Mandatory new-chat context prompt (template)
 
-> Read `AGENTS.md`, `SKILL.md`, `MASTER_PLAN.md`, `CURRENT_STATE.md`, `docs/OPERATIONAL_CLI_GUIDE.md`, and `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md`. Verify `origin/master` and Phase 24 acceptance status. This roadmap is a preserved *proposal*, not authorization. Do not start AIPC 2.0 implementation unless the Human Commander explicitly authorizes its first milestone. Respect subscription-only billing and the independent-review fallback policy.
+> Read `AGENTS.md`, `SKILL.md`, `MASTER_PLAN.md`, `CURRENT_STATE.md`, `docs/OPERATIONAL_CLI_GUIDE.md`, and `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md`. Verify `origin/master` and current milestone authorization status. Do not start any unapproved milestone unless the Human Commander explicitly authorizes it. Respect subscription-only billing and the independent-review fallback policy.
 
 ## 13. Change-control log
 
 | Version | Date | Change | Authority |
 |---|---|---|---|
 | 0.1 | 2026-11-10 | Preserve AIPC 2.0 vision, subscription-only constraints, A01–D03 workstreams, provider-role fallback policy, and Phase 24 dependency. | User-requested roadmap documentation; **no implementation authorization** |
+| 0.2 | 2026-11-11 | Execute Section 12 Phase 24 handoff protocol following PR #4 merge (`26f455fd40d7728d99dcf5494c1cad9353e45988`), record A01–D03 gap evaluation and staged PR strategy, and activate **Milestone A (`A01`–`A04`)** on `gemini/aipc-2.0-milestone-a`. | Explicit Human Commander authorization for Milestone A (`A01`–`A04`); Milestones B–D remain unauthorized |
+| 0.3 | 2026-11-11 | Complete implementation, sanitized test verification (895 passed), and subscription-authenticated independent review (`REV-20261112-AIPC20-MILA-c900877`, `PASS`) for **Milestone A (`A01`–`A04`)** on `gemini/aipc-2.0-milestone-a`. | Milestone A PR ready for Human Commander review; Milestones B–D remain unauthorized |
 
 ---
 
-**End state:** Keep this roadmap visible to all future AIPC developer/reviewer sessions; treat it as controlled planning context until a future explicit milestone authorization. Preserve Phase 24 gate and all historical evidence.
+**End state:** Milestone A (`A01`–`A04`) implementation and verification are complete on branch `gemini/aipc-2.0-milestone-a`, awaiting Human Commander PR review and merge. Milestones B, C, and D remain controlled planning context until explicit future Human Commander authorization. Preserve Phase 24 gate and all historical evidence.
