@@ -172,9 +172,7 @@ def test_a02_codex_and_antigravity_worker_and_plan_modes_produce_canonical_agent
     )
 
     task = _sample_task(workspace)
-    codex_plan = asyncio.run(
-        runner.execute_task(task, provider_id="codex", mode="plan")
-    )
+    codex_plan = asyncio.run(runner.execute_task(task, provider_id="codex", mode="plan"))
     assert type(codex_plan) is AgentResult
     assert codex_plan.status == "COMPLETED"
     assert codex_plan.files_changed == []
@@ -310,9 +308,7 @@ def test_a02_structured_event_normalization_and_error_classification() -> None:
         {
             "method": "thread/tokenUsage/updated",
             "params": {
-                "tokenUsage": {
-                    "last": {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}
-                }
+                "tokenUsage": {"last": {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}}
             },
         },
         mode="plan",
@@ -384,9 +380,7 @@ def test_a02_timeout_cancellation_and_unqualified_model_handling(
     # 1. Timeout handling
     short_task = _sample_task(workspace, task_id="task-timeout", timeout=1)
     with pytest.raises(AgentTimeoutError):
-        asyncio.run(
-            runner.execute_task(short_task, provider_id="codex", mode="plan")
-        )
+        asyncio.run(runner.execute_task(short_task, provider_id="codex", mode="plan"))
 
     # 2. Pre-dispatch cancellation
     cancel_task = _sample_task(workspace, task_id="task-cancel", timeout=10)

@@ -47,9 +47,7 @@ from aipc.review.llm.subscription_transports import (
 OperationalExecutionMode = Literal["plan", "worker", "reviewer"]
 SubscriptionProviderId = Literal["codex", "gemini-antigravity"]
 OperationalEventType = Literal["message", "tool_observation", "usage", "status", "error"]
-ClassifiedErrorKind = (
-    ProviderCondition | Literal["TIMEOUT", "CANCELLED", "EXECUTION_FAILED"]
-)
+ClassifiedErrorKind = ProviderCondition | Literal["TIMEOUT", "CANCELLED", "EXECUTION_FAILED"]
 
 
 def classify_subscription_operational_error(
@@ -87,8 +85,7 @@ def classify_subscription_operational_error(
             "Subscription quota exhausted on provider runtime.",
         )
     if any(
-        token in combined
-        for token in ("rate_limit", "ratelimitexceeded", "429", "serverbusyerror")
+        token in combined for token in ("rate_limit", "ratelimitexceeded", "429", "serverbusyerror")
     ):
         return (
             ProviderCondition.RATE_LIMITED,
@@ -272,11 +269,12 @@ def normalize_antigravity_stream_event(
     if ev_type == "assistant" or (
         ev_type == "SUCCESS" and isinstance(raw_event.get("response"), str)
     ):
-        text = str(
-            raw_event.get("response")
-            or raw_event.get("text")
+        text = (
+            str(
+                raw_event.get("response") or raw_event.get("text") or "antigravity response"
+            ).strip()
             or "antigravity response"
-        ).strip() or "antigravity response"
+        )
         usage = raw_event.get("usage") if isinstance(raw_event.get("usage"), Mapping) else {}
         return NormalizedOperationalEvent(
             event_type="message",
@@ -284,27 +282,19 @@ def normalize_antigravity_stream_event(
             mode=mode,
             summary=text[:240],
             input_tokens=(
-                usage.get("input_tokens")
-                if isinstance(usage.get("input_tokens"), int)
-                else None
+                usage.get("input_tokens") if isinstance(usage.get("input_tokens"), int) else None
             ),
             output_tokens=(
-                usage.get("output_tokens")
-                if isinstance(usage.get("output_tokens"), int)
-                else None
+                usage.get("output_tokens") if isinstance(usage.get("output_tokens"), int) else None
             ),
             total_tokens=(
-                usage.get("total_tokens")
-                if isinstance(usage.get("total_tokens"), int)
-                else None
+                usage.get("total_tokens") if isinstance(usage.get("total_tokens"), int) else None
             ),
         )
 
     if ev_type in ("tool_use", "tool_call"):
         tool_name = str(raw_event.get("name") or raw_event.get("tool") or "filesystem_tool")
-        tool_input = (
-            raw_event.get("input") if isinstance(raw_event.get("input"), Mapping) else {}
-        )
+        tool_input = raw_event.get("input") if isinstance(raw_event.get("input"), Mapping) else {}
         path_val = (
             str(tool_input.get("path") or tool_input.get("file_path"))
             if (tool_input.get("path") or tool_input.get("file_path"))
@@ -320,11 +310,7 @@ def normalize_antigravity_stream_event(
         )
 
     if ev_type in ("ERROR", "error", "RESOURCE_EXHAUSTED"):
-        err_text = str(
-            raw_event.get("short_error")
-            or raw_event.get("error")
-            or ev_type
-        )
+        err_text = str(raw_event.get("short_error") or raw_event.get("error") or ev_type)
         kind, _ = classify_subscription_operational_error(stderr_or_message=err_text)
         cond_str = kind.value if isinstance(kind, ProviderCondition) else str(kind)
         return NormalizedOperationalEvent(
@@ -451,9 +437,7 @@ class SubscriptionOperationalRunner:
         pre_snapshot = snapshot_candidate_workspace(workspace) if mode == "plan" else {}
 
         dispatcher = (
-            self._codex_dispatcher
-            if provider_id == "codex"
-            else self._antigravity_dispatcher
+            self._codex_dispatcher if provider_id == "codex" else self._antigravity_dispatcher
         )
         if dispatcher is None:
             raise ProviderInterruption(ProviderCondition.UNAVAILABLE)

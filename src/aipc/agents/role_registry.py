@@ -183,9 +183,7 @@ class RoleBasedModelRegistry:
 
     def bindings_for_role(self, role: RoleName) -> tuple[RoleModelBinding, ...]:
         return tuple(
-            b
-            for b in sorted(self._bindings.values(), key=lambda x: x.binding_id)
-            if b.role == role
+            b for b in sorted(self._bindings.values(), key=lambda x: x.binding_id) if b.role == role
         )
 
     def _observed_map(self) -> dict[str, ProviderRuntimeObservation]:
@@ -368,9 +366,7 @@ class RoleBasedModelRegistry:
                         )
                     )
                     continue
-                independence = (
-                    "cross_provider" if is_cross else "same_provider_isolated_session"
-                )
+                independence = "cross_provider" if is_cross else "same_provider_isolated_session"
                 if request.reviewer_independence_policy == "prefer_cross_provider":
                     cross_provider_rank = 0 if is_cross else 1
 
@@ -398,9 +394,7 @@ class RoleBasedModelRegistry:
 
         if not eligible:
             outcome: Literal["NO_ELIGIBLE_BINDING", "FALLBACK_EXHAUSTED"] = (
-                "FALLBACK_EXHAUSTED"
-                if request.attempted_binding_ids
-                else "NO_ELIGIBLE_BINDING"
+                "FALLBACK_EXHAUSTED" if request.attempted_binding_ids else "NO_ELIGIBLE_BINDING"
             )
             return RoleResolutionDecision(
                 role=request.role,

@@ -94,9 +94,7 @@ class HumanGoalSpec(CanonicalRecord):
             ("phase_name", self.phase_name),
         ):
             if _references_unauthorized_milestone(val):
-                raise ValueError(
-                    f"{label} references unauthorized future milestone scope: '{val}'"
-                )
+                raise ValueError(f"{label} references unauthorized future milestone scope: '{val}'")
         overlap = set(self.in_scope_paths) & set(self.out_of_scope_paths)
         if overlap:
             raise ValueError(
@@ -365,9 +363,7 @@ class PlannerOrchestrationEngine:
             )
         )
         effective_scope = (
-            tuple(proposed_scope_paths)
-            if proposed_scope_paths is not None
-            else goal.in_scope_paths
+            tuple(proposed_scope_paths) if proposed_scope_paths is not None else goal.in_scope_paths
         )
         scope_expanded = bool(
             set(effective_scope) - set(goal.in_scope_paths)
@@ -611,9 +607,7 @@ class PlannerOrchestrationEngine:
             rev_res = ReviewResult.model_validate(reviewer_fn(rev_ctx, reviewer_binding))
             review_results.append(rev_res)
 
-            attempt_retries = state.retries.model_copy(
-                update={"phase_revision": attempt - 1}
-            )
+            attempt_retries = state.retries.model_copy(update={"phase_revision": attempt - 1})
             if (
                 rev_res.verdict == "ERROR"
                 or rev_res.metadata.get("live_review_status") == LIVE_REVIEW_UNVERIFIED

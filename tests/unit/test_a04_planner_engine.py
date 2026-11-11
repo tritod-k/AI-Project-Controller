@@ -266,9 +266,7 @@ def test_a04_closed_loop_planner_worker_evidence_reviewer_gate_repair_succeeds(
         case_copy = dict(review_case)
         case_copy["task"] = task_req
         case_copy["agent_result"] = agent_res
-        retries = review_case["state"].retries.model_copy(
-            update={"phase_revision": attempt - 1}
-        )
+        retries = review_case["state"].retries.model_copy(update={"phase_revision": attempt - 1})
         case_copy["state"] = review_case["state"].model_copy(
             update={
                 "current_attempt": attempt,
@@ -354,9 +352,7 @@ def test_a04_rejects_unauthorized_milestones_and_defers_unverified_live_review(
             phase_id="09",
             phase_name="Phase 09",
             goal_statement="Unauthorized Milestone B",
-            acceptance_criteria=(
-                AcceptanceCriterion(id="AC-1", statement="Test", required=True),
-            ),
+            acceptance_criteria=(AcceptanceCriterion(id="AC-1", statement="Test", required=True),),
             in_scope_paths=("src/a.py",),
             validation_commands=("pytest -q",),
         )
