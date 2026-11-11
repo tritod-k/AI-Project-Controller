@@ -4,28 +4,28 @@
 AI Project Controller
 
 ## Blueprint Version
-1.4 (AIPC 2.0 Roadmap v0.3 — Milestone A `A01`–`A04` Implemented & Verified)
+1.5 (AIPC 2.0 Roadmap v0.4 — Milestone A Merged via PR #5; Milestone B `B01`–`B03` Authorized & Active)
 
 ## Current Phase
-AIPC 2.0 — Milestone A (`A01`–`A04`: Subscription-Only Multi-Provider Foundations)
+AIPC 2.0 — Milestone B (`B01`–`B03`: Autonomous Multi-Provider Development Loop)
 
 ## Status
-AWAITING_HUMAN_MERGE (Milestone A `A01`–`A04` implemented, verified with 895 + 343 passing tests, `ruff check .`, & `ruff format --check .` under `tools.sanitized_exec`, and reviewed via subscription-authenticated independent reviewer `rev-aipc2-milestone-a-12efdcc7` `PASS` on `gemini/aipc-2.0-milestone-a`)
+IN_PROGRESS (Milestone A `A01`–`A04` accepted and merged into `master` via PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`; Milestone B `B01`–`B03` explicitly authorized on `gemini/aipc-2.0-milestone-b`)
 
 ## Current Attempt
-Milestone A Attempt 01 (`gemini/aipc-2.0-milestone-a`, candidate commit `12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c`)
+Milestone B Attempt 01 (`gemini/aipc-2.0-milestone-b`)
 
 ## Phase Gate
-MILESTONE_A_VERIFIED_AWAITING_PR_MERGE (Final merge authority belongs exclusively to Human Commander)
+MILESTONE_B_IN_PROGRESS (Final merge authority belongs exclusively to Human Commander)
 
 ## Last Stable Checkpoint
-- `master` baseline: `26f455fd40d7728d99dcf5494c1cad9353e45988` (Phase 24 merge PR #4 from `76e05b4`, following Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
+- `master` baseline: `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e` (Milestone A merge PR #5 from `65f1fc5` / `12efdcc`, following Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
 
 ## Current Branch / Worktree
-`gemini/aipc-2.0-milestone-a`, `H:/000ProjectCode/AI_Project_Controller`.
+`gemini/aipc-2.0-milestone-b`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-Milestone A formatted candidate commit `12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c` on `gemini/aipc-2.0-milestone-a` (following `146763e`, `8df8d59`, `a4acd2d`, `0de2e4c`, `c900877`).
+`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e` (`Merge pull request #5 from tritod-k/gemini/aipc-2.0-milestone-a`).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -54,15 +54,16 @@ Milestone A formatted candidate commit `12efdcc74f3e6c6e9c0f5eb5afe879ba983f563c
 - Operational Readiness & Docker Container Qualification (PR #1 & PR #2): PASS (Experimental / Supervised Merge into `master` `0c4e9466f0a31330637565ebdef204a184cd44e0`, post-merge CI Run `42432113858` `success`).
 - Phase 23 — Operational CLI & Multi-Phase Live Validation: PASS (Commander final merge authorization; PR #3 merged into `master` at `83578a4e56b4e549d33e8c941ea1679992ab4ebc`; post-merge CI `success`).
 - Phase 24 — Self-Development Automation & Independent Reviewer Integration: PASS (Commander final merge authorization; PR #4 merged into `master` at `26f455fd40d7728d99dcf5494c1cad9353e45988`; 380 regression tests PASS; live Antigravity Flash subagents & live Codex subscription Independent Reviewer qualified in sanitized child environments).
+- AIPC 2.0 — Milestone A (`A01`–`A04`: Subscription-Only Multi-Provider Foundations): PASS (Commander final merge authorization; PR #5 merged into `master` at `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`; 895 + 343 passing tests, live subscription-authenticated independent review `rev-aipc2-milestone-a-12efdcc7` `PASS`).
 
 ## Documentation Alignment
-COMPLETED — Executed Section 12 Phase 24 Handoff Protocol in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (v0.2), updated `MASTER_PLAN.md` Section 38, and synchronized `CURRENT_STATE.md` with `master` (`26f455fd40d7728d99dcf5494c1cad9353e45988`).
+COMPLETED — Recorded Milestone A PR #5 merge (`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`) and Milestone B (`B01`–`B03`) activation in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (v0.4), `MASTER_PLAN.md` Section 38.4, and `CURRENT_STATE.md`.
 
 ## Authorized Current Phase
-AIPC 2.0 — Milestone A (`A01` Subscription Authentication & Runtime Qualification, `A02` Multi-Provider Operational Integration, `A03` Role-Based Provider/Model Registry, `A04` Planner Orchestration Engine) on branch `gemini/aipc-2.0-milestone-a`. Release classification remains `EXPERIMENTAL / SUPERVISED` (`UNATTENDED_PRODUCTION = NO-GO`).
+AIPC 2.0 — Milestone B (`B01` Antigravity / Gemini Subscription Worker Automation, `B02` Independent Subscription Reviewer Gate, `B03` Repair Loop, Retry Governance & Quota-Aware Recovery) on branch `gemini/aipc-2.0-milestone-b`. Release classification remains `EXPERIMENTAL / SUPERVISED` (`UNATTENDED_PRODUCTION = NO-GO`).
 
 ## Next Authorized Phase
-None beyond Milestone A (`A01`–`A04`) — Milestones B, C, and D remain unauthorized until Milestone A is independently reviewed and accepted by the Human Commander.
+None beyond Milestone B (`B01`–`B03`) — Milestones C and D remain unauthorized until Milestone B is independently reviewed and accepted by the Human Commander.
 
 ---
 
