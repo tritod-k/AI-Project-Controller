@@ -18,9 +18,11 @@ from uuid import uuid4
 
 from pydantic import StrictBool, model_validator
 
-from aipc.controller.errors import ProviderInterruption
 from aipc.domain.models import CanonicalRecord, ReviewResult
-from aipc.hardening.env_isolation import (
+
+LIVE_REVIEW_UNVERIFIED: str = "LIVE_REVIEW_UNVERIFIED"
+
+from aipc.hardening.env_isolation import (  # noqa: E402
     ChildEnvironmentIsolationError,
     SubscriptionBoundaryError,
     assert_argv_no_credentials,
@@ -28,22 +30,20 @@ from aipc.hardening.env_isolation import (
     assert_subscription_only_mode,
     build_sanitized_child_env,
 )
-from aipc.hardening.secrets import assert_no_secrets
-from aipc.recovery.models import ProviderCondition
-from aipc.review.context import digest
-from aipc.review.llm.errors import LLMConfigurationError, LLMReviewError
-from aipc.review.llm.models import (
+from aipc.hardening.secrets import assert_no_secrets  # noqa: E402
+from aipc.recovery.models import ProviderCondition  # noqa: E402
+from aipc.review.context import digest  # noqa: E402
+from aipc.review.llm.errors import LLMConfigurationError, LLMReviewError  # noqa: E402
+from aipc.review.llm.models import (  # noqa: E402
     LLMReviewerConfig,
     LLMReviewRawResult,
     LLMReviewRequest,
     ReviewProposal,
 )
-from aipc.review.llm.request import sha
-from aipc.review.llm.reviewer import IndependentLLMReviewer
-from aipc.review.llm.transport import LLMReviewerTransport
-from aipc.version.models import Commit
-
-LIVE_REVIEW_UNVERIFIED: str = "LIVE_REVIEW_UNVERIFIED"
+from aipc.review.llm.request import sha  # noqa: E402
+from aipc.review.llm.reviewer import IndependentLLMReviewer  # noqa: E402
+from aipc.review.llm.transport import LLMReviewerTransport  # noqa: E402
+from aipc.version.models import Commit  # noqa: E402
 
 ALLOWED_SUBSCRIPTION_REVIEW_MODES: frozenset[str] = frozenset(
     {"codex_subscription", "antigravity_subscription"}
@@ -236,21 +236,20 @@ class CodexSubscriptionReviewerTransport:
                 )
         except LLMReviewError:
             raise
-        except ProviderInterruption as exc:
-            if exc.condition in (
+        except Exception as exc:
+            cond = getattr(exc, "condition", None)
+            if cond in (
                 ProviderCondition.QUOTA_EXHAUSTED,
                 ProviderCondition.RATE_LIMITED,
             ):
                 raise LLMReviewError("rate_limit") from exc
-            if exc.condition == ProviderCondition.AUTH_REQUIRED:
+            if cond == ProviderCondition.AUTH_REQUIRED:
                 raise LLMReviewError("auth") from exc
-            if exc.condition == ProviderCondition.UNAVAILABLE:
+            if cond == ProviderCondition.UNAVAILABLE:
                 err_name = type(exc).__name__
                 if "Auth" in err_name:
                     raise LLMReviewError("auth") from exc
                 raise LLMReviewError("sdk_missing") from exc
-            raise LLMReviewError("service") from exc
-        except Exception as exc:
             raise LLMReviewError("service") from exc
 
         if request.manifest.git_commit != self.subscription_config.expected_candidate_sha:
@@ -281,10 +280,15 @@ class CodexSubscriptionReviewerTransport:
             if self._state_root is not None
             else workspace / ".aipc" / "reviewer-state" / session_id
         )
+        effective_model = (
+            None
+            if self.config.model.strip().lower() in ("default", "codex-subscription-default")
+            else self.config.model
+        )
         adapter_cfg = codex_pkg.CodexAdapterConfig(
             primary_workspace=workspace,
             state_root=state_dir.resolve(),
-            model=self.config.model,
+            model=effective_model,
             sandbox="read_only",
         )
         sdk_transport = codex_tr_mod.SdkCodexTransport(adapter_cfg)
