@@ -42,8 +42,7 @@ def _utc_now() -> datetime:
 def _is_unapproved_future_scope(text: str) -> bool:
     lowered = text.strip().lower()
     return any(
-        lowered.startswith(prefix) or prefix in lowered
-        for prefix in _PROHIBITED_MILESTONE_PREFIXES
+        lowered.startswith(prefix) or prefix in lowered for prefix in _PROHIBITED_MILESTONE_PREFIXES
     )
 
 
@@ -301,13 +300,9 @@ class PersistentTaskQueue:
                 for dep in item.contract.depends_on
             )
             if item.status == QueuedTaskStatus.PENDING and deps_completed:
-                updated_tasks.append(
-                    item.model_copy(update={"status": QueuedTaskStatus.ELIGIBLE})
-                )
+                updated_tasks.append(item.model_copy(update={"status": QueuedTaskStatus.ELIGIBLE}))
             elif item.status == QueuedTaskStatus.ELIGIBLE and not deps_completed:
-                updated_tasks.append(
-                    item.model_copy(update={"status": QueuedTaskStatus.PENDING})
-                )
+                updated_tasks.append(item.model_copy(update={"status": QueuedTaskStatus.PENDING}))
             else:
                 updated_tasks.append(item)
 
@@ -384,9 +379,7 @@ class PersistentTaskQueue:
 
         for dep in target.contract.depends_on:
             if by_id[dep].status != QueuedTaskStatus.COMPLETED:
-                raise ControllerError(
-                    f"task '{task_id}' dependency '{dep}' is not COMPLETED"
-                )
+                raise ControllerError(f"task '{task_id}' dependency '{dep}' is not COMPLETED")
 
         if target_paths is not None:
             in_scope = set(target.contract.in_scope)
@@ -556,9 +549,7 @@ class PersistentTaskQueue:
         evidence_root: str,
         review_id: str,
         review_verdict: Literal["PASS", "REVISE", "BLOCKED", "ERROR", "DEFERRED"],
-        gate_verdict: Literal[
-            "PASS", "REVISE", "REVISE_REQUIRED", "BLOCKED", "ERROR", "DEFERRED"
-        ],
+        gate_verdict: Literal["PASS", "REVISE", "REVISE_REQUIRED", "BLOCKED", "ERROR", "DEFERRED"],
         failure_reason: str | None = None,
     ) -> QueuedTaskRecord:
         """Record candidate SHA, evidence, and review/gate verdicts for a running attempt."""

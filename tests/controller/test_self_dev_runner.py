@@ -165,9 +165,7 @@ def test_container_and_subprocess_verification_use_sanitized_env_without_api_key
     assert all(SYNTHETIC_API_KEY not in arg for arg in docker_argv)
 
     # Also verify real isolated_subprocess execution against the candidate smoke test
-    subproc_cfg = container_cfg.model_copy(
-        update={"verification_isolation": "isolated_subprocess"}
-    )
+    subproc_cfg = container_cfg.model_copy(update={"verification_isolation": "isolated_subprocess"})
     subproc_runner = SafeSelfDevelopmentRunner(subproc_cfg)
     real_receipt = subproc_runner.run_candidate_verification(
         pytest_targets=("tests/test_candidate_smoke.py",),

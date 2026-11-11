@@ -166,9 +166,7 @@ class BoundedRepairCoordinator:
 
         current_sha = context.checkpoint.git_commit
         prior_shas = tuple(
-            a.candidate_sha
-            for a in task_rec.attempts[:-1]
-            if a.candidate_sha is not None
+            a.candidate_sha for a in task_rec.attempts[:-1] if a.candidate_sha is not None
         )
 
         # Reviewer infrastructure or subscription quota unavailability -> DEFERRED (never PASS)
@@ -349,9 +347,7 @@ class BoundedRepairCoordinator:
         candidate_sha: str,
     ) -> RepairDispatchPlan:
         next_attempt = task_rec.current_attempt + 1
-        repair_retries = state.retries.model_copy(
-            update={"phase_revision": next_attempt - 1}
-        )
+        repair_retries = state.retries.model_copy(update={"phase_revision": next_attempt - 1})
         repair_state = state.model_copy(
             update={
                 "current_phase": phase.id,

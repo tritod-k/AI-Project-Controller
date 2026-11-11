@@ -272,9 +272,7 @@ class CodexSubscriptionReviewerTransport:
         import importlib
 
         codex_pkg = importlib.import_module(".".join(("aipc", "adapters", "codex")))
-        codex_tr_mod = importlib.import_module(
-            ".".join(("aipc", "adapters", "codex", "transport"))
-        )
+        codex_tr_mod = importlib.import_module(".".join(("aipc", "adapters", "codex", "transport")))
         state_dir = (
             self._state_root
             if self._state_root is not None
@@ -340,9 +338,7 @@ class CodexSubscriptionReviewerTransport:
                     raise LLMReviewError("service")
             payload_text = nl.join(messages).strip()
             if payload_text.startswith("```"):
-                lines = [
-                    ln for ln in payload_text.splitlines() if not ln.strip().startswith("```")
-                ]
+                lines = [ln for ln in payload_text.splitlines() if not ln.strip().startswith("```")]
                 payload_text = nl.join(lines).strip()
             return LLMReviewRawResult(
                 request_id=request.request_id,
@@ -562,9 +558,7 @@ class AntigravitySubscriptionReviewerTransport:
                     conv_id = str(res.get("conversation_id") or session_id)
                     response_text = str(res.get("response") or "").strip()
         if response_text.startswith("```"):
-            lines = [
-                ln for ln in response_text.splitlines() if not ln.strip().startswith("```")
-            ]
+            lines = [ln for ln in response_text.splitlines() if not ln.strip().startswith("```")]
             response_text = nl.join(lines).strip()
         return LLMReviewRawResult(
             request_id=request.request_id,
@@ -613,9 +607,7 @@ class SubscriptionIndependentReviewer:
         session_id = getattr(self.transport, "last_session_id", None) or (
             f"sub-rev-{uuid4().hex[:12]}"
         )
-        sanitized_verified = bool(
-            getattr(self.transport, "last_sanitized_env_verified", True)
-        )
+        sanitized_verified = bool(getattr(self.transport, "last_sanitized_env_verified", True))
 
         extra_meta: dict[str, Any] = {
             "auth_mode": self.subscription_config.auth_mode,
@@ -649,9 +641,7 @@ class SubscriptionIndependentReviewer:
 
         merged_metadata = dict(result.metadata) | extra_meta
         assert_no_secrets(merged_metadata)
-        return ReviewResult.model_validate(
-            result.model_copy(update={"metadata": merged_metadata})
-        )
+        return ReviewResult.model_validate(result.model_copy(update={"metadata": merged_metadata}))
 
 
 __all__ = [

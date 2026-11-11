@@ -58,8 +58,8 @@ jobs:
           python -m pip install build
           python -m build --wheel
 
-      - name: Run Fast Unit, Contract, Gemini, CLI, Hardening, Plugin & E2E Test Suites
+      - name: Run Fast Unit, Contract, Gemini, CLI, Hardening, Plugin, Phase 24 & E2E Test Suites
         run: |
           git config --global user.name "AIPC CI"
           git config --global user.email "ci@aipc.local"
-          python -m pytest tests/unit tests/contract tests/gemini tests/integration/test_cli.py tests/routing/test_router.py tests/routing/test_structure.py tests/consensus/test_consensus.py tests/observability/test_metrics.py tests/dashboard/test_dashboard.py tests/mcp/test_mcp_tools.py tests/hardening/test_production_hardening.py tests/plugins/test_plugin_extension_model.py tests/e2e/test_full_mock_e2e.py tests/e2e/test_provider_qualification_and_fallback.py -q -m "not live"
+          python -m pytest tests/unit tests/contract tests/gemini tests/integration/test_cli.py tests/routing/test_router.py tests/routing/test_structure.py tests/consensus/test_consensus.py tests/observability/test_metrics.py tests/dashboard/test_dashboard.py tests/mcp/test_mcp_tools.py tests/hardening/test_production_hardening.py tests/hardening/test_env_isolation.py tests/controller/test_task_queue.py tests/review/test_subscription_reviewer.py tests/controller/test_repair_and_rereview.py tests/controller/test_self_dev_runner.py tests/plugins/test_plugin_extension_model.py tests/e2e/test_full_mock_e2e.py tests/e2e/test_provider_qualification_and_fallback.py -q -m "not live"

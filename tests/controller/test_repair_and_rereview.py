@@ -87,9 +87,7 @@ def _make_context_for_sha(
     case["state"] = case["state"].model_copy(
         update={
             "current_attempt": attempt,
-            "retries": case["state"].retries.model_copy(
-                update={"phase_revision": attempt - 1}
-            ),
+            "retries": case["state"].retries.model_copy(update={"phase_revision": attempt - 1}),
             "active_task_id": case["task"].task_id,
         }
     )
