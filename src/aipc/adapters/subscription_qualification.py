@@ -57,6 +57,7 @@ UNVERIFIED_ANTIGRAVITY_MODELS: tuple[str, ...] = (
 )
 QUALIFIED_CODEX_SUBSCRIPTION_MODELS: tuple[str, ...] = (
     "codex-subscription-default",
+    "gpt-5.3-codex",
     "gpt-5-codex",
     "o4-mini",
 )
