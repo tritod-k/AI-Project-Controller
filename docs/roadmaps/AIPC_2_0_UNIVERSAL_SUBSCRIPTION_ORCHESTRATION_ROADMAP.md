@@ -415,7 +415,7 @@ AIPC 2.0 should **not** be considered complete until all of the following have c
 
 ### 12.2 Staged Implementation & Pull Request Strategy
 
-1. **PR 1 — Milestone A (`gemini/aipc-2.0-milestone-a`) [CURRENTLY AUTHORIZED]:** Implement Workstreams `A01` -> `A02` -> `A03` -> `A04` sequentially with per-workstream commits, sanitized child execution (`tools.sanitized_exec`), Antigravity Flash subagent delegation, and live Codex subscription independent review (`CodexSubscriptionReviewerTransport`).
+1. **PR 1 — Milestone A (`gemini/aipc-2.0-milestone-a`) [IMPLEMENTED & VERIFIED — AWAITING HUMAN MERGE]:** Sequentially implemented Workstreams `A01` (`8df8d59`), `A02` (`a4acd2d`), `A03` (`0de2e4c`), and `A04` (`c900877`) under `tools.sanitized_exec`, verified 895 passing pytest tests and `ruff check`, and completed live subscription-authenticated independent review (`REV-20261112-AIPC20-MILA-c900877`, verdict `PASS`). See `docs/AIPC_2_0_MILESTONE_A_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_A_COMPLETION_REPORT.md`.
 2. **PR 2 — Milestone B (`gemini/aipc-2.0-milestone-b`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `B01`–`B04` (multi-model reviewer consensus integration, quota-aware role fallback, and cross-provider state handoff packages).
 3. **PR 3 — Milestone C (`gemini/aipc-2.0-milestone-c`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `C01`–`C03` (universal project profiles, multi-language isolated container verification, and trusted behavioral acceptance test harness).
 4. **PR 4 — Milestone D (`gemini/aipc-2.0-milestone-d`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `D01`–`D03` (multi-surface CLI/MCP bridges, multi-project dashboard & subscription usage monitor, and end-to-end AIPC 2.0 qualification).
@@ -430,7 +430,8 @@ AIPC 2.0 should **not** be considered complete until all of the following have c
 |---|---|---|---|
 | 0.1 | 2026-11-10 | Preserve AIPC 2.0 vision, subscription-only constraints, A01–D03 workstreams, provider-role fallback policy, and Phase 24 dependency. | User-requested roadmap documentation; **no implementation authorization** |
 | 0.2 | 2026-11-11 | Execute Section 12 Phase 24 handoff protocol following PR #4 merge (`26f455fd40d7728d99dcf5494c1cad9353e45988`), record A01–D03 gap evaluation and staged PR strategy, and activate **Milestone A (`A01`–`A04`)** on `gemini/aipc-2.0-milestone-a`. | Explicit Human Commander authorization for Milestone A (`A01`–`A04`); Milestones B–D remain unauthorized |
+| 0.3 | 2026-11-11 | Complete implementation, sanitized test verification (895 passed), and subscription-authenticated independent review (`REV-20261112-AIPC20-MILA-c900877`, `PASS`) for **Milestone A (`A01`–`A04`)** on `gemini/aipc-2.0-milestone-a`. | Milestone A PR ready for Human Commander review; Milestones B–D remain unauthorized |
 
 ---
 
-**End state:** Milestone A (`A01`–`A04`) is active on branch `gemini/aipc-2.0-milestone-a`. Milestones B, C, and D remain controlled planning context until explicit future Human Commander authorization. Preserve Phase 24 gate and all historical evidence.
+**End state:** Milestone A (`A01`–`A04`) implementation and verification are complete on branch `gemini/aipc-2.0-milestone-a`, awaiting Human Commander PR review and merge. Milestones B, C, and D remain controlled planning context until explicit future Human Commander authorization. Preserve Phase 24 gate and all historical evidence.

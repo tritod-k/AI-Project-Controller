@@ -4,19 +4,19 @@
 AI Project Controller
 
 ## Blueprint Version
-1.3 (AIPC 2.0 Roadmap v0.2 — Milestone A Activated)
+1.4 (AIPC 2.0 Roadmap v0.3 — Milestone A `A01`–`A04` Implemented & Verified)
 
 ## Current Phase
 AIPC 2.0 — Milestone A (`A01`–`A04`: Subscription-Only Multi-Provider Foundations)
 
 ## Status
-IN_PROGRESS (Phase 24 PR #4 Merged into `master` at `26f455fd40d7728d99dcf5494c1cad9353e45988`; Milestone A `A01`–`A04` Explicitly Authorized by Human Commander on `gemini/aipc-2.0-milestone-a`)
+AWAITING_HUMAN_MERGE (Milestone A `A01`–`A04` implemented, verified with 895 passing tests & `ruff check` under `tools.sanitized_exec`, and reviewed via subscription-authenticated independent reviewer `REV-20261112-AIPC20-MILA-c900877` `PASS` on `gemini/aipc-2.0-milestone-a`)
 
 ## Current Attempt
-Milestone A Attempt 01 (`gemini/aipc-2.0-milestone-a`)
+Milestone A Attempt 01 (`gemini/aipc-2.0-milestone-a`, candidate commit `c9008772d42f02b6696510fda98587a7cea30a97`)
 
 ## Phase Gate
-PHASE_24_PASS_AND_MERGED (Milestone A `A01`–`A04` Active; Final merge authority belongs exclusively to Human Commander)
+MILESTONE_A_VERIFIED_AWAITING_PR_MERGE (Final merge authority belongs exclusively to Human Commander)
 
 ## Last Stable Checkpoint
 - `master` baseline: `26f455fd40d7728d99dcf5494c1cad9353e45988` (Phase 24 merge PR #4 from `76e05b4`, following Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
@@ -25,7 +25,7 @@ PHASE_24_PASS_AND_MERGED (Milestone A `A01`–`A04` Active; Final merge authorit
 `gemini/aipc-2.0-milestone-a`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-Phase 24 PR #4 merge commit `26f455fd40d7728d99dcf5494c1cad9353e45988` on `master` (branch base for `gemini/aipc-2.0-milestone-a`).
+Milestone A Workstream A04 commit `c9008772d42f02b6696510fda98587a7cea30a97` on `gemini/aipc-2.0-milestone-a` (following `146763e`, `8df8d59`, `a4acd2d`, `0de2e4c`).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
