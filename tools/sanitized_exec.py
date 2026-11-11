@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         list(checked_argv),
         cwd=str(cwd) if cwd is not None else None,
         env=sanitized_env,
+        stdin=subprocess.DEVNULL,
         check=False,
     )
     return int(proc.returncode)
