@@ -15,8 +15,16 @@ class ControllerJournalError(ControllerError):
 class ProviderInterruption(AgentError):
     """Adapter/caller-supplied operational condition, never inferred from prose."""
 
-    def __init__(self, condition: ProviderCondition):
+    def __init__(
+        self,
+        condition: ProviderCondition,
+        *,
+        pre_start_clean: bool = True,
+        ambiguous_side_effects: bool = False,
+    ):
         self.condition = ProviderCondition(condition)
         if self.condition == ProviderCondition.AVAILABLE:
             raise ValueError("interruption requires an unavailable provider condition")
+        self.ambiguous_side_effects = bool(ambiguous_side_effects or not pre_start_clean)
+        self.pre_start_clean = bool(pre_start_clean and not self.ambiguous_side_effects)
         super().__init__("worker provider unavailable")

@@ -1,7 +1,7 @@
 # AI Project Controller — Master Implementation Plan
 
-> Version: 1.2  
-> Status: Implementation Blueprint  
+> Version: 1.2
+> Status: Implementation Blueprint
 > Primary Goal: Build a provider-neutral AI project orchestrator that can plan work, dispatch tasks to coding agents, normalize heterogeneous agent outputs, independently review results, enforce phase gates, route approvals, persist state, and continue safely across multiple phases and multiple AI providers.
 
 ---
@@ -3293,12 +3293,30 @@ Following verification of the Phase 24 merge (`26f455fd40d7728d99dcf5494c1cad935
 
 Milestones B (`B01`–`B04`), C (`C01`–`C03`), and D (`D01`–`D03`) remain planning-only until Milestone A is independently reviewed and accepted by the Human Commander.
 
-## 38.3 Milestone A Implementation & Verification Summary (`c900877`)
+## 38.3 Milestone A Implementation & Verification Summary (`c900877` / `12efdcc` -> Merged PR #5 `ff1fa4a`)
 
-Workstreams `A01`–`A04` have been sequentially implemented and verified on branch `gemini/aipc-2.0-milestone-a`:
+Workstreams `A01`–`A04` have been sequentially implemented, verified, and merged into `master` via PR #5 (`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`):
 - **A01 (`8df8d59`)**: `src/aipc/adapters/subscription_qualification.py` & `tests/unit/test_a01_subscription_qualification.py`.
 - **A02 (`a4acd2d`)**: `src/aipc/adapters/operational_integration.py` & `tests/unit/test_a02_operational_integration.py`.
 - **A03 (`0de2e4c`)**: `src/aipc/agents/role_registry.py` & `tests/unit/test_a03_role_registry.py`.
 - **A04 (`c900877`)**: `src/aipc/controller/planner_engine.py`, `src/aipc/controller/__init__.py`, & `tests/unit/test_a04_planner_engine.py`.
-- **Verification**: `895 passed` in sanitized pytest suite (`tools.sanitized_exec`), `ruff check src/ tests/ tools/` clean (`0 errors`), and live subscription-authenticated independent review `REV-20261112-AIPC20-MILA-c900877` (`PASS`). See `docs/AIPC_2_0_MILESTONE_A_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_A_COMPLETION_REPORT.md`.
+- **Verification & Merge**: `895 passed` + `343 passed` in sanitized pytest suites (`tools.sanitized_exec`), `ruff check` & `ruff format --check` clean (`0 errors`), live subscription-authenticated independent review `rev-aipc2-milestone-a-12efdcc7` (`PASS`), and merged into `master` via PR #5 (`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`). See `docs/AIPC_2_0_MILESTONE_A_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_A_COMPLETION_REPORT.md`.
+
+## 38.4 AIPC 2.0 Milestone B Authorization (`B01`–`B03`)
+
+Following verification and merge of Milestone A (`PR #5`, `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`) into `master`, the Human Commander explicitly authorized **AIPC 2.0 — Milestone B (Workstreams `B01`, `B02`, and `B03`)** on feature branch `gemini/aipc-2.0-milestone-b`:
+
+- **Workstream B01 — Antigravity / Gemini Subscription Worker Automation**: Automate bounded implementation and test execution through qualified Antigravity/Gemini subscription runtimes in isolated candidate git worktrees; capture prompt, model, session ID, changed files, diffs, command receipts, and exact commit SHA; enforce timeout, cancellation, no-op detection, and forbidden-path guards (preventing modification of governance files, secrets, or stable runner paths).
+- **Workstream B02 — Independent Subscription Reviewer Gate**: Integrate the subscription-based independent reviewer directly into the Milestone B autonomous loop with fresh reviewer sessions, read-only candidate access, exact commit SHA binding, and structured criterion-by-criterion `ReviewResult`; enforce default cross-provider review (`prefer_cross_provider`) and explicit `reduced_independence` labeling + human escalation requirements when same-provider fallback is used on high-risk changes; fail closed on timeout, quota exhaustion, malformed output, or SHA mismatch.
+- **Workstream B03 — Repair Loop, Retry Governance & Quota-Aware Recovery**: Connect structured reviewer findings (`REVISE`) and verification failures into bounded automatic repair tasks integrated with `PlannerOrchestrationEngine`, `PersistentTaskQueue`, and `BoundedRepairCoordinator`; distinguish implementation failures (`REVISE` -> bounded repair attempt with fresh SHA) from provider availability/quota events (`WAITING_PROVIDER` / cooldown pause without consuming implementation retry budget) and ambiguous side effects (`WAITING_HUMAN` reconciliation required before redispatch); enforce small configurable retry limits and halt cleanly (`HALT_ON_RETRY_EXHAUSTION` / `HUMAN_REVIEW_REQUIRED`) when exhausted.
+
+Milestones C (`C01`–`C03`) and D (`D01`–`D03`) remain planning-only until Milestone B is independently reviewed and accepted by the Human Commander.
+
+## 38.5 Milestone B Implementation & Verification Summary (`B01`–`B03`)
+
+Workstreams `B01`–`B03` (reconciling and preserving all original `B01`–`B04` acceptance and exit criteria in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` v0.5) have been sequentially implemented and verified on `gemini/aipc-2.0-milestone-b`:
+- **B01 (`3942f4a`)**: `src/aipc/adapters/subscription_worker.py` & `tests/unit/test_b01_subscription_worker_automation.py` (`5 passed`).
+- **B02**: `src/aipc/review/subscription_reviewer_gate.py`, `src/aipc/review/__init__.py`, & `tests/unit/test_b02_subscription_reviewer_gate.py` (`5 passed`).
+- **B03**: `src/aipc/controller/milestone_b_orchestrator.py`, `src/aipc/controller/__init__.py`, & `tests/unit/test_b03_repair_retry_and_recovery.py` (`4 passed`).
+- **Verification & Live Independent Review**: `14 passed` in `B01`–`B03` unit/boundary suites, `65 passed` in combined Milestone A/B + Phase 24 suite, `122 passed` in `tests/review/` + `tests/consensus/`, `31 passed` in `tests/gemini/test_antigravity_transport.py` (including live `aipc-verify:py313-v1` Docker container isolation), `ruff check` & `ruff format --check` clean (`0 errors`), and live cross-provider Codex subscription independent review (`codex-cli 0.167.1` in `read-only` sandbox) returned verdict **`PASS`** (`confidence: 0.95`) on `76a5b5748424e627a241fd8475646c855afacafd`. See `docs/AIPC_2_0_MILESTONE_B_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_B_COMPLETION_REPORT.md`.
 

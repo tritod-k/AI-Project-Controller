@@ -32,12 +32,41 @@ from aipc.controller.task_queue import (
 )
 
 if TYPE_CHECKING:
+    from aipc.controller.milestone_b_orchestrator import (
+        BoundaryResumeDecision,
+        CrossProviderHandoffPackage,
+        HandoffBoundaryStage,
+        HandoffNextAuthorizedAction,
+        HandoffReviewStatus,
+        MilestoneBFinalStatus,
+        MilestoneBOrchestrationResult,
+        MilestoneBRepairAndRecoveryOrchestrator,
+        RoleFailoverOutcome,
+        RoleQuotaFailoverDecision,
+        WorkerAttemptExecutionOutcome,
+        WorkerStepCallable,
+    )
     from aipc.controller.planner_engine import (
         ClosedLoopCycleResult,
         HumanGoalSpec,
         PlannerOrchestrationEngine,
         PlannerStageProposal,
     )
+
+_LAZY_B03_EXPORTS = {
+    "BoundaryResumeDecision",
+    "CrossProviderHandoffPackage",
+    "HandoffBoundaryStage",
+    "HandoffNextAuthorizedAction",
+    "HandoffReviewStatus",
+    "MilestoneBFinalStatus",
+    "MilestoneBOrchestrationResult",
+    "MilestoneBRepairAndRecoveryOrchestrator",
+    "RoleFailoverOutcome",
+    "RoleQuotaFailoverDecision",
+    "WorkerAttemptExecutionOutcome",
+    "WorkerStepCallable",
+}
 
 
 def __getattr__(name: str):
@@ -50,11 +79,16 @@ def __getattr__(name: str):
         from aipc.controller import planner_engine
 
         return getattr(planner_engine, name)
+    if name in _LAZY_B03_EXPORTS:
+        from aipc.controller import milestone_b_orchestrator
+
+        return getattr(milestone_b_orchestrator, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
     "ApprovedTaskContract",
+    "BoundaryResumeDecision",
     "BoundedRepairCoordinator",
     "CandidateImportOriginReport",
     "CandidateVerificationReceipt",
@@ -65,8 +99,15 @@ __all__ = [
     "ControllerJournalError",
     "ControllerPolicy",
     "ControllerResult",
+    "CrossProviderHandoffPackage",
+    "HandoffBoundaryStage",
+    "HandoffNextAuthorizedAction",
+    "HandoffReviewStatus",
     "HumanGoalSpec",
     "IMPORT_ORIGIN_MISMATCH",
+    "MilestoneBFinalStatus",
+    "MilestoneBOrchestrationResult",
+    "MilestoneBRepairAndRecoveryOrchestrator",
     "PersistentTaskQueue",
     "PlannerOrchestrationEngine",
     "PlannerStageProposal",
@@ -76,11 +117,15 @@ __all__ = [
     "RepairAction",
     "RepairCycleEvaluation",
     "RepairDispatchPlan",
+    "RoleFailoverOutcome",
+    "RoleQuotaFailoverDecision",
     "SafeSelfDevelopmentRunner",
     "StableCandidateConfig",
     "TaskAttemptLedger",
     "TaskQueueSnapshot",
     "VERIFICATION_ISOLATION_BLOCKED",
+    "WorkerAttemptExecutionOutcome",
+    "WorkerStepCallable",
     "assert_stable_process_free_of_candidate_imports",
     "verify_candidate_import_origin",
 ]

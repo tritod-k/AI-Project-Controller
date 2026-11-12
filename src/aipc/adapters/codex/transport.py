@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import importlib.metadata
 import re
+import subprocess
 from pathlib import Path
 from typing import Protocol
 
@@ -42,7 +43,55 @@ def deny_escalation(method, params):
     raise CodexProtocolError("unsupported server request denied; close transport")
 
 
-def install_denial_guard(client):
+def _bind_sanitized_sync_start(sync, clean_env: dict[str, str]) -> None:
+    """Bind a per-instance start() on pinned 0.160.0 CodexClient that never reads os.environ."""
+    client_mod = importlib.import_module("openai_codex.client")
+
+    def _sanitized_start() -> None:
+        if sync._proc is not None:
+            return
+        path_dirs = ()
+        if sync.config.launch_args_override is not None:
+            args = list(sync.config.launch_args_override)
+        else:
+            codex_bin = client_mod._resolve_codex_bin(sync.config)
+            if sync.config.codex_bin is None:
+                path_dirs = client_mod._installed_codex_path_dirs()
+            args = [str(codex_bin)]
+            for kv in sync.config.config_overrides:
+                args.extend(["--config", kv])
+            args.extend(["app-server", "--listen", "stdio://"])
+
+        proc_env = dict(clean_env)
+        if getattr(sync.config, "env", None):
+            proc_env.update(sync.config.env)
+        client_mod._prepend_path_dirs(proc_env, path_dirs)
+
+        if sync.config.launch_args_override is None:
+            sync._checkout_capabilities = client_mod.CheckoutCapabilities(
+                command=tuple(args[:-2]),
+                cwd=sync.config.cwd,
+                env=proc_env.copy(),
+            )
+
+        sync._proc = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            cwd=sync.config.cwd,
+            env=proc_env,
+            bufsize=1,
+        )
+        sync._start_stderr_drain_thread()
+        sync._start_reader_thread()
+
+    sync.start = _sanitized_start
+
+
+def install_denial_guard(client, env=None):
     """The public facade has no handler argument. Fail on any pinned-layout drift.
 
     This sole compatibility hook is installed BEFORE SDK initialization. All
@@ -53,6 +102,15 @@ def install_denial_guard(client):
         if not callable(sync._approval_handler):
             raise AttributeError
         sync._approval_handler = deny_escalation
+        if env is not None:
+            clean_env = dict(env)
+            if hasattr(sync, "config"):
+                try:
+                    sync.config.env = dict(clean_env)
+                except AttributeError:
+                    pass
+            if callable(getattr(sync, "start", None)) and hasattr(sync, "_proc"):
+                _bind_sanitized_sync_start(sync, clean_env)
     except AttributeError:
         raise CodexUnsupportedVersionError() from None
 
@@ -88,8 +146,9 @@ def mcp_disables(servers):
 
 
 class SdkCodexTransport:
-    def __init__(self, config):
+    def __init__(self, config, *, env=None):
         self.config = config
+        self.env = dict(env) if env is not None else None
         self.client = None
         self.sdk = None
         self.threads = {}
@@ -188,7 +247,7 @@ class SdkCodexTransport:
                 client_name="aipc_codex_adapter",
             )
         )
-        install_denial_guard(client)
+        install_denial_guard(client, env=self.env)
         try:
             await client.__aenter__()
             version = client.metadata.serverInfo.version.split()[0]
@@ -212,7 +271,7 @@ class SdkCodexTransport:
                         client_name="aipc_codex_adapter",
                     )
                 )
-                install_denial_guard(client)
+                install_denial_guard(client, env=self.env)
                 await client.__aenter__()
                 effective = await self._effective(client, workspace)
             validate_effective_config(effective, self.config.sandbox)

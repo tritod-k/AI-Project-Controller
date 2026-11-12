@@ -1,13 +1,13 @@
 # AIPC 2.0 — Universal Subscription-Based Multi-Agent Orchestration
 
-> **Document ID:** AIPC-ROADMAP-2.0  
-> **Version:** 0.2 — Phase 24 Handoff Executed; Milestone A (`A01`–`A04`) Authorized  
-> **Prepared:** 2026-11-10 (Updated: 2026-11-11)  
-> **Project:** [AI Project Controller](https://github.com/tritod-k/AI-Project-Controller)  
-> **Project owner / attribution:** K.TRITOD  
-> **Status:** **MILESTONE A (`A01`–`A04`) AUTHORIZED FOR IMPLEMENTATION ON `gemini/aipc-2.0-milestone-a` (MILESTONES B, C, D REMAIN PLANNING ONLY)**  
-> **Dependency:** Phase 24 — Self-Development Automation & Independent Reviewer Integration — independently reviewed, accepted, and merged by the Human Commander via PR #4 (`26f455fd40d7728d99dcf5494c1cad9353e45988`).  
-> **Release policy:** EXPERIMENTAL / SUPERVISED until independently qualified for another classification.  
+> **Document ID:** AIPC-ROADMAP-2.0
+> **Version:** 0.5 — Milestone A (`A01`–`A04`) Merged via PR #5; Milestone B (`B01`–`B03`) Realigned with Full `B01`–`B04` Criteria Preservation
+> **Prepared:** 2026-11-10 (Updated: 2026-11-12)
+> **Project:** [AI Project Controller](https://github.com/tritod-k/AI-Project-Controller)
+> **Project owner / attribution:** K.TRITOD
+> **Status:** **MILESTONE B (`B01`–`B03`) AUTHORIZED FOR IMPLEMENTATION ON `gemini/aipc-2.0-milestone-b` (MILESTONES C & D REMAIN PLANNING ONLY)**
+> **Dependency:** Phase 24 (PR #4, `26f455fd40d7728d99dcf5494c1cad9353e45988`) and AIPC 2.0 Milestone A (`A01`–`A04`, PR #5, `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`) — independently reviewed, accepted, and merged by the Human Commander.
+> **Release policy:** EXPERIMENTAL / SUPERVISED until independently qualified for another classification.
 > **Billing policy:** Subscription-authenticated Codex and Antigravity integrations only; **no separately billed AI APIs**.
 
 ---
@@ -177,33 +177,40 @@ Do **not** preassign exact phase numbers or implementation status to these works
 - Permit Planner provider changes without reconstructing an unknown prior chat.
 - **Exit criterion:** plan from one provider is verifiably resumable by another from stored canonical state; out-of-scope work rejected.
 
-### Milestone B — Independent review, isolation and failover
+### Milestone B — Subscription Worker Automation, Independent Reviewer Gate & Quota-Aware Recovery (`B01`–`B03`)
 
-**B01 — Independent Multi-Model Reviewer**
+#### Original `B01`–`B04` to Authorized `B01`–`B03` Criteria Preservation Mapping
 
-- Subscription-backed review transports that cannot write to implementation workspace.
-- Connect to current canonical Reviewer and Multi-Reviewer Consensus rather than creating a new competing gate.
-- Review exact commit SHA, immutable evidence, relevant diffs and explicit criteria.
-- **Exit criterion:** real qualified independent reviewer plus deterministic gate; errors and missing evidence fail closed.
+The Human Commander authorized reorganizing Milestone B into three cohesive workstreams (`B01`, `B02`, `B03`) without removing any original acceptance or exit criteria:
 
-**B02 — Quota-Aware Role Fallback**
+| Original Workstream (`v0.1`–`v0.3`) | Original Acceptance & Exit Criteria | Authorized Milestone B Workstream (`v0.5`) | Preservation Status |
+|---|---|---|---|
+| *(Worker Automation Pre-Review Prerequisite)* | Isolated candidate git worktree execution, subscription-only worker automation (`subscription_worker.py`), prompt/model/session/diff/command receipt/SHA capture, forbidden-path & secret protection, no-op/timeout/cancellation enforcement, canonical `AgentResult`. | **B01 — Antigravity Subscription Worker Automation** | **100% Preserved & Delivered in `B01`** |
+| **Original B01 — Independent Multi-Model Reviewer** | Subscription-backed review transports that cannot write to implementation workspace; connect to canonical `Reviewer`, `ConsensusEngine`, and `PhaseGate`; review exact commit SHA, immutable evidence, relevant diffs, and explicit criteria; real qualified independent reviewer + deterministic gate; errors/missing evidence fail closed. | **B02 — Independent Subscription Reviewer Gate** | **100% Preserved in `B02`** |
+| **Original B03 — Session Isolation & Context Separation** | Fresh Reviewer session and read-only evidence projection; no worker/planner shared session or hidden history; dedicated audit of reviewer-provider identity, role conflicts, and `reduced_independence` exception; tests prove self-review, mutable review, and stale-SHA review are rejected. | **B02 — Independent Subscription Reviewer Gate** | **100% Preserved in `B02`** |
+| **Original B02 — Quota-Aware Role Fallback** | Preserve bounded operational-failure semantics; extend qualification and fallback per role (`planner`, `worker`, `reviewer`) without automatically retrying ambiguous side effects; explicit role policies and bounded retries; no billing fallback; simulated and live-where-available quota failure scenarios with zero duplicate mutations or unauthorized progression. | **B03 — Repair Loop, Retry Governance & Quota-Aware Recovery** | **100% Preserved in `B03`** |
+| **Original B04 — Cross-Provider State Handoff & Recovery** | Canonical durable handoff packages, journals, exact Git checkpoint, current approval state, pending attempts, unresolved findings; resume after app switch, quota exhaustion, or process restart without reliance on unseen conversation memory; fault-injection test for interruption at every consequential dispatch/review/publication boundary. | **B03 — Repair Loop, Retry Governance & Quota-Aware Recovery** | **100% Preserved in `B03`** |
 
-- Preserve existing bounded operational-failure semantics.
-- Extend qualification and fallback per role (not just workers) without automatically retrying ambiguous side effects.
-- Explicit role policies and bounded retries, no billing fallback.
-- **Exit criterion:** simulated and live-where-available quota failure scenarios with no duplicate mutations or unauthorized progression.
+**B01 — Antigravity Subscription Worker Automation**
 
-**B03 — Session Isolation & Context Separation**
+- Complete `src/aipc/adapters/subscription_worker.py` to automate bounded implementation and verification execution through qualified Antigravity/Gemini (and Codex) subscription runtimes inside isolated candidate git worktrees.
+- Capture prompt digest, `model_requested`, `model_used`, `session_id`, changed files, diffs, command receipts, and exact 40-char commit SHA in secret-free durable artifacts.
+- Enforce timeout, cancellation, no-op detection, and forbidden-path guards (preventing modification of governance files, secrets, or stable runner paths).
+- **Exit criterion:** deterministic unit and boundary tests verify subscription-only worker execution, safe worktree isolation, forbidden-path revert, and canonical `AgentResult` output.
 
-- Fresh Reviewer session and read-only evidence projection; no worker/planner shared session or hidden history.
-- Dedicated audit of reviewer-provider identity, role conflicts, and reduced-independence exception.
-- **Exit criterion:** tests prove self-review/mutable review and stale-SHA review are rejected.
+**B02 — Independent Subscription Reviewer Gate** *(consolidating Original `B01` + Original `B03`)*
 
-**B04 — Cross-Provider State Handoff & Recovery**
+- Integrate qualified subscription reviewer transports (`openai_codex` in `read_only` sandbox and policy-gated `google_antigravity` in `--mode plan --sandbox`) directly with canonical `Reviewer`, `ConsensusEngine`, and `PhaseGate` without creating a competing gate.
+- Enforce read-only candidate workspace isolation (pre/post SHA-256 snapshot verification), fresh reviewer session/context separation (rejecting shared worker/planner sessions or inherited chat history), and exact 40-char candidate commit SHA binding.
+- Enforce default cross-provider review (`prefer_cross_provider` / `cross_provider_required`) and explicit `reduced_independence` labeling + human escalation (`HUMAN_REVIEW_REQUIRED`) when same-provider isolated fallback is used on high-risk changes.
+- **Exit criterion:** real qualified independent reviewer plus deterministic `PhaseGate`; tests prove self-review, shared-session review, mutable review, stale-SHA review, missing evidence, timeout, and quota exhaustion all fail closed.
 
-- Canonical durable handoff packages, journals, exact Git checkpoint, current approval state, pending attempts, unresolved findings.
-- Resume after app switch, quota exhaustion or process restart without reliance on unseen conversation memory.
-- **Exit criterion:** fault-injection test for interruption at every consequential dispatch/review/publication boundary.
+**B03 — Repair Loop, Retry Governance & Quota-Aware Recovery** *(consolidating Original `B02` + Original `B04` + Bounded Repair Loop)*
+
+- Connect structured reviewer findings (`REVISE`) and verification failures into bounded automatic repair and re-review integrated with `PlannerOrchestrationEngine`, `PersistentTaskQueue`, and `BoundedRepairCoordinator`, requiring a fresh candidate SHA and fresh verification on every repair attempt.
+- Implement per-role (`planner`, `worker`, `reviewer`) quota-aware fallback preserving bounded operational-failure semantics: pre-start quota exhaustion with verified clean state fails over to the next qualified role binding or pauses in `WAITING_PROVIDER` without burning implementation retries or falling back to paid APIs; mid-task interruptions or ambiguous side effects halt in `WAITING_HUMAN` requiring reconciliation before redispatch.
+- Produce canonical durable cross-provider state handoff packages (`CrossProviderHandoffPackage` containing all Section 7 minimum handoff receipt fields: `project_id`, `milestone_id`, `task_id`, `attempt_id`, `approval_scope_digest`, `stable_controller_sha`, `candidate_sha`, `branch`, `worktree`, `provider`, `model_requested`, `model_actual_if_known`, `role`, `runtime_qualification`, `session_identity`, `test_receipts`, `review_status`, `reviewed_sha`, `unresolved_findings`, `blockers`, `next_authorized_action`) so execution can safely resume after provider switch, quota exhaustion, or process restart without unseen conversation memory.
+- **Exit criterion:** deterministic tests cover bounded repair -> re-review -> `PASS`, retry exhaustion (`HALT_ON_RETRY_EXHAUSTION` / `HUMAN_REVIEW_REQUIRED`), per-role quota failover with zero duplicate mutations, and fault-injection interruption/restart recovery across consequential dispatch, verification, review, repair, and handoff/publication boundaries.
 
 ### Milestone C — Universal project and trusted verification support
 
@@ -253,7 +260,7 @@ Do **not** preassign exact phase numbers or implementation status to these works
 
 - **Phase 24 first.** Reuse its stable-runner self-development loop and subscription reviewer bridge as the foundation, not a second orchestration stack.
 - Within AIPC 2.0, **A01 → A02/A03 → A04** is the first foundational sequence. A03 and selected D01 minimal interface work can progress alongside A02 if worktrees/files do not conflict.
-- **B01–B04** build on proven role registry and provider qualification. Reviewer availability must not be invented to unblock a milestone.
+- **B01–B03** (reconciling original `B01`–`B04` with zero dropped acceptance/exit criteria) build on proven role registry and provider qualification. Reviewer availability must not be invented to unblock a milestone.
 - **C01/C02/C03** provide portable project execution and stronger behavioral verification. C03 may be pulled earlier if risk assessment or release gates require it.
 - **D01 minimal bridge** can start early; **D02/D03 full** follow qualification.
 - No milestone is allowed to lower safety, delete historical checkpoints, or relax approved acceptance rules simply to improve throughput.
@@ -398,14 +405,13 @@ AIPC 2.0 should **not** be considered complete until all of the following have c
 
 | Workstream | Post-Phase 24 Classification | Existing Code & Evidence Citations | Remaining Gap / Milestone Scope |
 |---|---|---|---|
-| **A01 — Subscription Auth & Runtime Qualification** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/adapters/gemini/doctor.py`, `src/aipc/adapters/codex/transport.py`, `src/aipc/hardening/env_isolation.py`, `src/aipc/cli.py` (`--providers`) | Unify Codex + Antigravity subscription qualification into reproducible, secret-free eligibility reports separating Desktop/UI presence from headless worker/reviewer capability, model IDs, sandbox constraints, and deterministic `BLOCKED`/`UNAVAILABLE` states under `subscription_only`. |
-| **A02 — Multi-Provider Operational Integration** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/adapters/gemini/antigravity_transport.py`, `src/aipc/adapters/codex/adapter.py`, `src/aipc/review/llm/subscription_transports.py` | Extend adapters to support qualified role-specific execution across both subscription-backed providers (`Antigravity` and `Codex`) with exact runtime/model/session identity and normalized canonical evidence. |
-| **A03 — Role-Based Provider/Model Registry** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/agents/registry.py`, `src/aipc/agents/router.py`, `src/aipc/project/models.py` (`ProjectAgents`) | Implement typed, schema-validated role registry for `Planner`, `Worker`, and `Reviewer` with capabilities, preferences, exclusions, fallback policies, requested-vs-actual model tracking, and negative eligibility tests without hardcoded provider names in core orchestration. |
-| **A04 — Planner Orchestration Engine** | `PARTIAL` *(Authorized in Milestone A)* | `src/aipc/controller/task_queue.py` (`PersistentTaskQueue`, `ApprovedTaskContract`), `src/aipc/prompts/prompt_engine.py` | Implement canonical Planner Orchestration Engine producing versioned plan/task graphs bounded to human-authorized milestone scope, persisting criteria, dependencies, owner roles, prompts, and approval lineage so plans are cross-provider resumable from canonical state. |
-| **B01 — Independent Multi-Model Reviewer** | `PARTIAL` *(Deferred to Milestone B)* | `src/aipc/review/llm/subscription_transports.py`, `src/aipc/review/consensus/`, `src/aipc/review/gate.py` | Connect subscription reviewer transports and role registry to Multi-Reviewer Consensus and cross-provider policy enforcement in Milestone B. |
-| **B02 — Quota-Aware Role Fallback** | `PARTIAL` *(Deferred to Milestone B)* | `src/aipc/agents/router.py`, `src/aipc/controller/repair_coordinator.py` (`WAITING_PROVIDER`, `LIVE_REVIEW_UNVERIFIED`) | Extend pre-start quota fallback across Planner/Worker/Reviewer roles under Role Registry policy in Milestone B. |
-| **B03 — Session Isolation & Context Separation** | `ALREADY_AVAILABLE` *(Core) / `PARTIAL` (Milestone B)* | `src/aipc/review/llm/subscription_transports.py` (`IndependencePolicy`, `snapshot_candidate_workspace`), `src/aipc/controller/repair_coordinator.py` | Core fresh-session, read-only snapshot, reduced-independence labeling, and stale-SHA rejection are available from Phase 24.2/24.3; multi-role registry integration deferred to Milestone B. |
-| **B04 — Cross-Provider State Handoff & Recovery** | `PARTIAL` *(Deferred to Milestone B)* | `src/aipc/recovery/recovery_manager.py`, `src/aipc/controller/task_queue.py` | Implement canonical cross-provider handoff receipt package and full boundary fault-injection matrix in Milestone B. |
+| **A01 — Subscription Auth & Runtime Qualification** | `ALREADY_AVAILABLE` *(Merged in Milestone A PR #5 `ff1fa4a`)* | `src/aipc/adapters/subscription_qualification.py`, `tests/unit/test_a01_subscription_qualification.py` | Delivered and verified in Milestone A. |
+| **A02 — Multi-Provider Operational Integration** | `ALREADY_AVAILABLE` *(Merged in Milestone A PR #5 `ff1fa4a`)* | `src/aipc/adapters/operational_integration.py`, `tests/unit/test_a02_operational_integration.py` | Delivered and verified in Milestone A. |
+| **A03 — Role-Based Provider/Model Registry** | `ALREADY_AVAILABLE` *(Merged in Milestone A PR #5 `ff1fa4a`)* | `src/aipc/agents/role_registry.py`, `tests/unit/test_a03_role_registry.py` | Delivered and verified in Milestone A. |
+| **A04 — Planner Orchestration Engine** | `ALREADY_AVAILABLE` *(Merged in Milestone A PR #5 `ff1fa4a`)* | `src/aipc/controller/planner_engine.py`, `tests/unit/test_a04_planner_engine.py` | Delivered and verified in Milestone A. |
+| **B01 — Antigravity Subscription Worker Automation** | `ALREADY_AVAILABLE` *(Delivered in `3942f4a` on `gemini/aipc-2.0-milestone-b`)* | `src/aipc/adapters/subscription_worker.py`, `tests/unit/test_b01_subscription_worker_automation.py` |Automate bounded implementation and verification execution through qualified Antigravity/Gemini subscription runtimes in isolated candidate git worktrees with prompt/model/session/diff/receipt/SHA capture, timeout/cancellation/no-op detection, and forbidden-path guards. |
+| **B02 — Independent Subscription Reviewer Gate** *(consolidating Original `B01` + Original `B03`)* | `PARTIAL` *(Authorized in Milestone B)* | `src/aipc/review/llm/subscription_transports.py`, `src/aipc/agents/role_registry.py`, `src/aipc/review/gate.py` | Integrate qualified subscription reviewer transports (`openai_codex` in `read_only` sandbox and policy-gated `google_antigravity` in `--mode plan --sandbox`) with canonical `Reviewer`, `ConsensusEngine`, and `PhaseGate`; enforce fresh reviewer sessions, read-only candidate access, exact commit SHA binding, default cross-provider enforcement (`prefer_cross_provider`), explicit `reduced_independence` labeling + human escalation on high-risk same-provider fallback, and fail-closed timeout/quota/malformed/SHA handling. |
+| **B03 — Repair Loop, Retry Governance & Quota-Aware Recovery** *(consolidating Original `B02` + Original `B04` + Bounded Repair)* | `PARTIAL` *(Authorized in Milestone B)* | `src/aipc/controller/planner_engine.py`, `src/aipc/controller/task_queue.py`, `src/aipc/controller/repair_coordinator.py`, `src/aipc/recovery/recovery_manager.py` | Connect structured reviewer findings (`REVISE`) and verification failures into bounded automatic repair and re-review; implement per-role (`planner`, `worker`, `reviewer`) quota-aware fallback without billing fallback or duplicate mutations; produce canonical durable cross-provider handoff packages (`CrossProviderHandoffPackage`) and verify interrupt/restart recovery across consequential dispatch, review, repair, and handoff boundaries. |
 | **C01 — Universal Project Adapters, Profiles & Templates** | `PARTIAL` *(Deferred to Milestone C)* | `src/aipc/project/models.py`, `src/aipc/plugins/` | Add multi-language project onboarding profiles and templates (Python, Node/JS, GAS offline mocks) in Milestone C. |
 | **C02 — Multi-Language Isolated Verification** | `PARTIAL` *(Deferred to Milestone C)* | `docker/Dockerfile.verify`, `src/aipc/controller/self_dev_runner.py`, `src/aipc/adapters/gemini/antigravity_transport.py` | Python container verification (`aipc-verify:py313-v1`) is `ALREADY_AVAILABLE`; Node/JS and multi-language verification profiles deferred to Milestone C. |
 | **C03 — Trusted Acceptance Test Harness & Behavioral Isolation** | `PARTIAL` *(Deferred to Milestone C)* | `src/aipc/cli.py` (`load_acceptance_rules`), `src/aipc/review/reviewer.py` | Operator-external rule loading exists; isolated per-criterion behavioral test mounts and worker-tampering harness deferred to Milestone C. |
@@ -415,8 +421,8 @@ AIPC 2.0 should **not** be considered complete until all of the following have c
 
 ### 12.2 Staged Implementation & Pull Request Strategy
 
-1. **PR 1 — Milestone A (`gemini/aipc-2.0-milestone-a`) [IMPLEMENTED & VERIFIED — AWAITING HUMAN MERGE]:** Sequentially implemented Workstreams `A01` (`8df8d59`), `A02` (`a4acd2d`), `A03` (`0de2e4c`), and `A04` (`c900877`) under `tools.sanitized_exec`, verified 895 passing pytest tests and `ruff check`, and completed live subscription-authenticated independent review (`REV-20261112-AIPC20-MILA-c900877`, verdict `PASS`). See `docs/AIPC_2_0_MILESTONE_A_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_A_COMPLETION_REPORT.md`.
-2. **PR 2 — Milestone B (`gemini/aipc-2.0-milestone-b`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `B01`–`B04` (multi-model reviewer consensus integration, quota-aware role fallback, and cross-provider state handoff packages).
+1. **PR 1 — Milestone A (`gemini/aipc-2.0-milestone-a`) [MERGED INTO `master` VIA PR #5 (`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`)]:** Sequentially implemented Workstreams `A01` (`8df8d59`), `A02` (`a4acd2d`), `A03` (`0de2e4c`), and `A04` (`c900877` / `12efdcc`) under `tools.sanitized_exec`, verified 895 + 343 passing pytest tests and `ruff check`, and completed live subscription-authenticated independent review (`rev-aipc2-milestone-a-12efdcc7`, verdict `PASS`). See `docs/AIPC_2_0_MILESTONE_A_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_A_COMPLETION_REPORT.md`.
+2. **PR 2 — Milestone B (`gemini/aipc-2.0-milestone-b`) [AUTHORIZED & IN PROGRESS]:** Sequentially implement Workstreams `B01` (Antigravity Subscription Worker Automation), `B02` (Independent Subscription Reviewer Gate — consolidating Original `B01` + `B03`), and `B03` (Repair Loop, Retry Governance & Quota-Aware Recovery — consolidating Original `B02` + `B04` + Bounded Repair).
 3. **PR 3 — Milestone C (`gemini/aipc-2.0-milestone-c`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `C01`–`C03` (universal project profiles, multi-language isolated container verification, and trusted behavioral acceptance test harness).
 4. **PR 4 — Milestone D (`gemini/aipc-2.0-milestone-d`) [REQUIRES FUTURE AUTHORIZATION]:** Implement Workstreams `D01`–`D03` (multi-surface CLI/MCP bridges, multi-project dashboard & subscription usage monitor, and end-to-end AIPC 2.0 qualification).
 
@@ -431,7 +437,9 @@ AIPC 2.0 should **not** be considered complete until all of the following have c
 | 0.1 | 2026-11-10 | Preserve AIPC 2.0 vision, subscription-only constraints, A01–D03 workstreams, provider-role fallback policy, and Phase 24 dependency. | User-requested roadmap documentation; **no implementation authorization** |
 | 0.2 | 2026-11-11 | Execute Section 12 Phase 24 handoff protocol following PR #4 merge (`26f455fd40d7728d99dcf5494c1cad9353e45988`), record A01–D03 gap evaluation and staged PR strategy, and activate **Milestone A (`A01`–`A04`)** on `gemini/aipc-2.0-milestone-a`. | Explicit Human Commander authorization for Milestone A (`A01`–`A04`); Milestones B–D remain unauthorized |
 | 0.3 | 2026-11-11 | Complete implementation, sanitized test verification (895 passed), and subscription-authenticated independent review (`REV-20261112-AIPC20-MILA-c900877`, `PASS`) for **Milestone A (`A01`–`A04`)** on `gemini/aipc-2.0-milestone-a`. | Milestone A PR ready for Human Commander review; Milestones B–D remain unauthorized |
+| 0.4 | 2026-11-12 | Record Milestone A PR #5 merge into `master` (`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`) and activate **Milestone B (`B01`–`B03`)** on `gemini/aipc-2.0-milestone-b`. | Explicit Human Commander authorization for Milestone B (`B01`–`B03`); Milestones C & D remain unauthorized |
+| 0.5 | 2026-11-12 | Realign Milestone B workstream structure (`B01`–`B03`) with explicit criteria-preservation mapping from original `B01`–`B04` (preserving per-role quota failover, cross-provider state handoff packages, and boundary interrupt/restart recovery testing inside `B03`). | Explicit Human Commander Milestone B Hybrid Resume authorization |
 
 ---
 
-**End state:** Milestone A (`A01`–`A04`) implementation and verification are complete on branch `gemini/aipc-2.0-milestone-a`, awaiting Human Commander PR review and merge. Milestones B, C, and D remain controlled planning context until explicit future Human Commander authorization. Preserve Phase 24 gate and all historical evidence.
+**End state:** Milestone A (`A01`–`A04`) is merged into `master` (`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`). Milestone B (`B01`–`B03`) is authorized for implementation on branch `gemini/aipc-2.0-milestone-b`. Milestones C and D remain controlled planning context until explicit future Human Commander authorization. Preserve Phase 24 and Milestone A gates and all historical evidence.
