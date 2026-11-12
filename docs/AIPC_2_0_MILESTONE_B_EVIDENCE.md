@@ -96,5 +96,12 @@ All 6 Attempt 01 findings were verified as fixed, and the live Codex `read-only`
 3. **Unconditional runtime qualification when `qualification_report=None`**: Always run `qualify_antigravity_subscription_runtime` / `qualify_codex_subscription_runtime` in `_verify_runtime_qualification` when `qualification_report` is omitted, even if a custom `worker_invoker` is provided.
 4. **Concurrency-safe `sanitized_env` propagation in `SdkCodexTransport`**: Pass `env=sanitized_env` directly into `SdkCodexTransport` and guard child process environment setup with `_SPAWN_ENV_LOCK` during `client.__aenter__()` rather than mutating `os.environ` across unlocked `await` points in `_run_live_codex_sdk`.
 
-### Attempt 03 Bounded Repair Resolutions
-All 4 secondary refinements were implemented and covered with deterministic unit tests in `tests/unit/test_b01_subscription_worker_automation.py`, `tests/unit/test_b02_subscription_reviewer_gate.py`, and `tests/unit/test_b03_repair_retry_and_recovery.py`.
+### Attempt 03 (`dba7d7a66803182a1e823a045853c923db1f76e3`) & Attempt 04 (`6ff1541d21d8b2ae01d3f47dbeaca900db3b9faf`) — Bounded Hardening Iterations
+- Verified `_verify_git_worktree_head` fails closed unconditionally on non-git directories (`dba7d7a`).
+- Identified and resolved `B01-01` (worker-committed forbidden files and gitignored secret files detected via `git diff --name-status <base_sha>`, `git status --ignored=matching`, and workspace snapshot diffing, and rolled back cleanly via `git reset --mixed <base_sha>` + `git rm -f --cached --ignore-unmatch` with strict returncode checks) and `B03-01` (`POST_WORKER_MUTATION` handoff persisted prior to `mark_interrupted`, and `evaluate_boundary_resume` fails closed to `WAITING_HUMAN` / `RECONCILE_AMBIGUOUS_SIDE_EFFECTS` on `RUNNING`, `WAITING_HUMAN`, `BLOCKED`, `INTERRUPTED`/`DISPATCHED` attempt ledger entries, or corrupted queue persistence).
+
+### Final Implementation Candidate (`76a5b5748424e627a241fd8475646c855afacafd`) — Verdict: `PASS` (Confidence `0.95`)
+- **Reviewer Runtime**: Live OpenAI Codex Subscription CLI (`codex-cli 0.167.1`, `Logged in using ChatGPT`) executed via `tools.sanitized_exec` in `--sandbox read-only --ephemeral` mode.
+- **Candidate Commit SHA Reviewed**: `76a5b5748424e627a241fd8475646c855afacafd`
+- **Verdict**: **`PASS`** (`confidence: 0.95`, `required_fixes: []`).
+- **Verified Probes**: 9/9 live read-only behavioral assertions (`RUNNING` / `WAITING_HUMAN` / `BLOCKED` / `INTERRUPTED` queue states, corrupt queue persistence fail-closed handling, `git reset --mixed` + index unstaging rollback, and candidate worktree module import origin) passed in a single sanitized execution.
