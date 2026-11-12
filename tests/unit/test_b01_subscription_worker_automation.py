@@ -256,6 +256,7 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
 ) -> None:
     wt = tmp_path / "candidate_wt"
     base_sha = _init_git_repo(wt)
+    (wt / "preexisting_note.txt").write_text("keep-me", encoding="utf-8")
 
     async def mutating_governance_invoker(
         _task: TaskRequest,
@@ -267,7 +268,7 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
             f"Tampered plan{_NL}",
             encoding="utf-8",
         )
-        (Path(cfg.candidate_worktree) / ".env").write_text(
+        (Path(cfg.candidate_worktree) / ".env.production").write_text(
             f"SECRET=1{_NL}",
             encoding="utf-8",
         )
@@ -277,10 +278,11 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
             summary="Modified forbidden files.",
         )
 
+    # Even if MASTER_PLAN.md is placed in in_scope_paths, forbidden_paths must not be overridden
     cfg = SubscriptionWorkerConfig(
         candidate_worktree=str(wt),
         evidence_output_dir=str(tmp_path / "evidence"),
-        in_scope_paths=("src/module.py",),
+        in_scope_paths=("src/module.py", "MASTER_PLAN.md"),
     )
     automation = AntigravitySubscriptionWorkerAutomation(
         cfg,
@@ -292,11 +294,32 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
     assert outcome.agent_result.status == AgentStatus.FAILED
     assert outcome.agent_result.worker_claimed_complete is False
     assert outcome.agent_result.metadata["error_code"] == "FORBIDDEN_PATH_VIOLATION"
-    assert ".env" in outcome.receipt.forbidden_paths_violated
+    assert ".env.production" in outcome.receipt.forbidden_paths_violated
     assert "MASTER_PLAN.md" in outcome.receipt.forbidden_paths_violated
     assert outcome.receipt.candidate_commit_sha == base_sha
     assert (wt / "MASTER_PLAN.md").read_text(encoding="utf-8") == f"# Master Plan{_NL}"
-    assert not (wt / ".env").exists()
+    assert not (wt / ".env.production").exists()
+    assert (wt / "preexisting_note.txt").read_text(encoding="utf-8") == "keep-me"
+
+    # Also verify mid-task mutation followed by quota error sets ambiguous_side_effects=True
+    async def dirty_quota_invoker(
+        _task: TaskRequest,
+        c: SubscriptionWorkerConfig,
+        _env: Mapping[str, str],
+        _resolved_model: str,
+    ) -> WorkerInvocationResponse:
+        (Path(c.candidate_worktree) / "src" / "module.py").write_text("partial", encoding="utf-8")
+        raise RuntimeError("429 RESOURCE_EXHAUSTED mid-flight")
+
+    dirty_auto = AntigravitySubscriptionWorkerAutomation(
+        cfg,
+        qualification_report=_qualified_report(),
+        worker_invoker=dirty_quota_invoker,
+    )
+    with pytest.raises(ProviderInterruption) as exc_info:
+        asyncio.run(dirty_auto.execute_worker_task(_task(wt, task_id="task-dirty-quota")))
+    assert exc_info.value.ambiguous_side_effects is True
+    assert exc_info.value.pre_start_clean is False
 
 
 def test_b01_noop_detection_timeout_and_cancellation(tmp_path: Path) -> None:

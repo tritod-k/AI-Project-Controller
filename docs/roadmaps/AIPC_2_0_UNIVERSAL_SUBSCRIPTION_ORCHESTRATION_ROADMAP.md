@@ -1,13 +1,13 @@
 # AIPC 2.0 — Universal Subscription-Based Multi-Agent Orchestration
 
-> **Document ID:** AIPC-ROADMAP-2.0  
-> **Version:** 0.5 — Milestone A (`A01`–`A04`) Merged via PR #5; Milestone B (`B01`–`B03`) Realigned with Full `B01`–`B04` Criteria Preservation  
-> **Prepared:** 2026-11-10 (Updated: 2026-11-12)  
-> **Project:** [AI Project Controller](https://github.com/tritod-k/AI-Project-Controller)  
-> **Project owner / attribution:** K.TRITOD  
-> **Status:** **MILESTONE B (`B01`–`B03`) AUTHORIZED FOR IMPLEMENTATION ON `gemini/aipc-2.0-milestone-b` (MILESTONES C & D REMAIN PLANNING ONLY)**  
-> **Dependency:** Phase 24 (PR #4, `26f455fd40d7728d99dcf5494c1cad9353e45988`) and AIPC 2.0 Milestone A (`A01`–`A04`, PR #5, `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`) — independently reviewed, accepted, and merged by the Human Commander.  
-> **Release policy:** EXPERIMENTAL / SUPERVISED until independently qualified for another classification.  
+> **Document ID:** AIPC-ROADMAP-2.0
+> **Version:** 0.5 — Milestone A (`A01`–`A04`) Merged via PR #5; Milestone B (`B01`–`B03`) Realigned with Full `B01`–`B04` Criteria Preservation
+> **Prepared:** 2026-11-10 (Updated: 2026-11-12)
+> **Project:** [AI Project Controller](https://github.com/tritod-k/AI-Project-Controller)
+> **Project owner / attribution:** K.TRITOD
+> **Status:** **MILESTONE B (`B01`–`B03`) AUTHORIZED FOR IMPLEMENTATION ON `gemini/aipc-2.0-milestone-b` (MILESTONES C & D REMAIN PLANNING ONLY)**
+> **Dependency:** Phase 24 (PR #4, `26f455fd40d7728d99dcf5494c1cad9353e45988`) and AIPC 2.0 Milestone A (`A01`–`A04`, PR #5, `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`) — independently reviewed, accepted, and merged by the Human Commander.
+> **Release policy:** EXPERIMENTAL / SUPERVISED until independently qualified for another classification.
 > **Billing policy:** Subscription-authenticated Codex and Antigravity integrations only; **no separately billed AI APIs**.
 
 ---

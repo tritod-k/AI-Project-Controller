@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Self
@@ -39,7 +40,10 @@ from aipc.agents.role_registry import (
 )
 from aipc.domain.enums import ReviewVerdict
 from aipc.domain.models import CanonicalRecord, CriterionResult, NonBlank, ReviewResult
-from aipc.hardening.env_isolation import assert_subscription_only_mode
+from aipc.hardening.env_isolation import (
+    assert_subscription_only_mode,
+    build_sanitized_child_env,
+)
 from aipc.hardening.secrets import assert_no_secrets
 from aipc.review.consensus import (
     ConsensusDecision,
@@ -98,6 +102,41 @@ ReviewerRejectionCode = Literal[
 def _hash_snapshot(snapshot: dict[str, str]) -> Digest:
     encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _verify_git_worktree_head(worktree: Path, expected_sha: str) -> str | None:
+    """If worktree is a git repo, verify HEAD matches expected_sha and working tree is clean."""
+    git_marker = worktree / ".git"
+    if not git_marker.exists():
+        return None
+    env = build_sanitized_child_env()
+    head_res = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(worktree),
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    actual_head = (head_res.stdout or "").strip().lower()
+    if head_res.returncode != 0 or actual_head != expected_sha.lower():
+        return (
+            f"Candidate git worktree HEAD '{actual_head}' does not match "
+            f"expected commit SHA '{expected_sha}'."
+        )
+    status_res = subprocess.run(
+        ["git", "status", "--porcelain", "-uall"],
+        cwd=str(worktree),
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    if status_res.returncode != 0 or (status_res.stdout or "").strip():
+        return "Candidate git worktree has uncommitted dirty modifications prior to review."
+    return None
 
 
 def sanitize_text(value: str) -> str:
@@ -359,10 +398,13 @@ class IndependentSubscriptionReviewerGate:
                 ),
             )
 
-        if checked_ctx.evidence.git.head != candidate_sha or (
-            expected_candidate_sha is not None and expected_candidate_sha != candidate_sha
+        git_head_error = _verify_git_worktree_head(c_root, candidate_sha)
+        if (
+            checked_ctx.evidence.git.head != candidate_sha
+            or (expected_candidate_sha is not None and expected_candidate_sha != candidate_sha)
+            or git_head_error is not None
         ):
-            mismatch_detail = (
+            mismatch_detail = git_head_error or (
                 f"checkpoint SHA '{candidate_sha}', git evidence head "
                 f"'{checked_ctx.evidence.git.head}', expected '{expected_candidate_sha}'"
             )

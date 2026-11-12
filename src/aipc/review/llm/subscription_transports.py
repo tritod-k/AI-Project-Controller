@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -232,6 +234,7 @@ class CodexSubscriptionReviewerTransport:
                 raw_out = await self._run_live_codex_sdk(
                     request=request,
                     workspace=workspace or Path.cwd().resolve(),
+                    sanitized_env=sanitized_env,
                     session_id=session_id,
                 )
         except LLMReviewError:
@@ -267,16 +270,18 @@ class CodexSubscriptionReviewerTransport:
         *,
         request: LLMReviewRequest,
         workspace: Path,
+        sanitized_env: Mapping[str, str],
         session_id: str,
     ) -> LLMReviewRawResult:
         import importlib
 
+        assert_child_env_isolated(sanitized_env)
         codex_pkg = importlib.import_module(".".join(("aipc", "adapters", "codex")))
         codex_tr_mod = importlib.import_module(".".join(("aipc", "adapters", "codex", "transport")))
         state_dir = (
             self._state_root
             if self._state_root is not None
-            else workspace / ".aipc" / "reviewer-state" / session_id
+            else Path(tempfile.gettempdir()).resolve() / "aipc-codex-reviewer-state" / session_id
         )
         effective_model = (
             None
@@ -302,6 +307,9 @@ class CodexSubscriptionReviewerTransport:
                 request.input_json,
             ]
         )
+        prev_env = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(sanitized_env)
         try:
             await sdk_transport.readiness(workspace)
             thread_id = await sdk_transport.start_thread(workspace)
@@ -350,7 +358,11 @@ class CodexSubscriptionReviewerTransport:
                 usage=usage,
             )
         finally:
-            await sdk_transport.close()
+            try:
+                await sdk_transport.close()
+            finally:
+                os.environ.clear()
+                os.environ.update(prev_env)
 
     def _coerce_raw_result(
         self,

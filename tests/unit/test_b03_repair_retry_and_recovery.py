@@ -798,3 +798,45 @@ def test_b03_all_providers_exhausted_and_boundary_interrupt_restart_recovery_mat
     assert res_pub.requires_worker_redispatch is False
     assert res_pub.requires_reviewer_dispatch is False
     assert res_pub.reviewed_sha == SHA_2
+
+    # Boundary F: POST_VERIFICATION with HALT_ON_RETRY_EXHAUSTION must not dispatch reviewer
+    orch.record_handoff_package(
+        contract=contract,
+        project_id="example",
+        attempt_number=2,
+        candidate_sha=SHA_2,
+        worktree=ws,
+        binding=worker_binding,
+        role="worker",
+        session_identity="sess-exh-02",
+        boundary_stage="POST_VERIFICATION",
+        next_authorized_action="HALT_ON_RETRY_EXHAUSTION",
+        review_status="REVISE",
+    )
+    res_exh_bound = orch.evaluate_boundary_resume(contract.task_id)
+    assert res_exh_bound.resume_status == "HALT_ON_RETRY_EXHAUSTION"
+    assert res_exh_bound.next_authorized_action == "HALT_ON_RETRY_EXHAUSTION"
+    assert res_exh_bound.requires_worker_redispatch is False
+    assert res_exh_bound.requires_reviewer_dispatch is False
+    assert res_exh_bound.requires_human_reconciliation is True
+
+    # Boundary G: POST_REVIEW with BLOCKED must remain BLOCKED
+    orch.record_handoff_package(
+        contract=contract,
+        project_id="example",
+        attempt_number=2,
+        candidate_sha=SHA_2,
+        worktree=ws,
+        binding=reviewer_binding,
+        role="reviewer",
+        session_identity="sess-blk-02",
+        boundary_stage="POST_REVIEW",
+        next_authorized_action="HALT_ON_BLOCKER",
+        review_status="BLOCKED",
+        reviewed_sha=SHA_2,
+    )
+    res_blk_bound = orch.evaluate_boundary_resume(contract.task_id)
+    assert res_blk_bound.resume_status == "BLOCKED"
+    assert res_blk_bound.next_authorized_action == "HALT_ON_BLOCKER"
+    assert res_blk_bound.requires_worker_redispatch is False
+    assert res_blk_bound.requires_reviewer_dispatch is False

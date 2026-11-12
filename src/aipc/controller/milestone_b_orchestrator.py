@@ -473,6 +473,70 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                 ),
             )
 
+        if pkg.next_authorized_action == "HALT_ON_RETRY_EXHAUSTION":
+            return BoundaryResumeDecision(
+                task_id=task_id,
+                boundary_stage=pkg.boundary_stage,
+                next_authorized_action="HALT_ON_RETRY_EXHAUSTION",
+                resume_status="HALT_ON_RETRY_EXHAUSTION",
+                candidate_sha=pkg.candidate_sha,
+                reviewed_sha=pkg.reviewed_sha,
+                attempt_number=pkg.attempt_number,
+                requires_worker_redispatch=False,
+                requires_reviewer_dispatch=False,
+                requires_human_reconciliation=True,
+                reason="Bounded repair attempts exhausted; human review required.",
+            )
+
+        if pkg.next_authorized_action == "HALT_ON_BLOCKER" or pkg.review_status == "BLOCKED":
+            return BoundaryResumeDecision(
+                task_id=task_id,
+                boundary_stage=pkg.boundary_stage,
+                next_authorized_action="HALT_ON_BLOCKER",
+                resume_status="BLOCKED",
+                candidate_sha=pkg.candidate_sha,
+                reviewed_sha=pkg.reviewed_sha,
+                attempt_number=pkg.attempt_number,
+                requires_worker_redispatch=False,
+                requires_reviewer_dispatch=False,
+                requires_human_reconciliation=True,
+                reason="Task halted on reviewer/gate blocker; human review required.",
+            )
+
+        if pkg.review_status == "HUMAN_REVIEW_REQUIRED":
+            return BoundaryResumeDecision(
+                task_id=task_id,
+                boundary_stage=pkg.boundary_stage,
+                next_authorized_action="HUMAN_MERGE_REVIEW",
+                resume_status="HUMAN_REVIEW_REQUIRED",
+                candidate_sha=pkg.candidate_sha,
+                reviewed_sha=pkg.reviewed_sha,
+                attempt_number=pkg.attempt_number,
+                requires_worker_redispatch=False,
+                requires_reviewer_dispatch=False,
+                requires_human_reconciliation=True,
+                reason="High-risk or escalated review requires explicit human review.",
+            )
+
+        if (
+            pkg.review_status == "WAITING_PROVIDER"
+            or pkg.next_authorized_action == "RESUME_AFTER_PROVIDER_RECOVERY"
+        ):
+            is_rev = pkg.boundary_stage in ("POST_VERIFICATION", "PRE_REVIEW")
+            return BoundaryResumeDecision(
+                task_id=task_id,
+                boundary_stage=pkg.boundary_stage,
+                next_authorized_action="RESUME_AFTER_PROVIDER_RECOVERY",
+                resume_status="WAITING_PROVIDER",
+                candidate_sha=pkg.candidate_sha,
+                reviewed_sha=pkg.reviewed_sha,
+                attempt_number=pkg.attempt_number,
+                requires_worker_redispatch=not is_rev,
+                requires_reviewer_dispatch=is_rev,
+                requires_human_reconciliation=False,
+                reason="Paused waiting for qualified subscription provider recovery.",
+            )
+
         if pkg.boundary_stage == "READY_FOR_PUBLICATION" and pkg.review_status == "PASS":
             return BoundaryResumeDecision(
                 task_id=task_id,
@@ -528,21 +592,6 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                     f"Attempt {pkg.attempt_number} reviewed as REVISE with "
                     f"{len(pkg.unresolved_findings)} finding(s); resume at bounded repair."
                 ),
-            )
-
-        if pkg.next_authorized_action == "HALT_ON_RETRY_EXHAUSTION":
-            return BoundaryResumeDecision(
-                task_id=task_id,
-                boundary_stage=pkg.boundary_stage,
-                next_authorized_action="HALT_ON_RETRY_EXHAUSTION",
-                resume_status="HALT_ON_RETRY_EXHAUSTION",
-                candidate_sha=pkg.candidate_sha,
-                reviewed_sha=pkg.reviewed_sha,
-                attempt_number=pkg.attempt_number,
-                requires_worker_redispatch=False,
-                requires_reviewer_dispatch=False,
-                requires_human_reconciliation=True,
-                reason="Bounded repair attempts exhausted; human review required.",
             )
 
         return BoundaryResumeDecision(

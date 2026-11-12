@@ -30,6 +30,8 @@ from aipc.adapters.subscription_qualification import (
     ProviderRuntimeQualificationReport,
     enforce_subscription_only_profile,
     evaluate_runtime_eligibility,
+    qualify_antigravity_subscription_runtime,
+    qualify_codex_subscription_runtime,
 )
 from aipc.controller.errors import ProviderInterruption
 from aipc.domain.enums import AgentStatus, ChangeType
@@ -76,6 +78,27 @@ _ALWAYS_FORBIDDEN_SECRET_AND_HOOK_PATHS: tuple[str, ...] = (
     ".git/config",
     ".git/hooks/",
 )
+
+_UNVERIFIED_WORKER_MODELS: frozenset[str] = frozenset(
+    {
+        "argon",
+        "gemini-argon",
+        "google-argon",
+    }
+)
+
+
+def _is_always_forbidden_secret_or_hook(rel_posix: str) -> bool:
+    norm = _normalize_rel_posix(rel_posix)
+    if any(_matches_path_pattern(norm, pat) for pat in _ALWAYS_FORBIDDEN_SECRET_AND_HOOK_PATHS):
+        return True
+    name = PurePosixPath(norm).name.lower()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name.endswith((".pem", ".key")):
+        return True
+    return False
+
 
 _PROHIBITED_WORKER_AUTH_MODES: frozenset[str] = frozenset(
     {
@@ -346,15 +369,41 @@ class AntigravitySubscriptionWorkerAutomation:
         return env
 
     def _verify_runtime_qualification(self) -> str:
-        if self._qualification_report is None:
-            return self._config.model_requested
+        req_model = self._config.model_requested.strip()
+        if req_model.lower() in _UNVERIFIED_WORKER_MODELS:
+            raise ProviderInterruption(
+                ProviderCondition.UNAVAILABLE,
+                pre_start_clean=True,
+                ambiguous_side_effects=False,
+            )
+        report = self._qualification_report
+        if report is None and self._worker_invoker is None:
+            report = (
+                qualify_antigravity_subscription_runtime(
+                    operating_profile=self._config.operating_profile,
+                    requested_auth_mode=self._config.auth_mode,
+                    allow_api_key_fallback=self._config.allow_api_key_fallback,
+                )
+                if self._config.provider_id == "gemini-antigravity"
+                else qualify_codex_subscription_runtime(
+                    operating_profile=self._config.operating_profile,
+                    requested_auth_mode=self._config.auth_mode,
+                    allow_api_key_fallback=self._config.allow_api_key_fallback,
+                )
+            )
+        if report is None:
+            return req_model
         decision = evaluate_runtime_eligibility(
-            self._qualification_report,
+            report,
             role="worker",
-            requested_model=self._config.model_requested,
+            requested_model=req_model,
         )
         if not decision.eligible or decision.resolved_model is None:
-            raise ProviderInterruption(ProviderCondition.UNAVAILABLE)
+            raise ProviderInterruption(
+                ProviderCondition.UNAVAILABLE,
+                pre_start_clean=True,
+                ambiguous_side_effects=False,
+            )
         return decision.resolved_model
 
     async def cancel(self, task_id: str) -> bool:
@@ -414,10 +463,7 @@ class AntigravitySubscriptionWorkerAutomation:
             diff_parts.append(diff_res.stdout)
         for fc in changes:
             if fc.change_type == ChangeType.ADDED:
-                if any(
-                    _matches_path_pattern(fc.path, pat)
-                    for pat in _ALWAYS_FORBIDDEN_SECRET_AND_HOOK_PATHS
-                ):
+                if _is_always_forbidden_secret_or_hook(fc.path):
                     continue
                 target_file = worktree / PurePosixPath(fc.path)
                 if target_file.is_file():
@@ -455,10 +501,11 @@ class AntigravitySubscriptionWorkerAutomation:
                 violations.append(rel_posix)
                 continue
 
-            if any(
-                _matches_path_pattern(rel_posix, pat)
-                for pat in _ALWAYS_FORBIDDEN_SECRET_AND_HOOK_PATHS
-            ):
+            if _is_always_forbidden_secret_or_hook(rel_posix):
+                violations.append(rel_posix)
+                continue
+
+            if any(_matches_path_pattern(rel_posix, pat) for pat in self._config.forbidden_paths):
                 violations.append(rel_posix)
                 continue
 
@@ -471,20 +518,35 @@ class AntigravitySubscriptionWorkerAutomation:
             explicitly_in_scope = any(
                 _matches_path_pattern(rel_posix, pat) for pat in self._config.in_scope_paths
             )
-            if not explicitly_in_scope and any(
-                _matches_path_pattern(rel_posix, pat) for pat in self._config.forbidden_paths
-            ):
-                violations.append(rel_posix)
-                continue
-
             if self._config.in_scope_paths and not explicitly_in_scope:
                 violations.append(rel_posix)
 
         return sorted(set(violations))
 
-    def _revert_unauthorized_changes(self, worktree: Path, env: Mapping[str, str]) -> None:
-        _run_git(worktree, ["checkout", "--", "."], env)
-        _run_git(worktree, ["clean", "-fd"], env)
+    def _revert_unauthorized_changes(
+        self,
+        worktree: Path,
+        env: Mapping[str, str],
+        *,
+        pre_existing_paths: set[str] | None = None,
+        base_sha: str | None = None,
+    ) -> None:
+        current_changes, _ = self._collect_git_changes_and_diff(worktree, env)
+        protected = pre_existing_paths or set()
+        ref = base_sha or "HEAD"
+        for fc in current_changes:
+            if fc.path in protected:
+                continue
+            if fc.change_type == ChangeType.ADDED:
+                target = (worktree / PurePosixPath(fc.path)).resolve()
+                if target.is_relative_to(worktree.resolve()) and target.exists():
+                    try:
+                        if target.is_file() or target.is_symlink():
+                            target.unlink()
+                    except OSError:
+                        pass
+            else:
+                _run_git(worktree, ["checkout", ref, "--", fc.path], env)
 
     def _write_retained_evidence(
         self,
@@ -573,9 +635,17 @@ class AntigravitySubscriptionWorkerAutomation:
             )
 
         if self._worker_invoker is None:
-            raise ProviderInterruption(ProviderCondition.UNAVAILABLE)
+            raise ProviderInterruption(
+                ProviderCondition.UNAVAILABLE,
+                pre_start_clean=True,
+                ambiguous_side_effects=False,
+            )
+
+        pre_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
+        pre_paths = {fc.path for fc in pre_changes}
 
         async def _invoke() -> WorkerInvocationResponse:
+            assert self._worker_invoker is not None
             return await self._worker_invoker(task, self._config, sanitized_env, resolved_model)
 
         fut = asyncio.ensure_future(_invoke())
@@ -583,7 +653,12 @@ class AntigravitySubscriptionWorkerAutomation:
         try:
             inv_res = await asyncio.wait_for(fut, timeout=task.timeout_seconds)
         except asyncio.CancelledError:
-            self._revert_unauthorized_changes(worktree, sanitized_env)
+            self._revert_unauthorized_changes(
+                worktree,
+                sanitized_env,
+                pre_existing_paths=pre_paths,
+                base_sha=base_sha,
+            )
             return self._build_outcome(
                 task=task,
                 provider_label=provider_label,
@@ -607,11 +682,26 @@ class AntigravitySubscriptionWorkerAutomation:
                 error_code="CANCELLED",
             )
         except Exception as exc:
+            post_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
+            try:
+                post_sha = self._read_head_sha(worktree, sanitized_env)
+            except AgentError:
+                post_sha = "mutated"
+            workspace_mutated = (post_changes != pre_changes) or (post_sha != base_sha)
+            exc_ambig = bool(
+                getattr(exc, "ambiguous_side_effects", False)
+                or not getattr(exc, "pre_start_clean", True)
+                or workspace_mutated
+            )
             kind, reason = classify_subscription_operational_error(exc)
             if kind == "TIMEOUT":
                 raise AgentTimeoutError(reason) from None
             if isinstance(kind, ProviderCondition):
-                raise ProviderInterruption(kind) from None
+                raise ProviderInterruption(
+                    kind,
+                    pre_start_clean=not exc_ambig,
+                    ambiguous_side_effects=exc_ambig,
+                ) from None
             raise AgentError(reason) from None
         finally:
             self._active_tasks.pop(task.task_id, None)
@@ -621,7 +711,12 @@ class AntigravitySubscriptionWorkerAutomation:
         # 1. Forbidden-path guard
         forbidden_violations = self._detect_forbidden_paths(worktree, files_changed)
         if forbidden_violations:
-            self._revert_unauthorized_changes(worktree, sanitized_env)
+            self._revert_unauthorized_changes(
+                worktree,
+                sanitized_env,
+                pre_existing_paths=pre_paths,
+                base_sha=base_sha,
+            )
             err_msg = "FORBIDDEN_PATH_VIOLATION: worker modified unauthorized paths: " + ", ".join(
                 forbidden_violations
             )

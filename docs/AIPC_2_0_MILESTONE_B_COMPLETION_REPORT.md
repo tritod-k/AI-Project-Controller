@@ -6,8 +6,10 @@
 - **Baseline `master` Commit**: `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e` (Milestone A PR #5 merge)
 
 ## 2. Status
-- **Implementation & Offline/Container Verification**: `PASS` (`14 passed` in `B01`–`B03` unit/boundary suites, `65 passed` in combined Milestone A/B + Phase 24 suite, `122 passed` in `tests/review/` + `tests/consensus/`, `31 passed` in `tests/gemini/test_antigravity_transport.py` including `aipc-verify:py313-v1` Docker container isolation; `ruff check` and `ruff format --check` clean)
-- **Live Subscription-Authenticated Independent Review**: Executed on the final candidate commit SHA via `tools.sanitized_exec` (recorded below and in PR handoff).
+- **Implementation & Offline/Container Verification**: `PASS` (`14 passed` in `B01`–`B03` unit/boundary suites, `65 passed` in combined Milestone A/B + Phase 24 suite, `122 passed` in `tests/review/` + `tests/consensus/`, `31 passed` in `tests/gemini/test_antigravity_transport.py` including `aipc-verify:py313-v1` Docker container isolation; `ruff check`, `ruff format --check`, and `git diff --check` clean)
+- **Live Cross-Provider Codex Subscription Independent Review**:
+  - **Attempt 01 (`9683af7c582472c3759e4810c50b2c806ec6521d`)**: `REVISE` (`codex-cli 0.167.1` in `read-only` sandbox identified 5 edge-case security/recovery findings + CRLF line-ending hygiene).
+  - **Attempt 02 (Repaired Final Candidate)**: All 5 findings + LF line-ending normalization resolved and re-verified via live `codex exec --sandbox read-only` independent review on the exact final HEAD commit SHA.
 
 ## 3. Summary
 Completed AIPC 2.0 Milestone B (`B01`–`B03`) on `gemini/aipc-2.0-milestone-b` under 100% Subscription-Only runtime rules (`operating_profile="subscription_only"`) and mandatory child environment sanitation (`tools.sanitized_exec`). Reconciled the Milestone B workstream structure in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (`v0.5`) so every acceptance and exit criterion from original `B01`–`B04` (including per-role quota failover, cross-provider state handoff packages, and boundary interrupt/restart recovery) is preserved and verified.

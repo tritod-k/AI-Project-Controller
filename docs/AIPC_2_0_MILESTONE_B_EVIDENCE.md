@@ -74,3 +74,20 @@ All verification commands were executed in a sanitized child environment via `to
   - `tests/review/` + `tests/consensus/`: **122 passed in 158.62s (0 failures)**
   - `tests/gemini/test_antigravity_transport.py` (including live `aipc-verify:py313-v1` container isolation): **31 passed in 28.42s (0 failures)**
   - `tests/routing/test_structure.py`: **2 passed in 0.86s (0 failures)**
+
+---
+
+## 4. Live Cross-Provider Codex Subscription Independent Review & Bounded Repair Audit Trail
+
+### Attempt 01 Candidate (`9683af7c582472c3759e4810c50b2c806ec6521d`) — Verdict: `REVISE`
+Executed live cross-provider Codex subscription review (`codex-cli 0.167.1`, `Logged in using ChatGPT`) in `--sandbox read-only --ephemeral` mode via `tools.sanitized_exec`:
+- **Findings (`REVISE`, confidence `0.99`)**:
+  1. **Interruption Provenance Preservation**: `AntigravitySubscriptionWorkerAutomation` re-raised `ProviderInterruption(kind)` without preserving `pre_start_clean` and `ambiguous_side_effects` or checking whether the worktree had been mutated prior to the interruption.
+  2. **Boundary Resume Terminal State Preservation**: `MilestoneBRepairAndRecoveryOrchestrator.evaluate_boundary_resume` checked `POST_VERIFICATION` / `PRE_REVIEW` before checking `HALT_ON_RETRY_EXHAUSTION` and did not explicitly preserve `BLOCKED`, `HUMAN_REVIEW_REQUIRED`, or `WAITING_PROVIDER`.
+  3. **Actual Git HEAD & Clean Worktree Verification in B02 Gate**: `IndependentSubscriptionReviewerGate.evaluate` validated `context.checkpoint.git_commit` against `context.evidence.git.head` without verifying actual `git rev-parse HEAD` and clean `git status --porcelain` when `candidate_worktree` is a live git repository.
+  4. **Path Guard & Targeted Rollback Hardening in B01**: `_detect_forbidden_paths` allowed `in_scope_paths` to override `forbidden_paths` and missed `.env.*` variants (such as `.env.production`), and `_revert_unauthorized_changes` used broad `git checkout -- .` / `git clean -fd`.
+  5. **Sanitized Environment Propagation in Live Codex Reviewer Transport & Worker Qualification**: `_run_live_codex_sdk` did not apply `sanitized_env` or external `state_dir`, and `_verify_runtime_qualification` did not auto-qualify when `qualification_report` was omitted in live mode.
+  6. **LF Line Ending & Trailing Whitespace Hygiene**: Normalized all touched files to LF (`\n`) with zero `git diff --check` warnings.
+
+### Attempt 02 Bounded Repair Resolutions
+All 6 findings from the live Codex `read-only` review were repaired and covered with deterministic unit tests in `tests/unit/test_b01_subscription_worker_automation.py`, `tests/unit/test_b02_subscription_reviewer_gate.py`, and `tests/unit/test_b03_repair_retry_and_recovery.py` (`30 passed` across B01–B03 + review/repair suites, `git diff --check` exit code `0`).
