@@ -105,8 +105,10 @@ def _hash_snapshot(snapshot: dict[str, str]) -> Digest:
 
 
 def _verify_git_worktree_head(worktree: Path, expected_sha: str) -> str | None:
-    """If worktree is inside a git repo, verify it is a worktree root at expected_sha and clean."""
+    """Verify worktree is an isolated git repository/worktree root at expected_sha and clean."""
     resolved_wt = worktree.resolve()
+    if not resolved_wt.exists() or not resolved_wt.is_dir():
+        return f"Candidate worktree '{resolved_wt}' does not exist."
     git_marker = resolved_wt / ".git"
     env = build_sanitized_child_env()
     top_res = subprocess.run(
@@ -119,9 +121,7 @@ def _verify_git_worktree_head(worktree: Path, expected_sha: str) -> str | None:
         check=False,
     )
     if top_res.returncode != 0:
-        if git_marker.exists():
-            return "Candidate git worktree is corrupt or unreadable."
-        return None
+        return f"Candidate worktree '{resolved_wt}' is not a valid git repository or worktree."
 
     toplevel = Path((top_res.stdout or "").strip()).resolve()
     if toplevel != resolved_wt and not git_marker.exists():

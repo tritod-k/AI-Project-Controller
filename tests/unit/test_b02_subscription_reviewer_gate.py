@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,34 @@ EXPECTED_SHA = "a" * 40
 STALE_SHA = "b" * 40
 
 
+def _init_git_worktree(ws: Path, content: str = "x = 1") -> str:
+    ws.mkdir(parents=True, exist_ok=True)
+    if not (ws / ".git").exists():
+        for cmd in (
+            ["git", "init"],
+            ["git", "config", "user.email", "test@example.com"],
+            ["git", "config", "user.name", "AIPC Test"],
+        ):
+            subprocess.run(cmd, cwd=str(ws), check=True, capture_output=True, text=True)
+    (ws / "candidate.py").write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(ws), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "candidate commit"],
+        cwd=str(ws),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    res = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return res.stdout.strip().lower()
+
+
 @pytest.fixture
 def b02_ctx(review_case: dict[str, Any]) -> Any:
     data = review_case["project"].model_dump(mode="json")
@@ -57,7 +86,10 @@ def b02_ctx(review_case: dict[str, Any]) -> Any:
     }
     review_case["agent_result"] = type(review_case["agent_result"]).model_validate(res_data)
     ws = Path(review_case["task"].workspace)
-    (ws / "candidate.py").write_text("x = 1", encoding="utf-8")
+    real_sha = _init_git_worktree(ws, "x = 1")
+    review_case["checkpoint"] = review_case["checkpoint"].model_copy(
+        update={"git_commit": real_sha}
+    )
     return context(
         review_case,
         artifacts=(("design", b"Core imports a neutral transport protocol."),),
@@ -161,7 +193,7 @@ def test_b02_cross_provider_pass_integrates_with_consensus_and_phase_gate(
 
     decision = gate.evaluate(
         b02_ctx,
-        expected_candidate_sha=EXPECTED_SHA,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
         planner_provider_family="openai_codex",
         planner_session_id="planner-sess-001",
     )
@@ -184,7 +216,7 @@ def test_b02_rejects_stale_commit_sha_and_missing_evidence(
     b02_ctx: Any,
     tmp_path: Path,
 ) -> None:
-    """Stale expected SHA or uncollected git/test evidence fails closed with BLOCKED."""
+    """Stale expected SHA, non-git worktree, or uncollected evidence fails closed with BLOCKED."""
     cfg = SubscriptionReviewerGateConfig(
         candidate_worktree=b02_ctx.task.workspace,
         evidence_output_dir=str(tmp_path / "evidence"),
@@ -204,8 +236,6 @@ def test_b02_rejects_stale_commit_sha_and_missing_evidence(
     git_repo = tmp_path / "real_git_repo"
     sub_dir = git_repo / "sub_pkg"
     sub_dir.mkdir(parents=True)
-    import subprocess
-
     subprocess.run(["git", "init"], cwd=str(git_repo), check=True, capture_output=True)
     subdir_cfg = SubscriptionReviewerGateConfig(
         candidate_worktree=str(sub_dir),
@@ -215,9 +245,30 @@ def test_b02_rejects_stale_commit_sha_and_missing_evidence(
         config=subdir_cfg,
         role_registry=_registry(),
     )
-    subdir_dec = subdir_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    subdir_dec = subdir_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert subdir_dec.gate_outcome == "BLOCKED"
     assert subdir_dec.session_audit.rejection_code == "STALE_COMMIT_SHA"
+
+    # 1c. Non-git directory fails closed with STALE_COMMIT_SHA (never fails open)
+    non_git_dir = tmp_path / "plain_non_git_dir"
+    non_git_dir.mkdir(parents=True)
+    non_git_cfg = SubscriptionReviewerGateConfig(
+        candidate_worktree=str(non_git_dir),
+        evidence_output_dir=str(tmp_path / "evidence_nongit"),
+    )
+    non_git_gate = IndependentSubscriptionReviewerGate(
+        config=non_git_cfg,
+        role_registry=_registry(),
+    )
+    non_git_dec = non_git_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
+    assert non_git_dec.gate_outcome == "BLOCKED"
+    assert non_git_dec.session_audit.rejection_code == "STALE_COMMIT_SHA"
 
     # 2. Missing/failed test evidence parse status
     bad_ev = b02_ctx.evidence.model_copy(
@@ -226,7 +277,10 @@ def test_b02_rejects_stale_commit_sha_and_missing_evidence(
         }
     )
     missing_ctx = b02_ctx.model_copy(update={"evidence": bad_ev})
-    missing_dec = gate.evaluate(missing_ctx, expected_candidate_sha=EXPECTED_SHA)
+    missing_dec = gate.evaluate(
+        missing_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert missing_dec.gate_outcome == "BLOCKED"
     assert missing_dec.session_audit.rejection_code == "MISSING_OR_INVALID_EVIDENCE"
 
@@ -248,7 +302,7 @@ def test_b02_rejects_shared_session_self_review_mutable_and_workspace_mutation(
     # 1. Shared worker session ID
     shared_dec = gate.evaluate(
         b02_ctx,
-        expected_candidate_sha=EXPECTED_SHA,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
         proposed_reviewer_session_id="worker-sess-agy-001",
     )
     assert shared_dec.gate_outcome == "BLOCKED"
@@ -257,7 +311,7 @@ def test_b02_rejects_shared_session_self_review_mutable_and_workspace_mutation(
     # 2. Inherited chat history
     inherited_dec = gate.evaluate(
         b02_ctx,
-        expected_candidate_sha=EXPECTED_SHA,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
         inherited_chat_history=True,
     )
     assert inherited_dec.gate_outcome == "BLOCKED"
@@ -266,7 +320,7 @@ def test_b02_rejects_shared_session_self_review_mutable_and_workspace_mutation(
     # 3. Mutable reviewer session
     mutable_dec = gate.evaluate(
         b02_ctx,
-        expected_candidate_sha=EXPECTED_SHA,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
         read_only_sandbox=False,
     )
     assert mutable_dec.gate_outcome == "BLOCKED"
@@ -275,7 +329,7 @@ def test_b02_rejects_shared_session_self_review_mutable_and_workspace_mutation(
     # 4. Self-review (worker_id matches reviewer binding_id)
     self_dec = gate.evaluate(
         b02_ctx,
-        expected_candidate_sha=EXPECTED_SHA,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
         worker_agent_id="reviewer-codex-strict",
     )
     assert self_dec.gate_outcome == "BLOCKED"
@@ -300,7 +354,10 @@ def test_b02_rejects_shared_session_self_review_mutable_and_workspace_mutation(
             runner=mutating_runner,
         ),
     )
-    mut_dec = mut_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    mut_dec = mut_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert mut_dec.gate_outcome == "BLOCKED"
     assert mut_dec.session_audit.workspace_mutated is True
     assert mut_dec.session_audit.rejection_code == "REVIEWER_MUTATED_CANDIDATE_WORKSPACE"
@@ -336,7 +393,10 @@ def test_b02_same_provider_fallback_labels_reduced_independence_and_escalates_hi
         role_registry=_registry(codex_qualified=False, agy_qualified=True),
         transport_factory=agy_transport_factory,
     )
-    strict_dec = strict_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    strict_dec = strict_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert strict_dec.gate_outcome == "BLOCKED"
     assert strict_dec.session_audit.rejection_code == "UNAUTHORIZED_SAME_PROVIDER_REVIEW"
 
@@ -353,7 +413,10 @@ def test_b02_same_provider_fallback_labels_reduced_independence_and_escalates_hi
         role_registry=_registry(codex_qualified=False, agy_qualified=True),
         transport_factory=agy_transport_factory,
     )
-    std_dec = std_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    std_dec = std_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert std_dec.gate_outcome == "PASS"
     assert std_dec.session_audit.independence_level == "reduced_independence"
     assert std_dec.session_audit.reduced_independence is True
@@ -373,7 +436,10 @@ def test_b02_same_provider_fallback_labels_reduced_independence_and_escalates_hi
         role_registry=_registry(codex_qualified=False, agy_qualified=True),
         transport_factory=agy_transport_factory,
     )
-    hr_dec = hr_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    hr_dec = hr_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert hr_dec.gate_outcome == "HUMAN_REVIEW_REQUIRED"
     assert hr_dec.session_audit.reduced_independence is True
     assert hr_dec.session_audit.high_risk_escalation_required is True
@@ -408,7 +474,10 @@ def test_b02_fails_closed_on_quota_timeout_malformed_output_and_objective_veto(
             runner=quota_runner,
         ),
     )
-    quota_dec = quota_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    quota_dec = quota_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert quota_dec.gate_outcome == "WAITING_PROVIDER"
     assert quota_dec.session_audit.rejection_code == "REVIEWER_QUOTA_OR_UNAVAILABLE"
     assert quota_dec.review_result.metadata["live_review_status"] == LIVE_REVIEW_UNVERIFIED
@@ -429,7 +498,10 @@ def test_b02_fails_closed_on_quota_timeout_malformed_output_and_objective_veto(
             runner=timeout_runner,
         ),
     )
-    timeout_dec = timeout_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    timeout_dec = timeout_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert timeout_dec.gate_outcome == "WAITING_PROVIDER"
     assert timeout_dec.session_audit.rejection_code == "REVIEWER_TIMEOUT"
 
@@ -449,7 +521,10 @@ def test_b02_fails_closed_on_quota_timeout_malformed_output_and_objective_veto(
             runner=malformed_runner,
         ),
     )
-    malformed_dec = malformed_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    malformed_dec = malformed_gate.evaluate(
+        b02_ctx,
+        expected_candidate_sha=b02_ctx.checkpoint.git_commit,
+    )
     assert malformed_dec.gate_outcome == "BLOCKED"
     assert malformed_dec.session_audit.rejection_code == "REVIEWER_MALFORMED_OUTPUT"
 
@@ -479,7 +554,10 @@ def test_b02_fails_closed_on_quota_timeout_malformed_output_and_objective_veto(
             runner=pass_runner,
         ),
     )
-    veto_dec = veto_gate.evaluate(failed_test_ctx, expected_candidate_sha=EXPECTED_SHA)
+    veto_dec = veto_gate.evaluate(
+        failed_test_ctx,
+        expected_candidate_sha=failed_test_ctx.checkpoint.git_commit,
+    )
     assert veto_dec.gate_outcome == "REVISE"
     assert veto_dec.phase_gate_decision is not None
     assert veto_dec.phase_gate_decision.verdict == "REVISE"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,7 @@ def _make_attempt_ctx(
     sha: str,
     attempt: int,
     worker_binding: RoleModelBinding,
+    commit_new_change: bool = True,
 ) -> Any:
     case = dict(review_case)
     ev_dir = tmp_path / f"evidence_att_{attempt:02d}"
@@ -233,16 +235,47 @@ def _make_attempt_ctx(
             "active_task_id": case["task"].task_id,
         }
     )
+    ws = Path(case["task"].workspace)
+    ws.mkdir(parents=True, exist_ok=True)
+    if not (ws / ".git").exists():
+        for cmd in (
+            ["git", "init"],
+            ["git", "config", "user.email", "test@example.com"],
+            ["git", "config", "user.name", "AIPC Test"],
+        ):
+            subprocess.run(cmd, cwd=str(ws), check=True, capture_output=True, text=True)
+    if commit_new_change:
+        (ws / "candidate.py").write_text(f"attempt = {attempt} ({sha[:8]})", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(ws),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", f"attempt {attempt}"],
+            cwd=str(ws),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    res = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    real_sha = res.stdout.strip().lower()
     case["checkpoint"] = case["checkpoint"].model_copy(
         update={
             "checkpoint_id": f"phase-09-attempt-{attempt:02d}",
             "attempt": attempt,
-            "git_commit": sha,
+            "git_commit": real_sha,
             "git_ref": f"refs/tags/aipc/example/phase-09/attempt-{attempt:02d}",
         }
     )
-    ws = Path(case["task"].workspace)
-    (ws / "candidate.py").write_text(f"attempt = {attempt}", encoding="utf-8")
     return context(
         case,
         artifacts=(("design", b"Core imports a neutral transport protocol."),),
@@ -293,6 +326,7 @@ def test_b03_revise_then_bounded_repair_and_fresh_sha_re_review_passes(
     )
 
     repair_plans_seen: list[RepairDispatchPlan | None] = []
+    attempt_shas: list[str] = []
 
     def worker_step(
         binding: RoleModelBinding,
@@ -308,8 +342,10 @@ def test_b03_revise_then_bounded_repair_and_fresh_sha_re_review_passes(
             attempt=attempt,
             worker_binding=binding,
         )
+        real_sha = ctx.checkpoint.git_commit
+        attempt_shas.append(real_sha)
         return WorkerAttemptExecutionOutcome(
-            candidate_sha=sha,
+            candidate_sha=real_sha,
             verification_passed=True,
             review_context=ctx,
             test_receipts=(f"receipt-att-{attempt:02d}.json",),
@@ -332,8 +368,10 @@ def test_b03_revise_then_bounded_repair_and_fresh_sha_re_review_passes(
 
     assert result.final_status == "COMPLETED"
     assert result.attempts_completed == 2
-    assert result.final_candidate_sha == SHA_2
-    assert result.reviewed_commit_sha == SHA_2
+    assert len(attempt_shas) == 2
+    assert attempt_shas[0] != attempt_shas[1]
+    assert result.final_candidate_sha == attempt_shas[1]
+    assert result.reviewed_commit_sha == attempt_shas[1]
     assert repair_plans_seen[0] is None
     assert repair_plans_seen[1] is not None
     assert repair_plans_seen[1].requires_new_candidate_sha is True
@@ -341,7 +379,7 @@ def test_b03_revise_then_bounded_repair_and_fresh_sha_re_review_passes(
     assert result.latest_handoff.boundary_stage == "READY_FOR_PUBLICATION"
     assert result.latest_handoff.next_authorized_action == "HUMAN_MERGE_REVIEW"
     assert result.latest_handoff.review_status == "PASS"
-    assert result.latest_handoff.reviewed_sha == SHA_2
+    assert result.latest_handoff.reviewed_sha == attempt_shas[1]
 
 
 def test_b03_verification_failure_and_retry_exhaustion_halt_cleanly(
@@ -397,7 +435,7 @@ def test_b03_verification_failure_and_retry_exhaustion_halt_cleanly(
             worker_binding=binding,
         )
         return WorkerAttemptExecutionOutcome(
-            candidate_sha=sha,
+            candidate_sha=ctx.checkpoint.git_commit,
             verification_passed=(attempt == 2),
             review_context=ctx,
             test_receipts=(f"receipt-att-{attempt:02d}.json",),
@@ -543,7 +581,7 @@ def test_b03_per_role_quota_failover_and_ambiguous_side_effect_halt(
             worker_binding=binding,
         )
         return WorkerAttemptExecutionOutcome(
-            candidate_sha=SHA_1,
+            candidate_sha=ctx.checkpoint.git_commit,
             verification_passed=True,
             review_context=ctx,
             test_receipts=("receipt-failover.json",),
