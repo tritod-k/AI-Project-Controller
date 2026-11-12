@@ -457,16 +457,27 @@ class MilestoneBRepairAndRecoveryOrchestrator:
             try:
                 snap = q_obj.load()
                 q_rec = next((t for t in snap.tasks if t.contract.task_id == task_id), None)
-                if q_rec is not None and q_rec.status in (
-                    QueuedTaskStatus.RUNNING,
-                    QueuedTaskStatus.WAITING_HUMAN,
+                if q_rec is not None and pkg.boundary_stage in (
+                    "PRE_DISPATCH",
+                    "POST_WORKER_MUTATION",
                 ):
-                    queue_in_flight = pkg.boundary_stage in (
-                        "PRE_DISPATCH",
-                        "POST_WORKER_MUTATION",
+                    has_dispatched_or_interrupted_attempt = any(
+                        att.attempt >= pkg.attempt_number
+                        and att.dispatch_stage in ("DISPATCHED", "INTERRUPTED")
+                        for att in q_rec.attempts
                     )
+                    if q_rec.status in (
+                        QueuedTaskStatus.RUNNING,
+                        QueuedTaskStatus.WAITING_HUMAN,
+                        QueuedTaskStatus.BLOCKED,
+                    ) or (
+                        has_dispatched_or_interrupted_attempt
+                        and pkg.review_status != "WAITING_PROVIDER"
+                    ):
+                        queue_in_flight = True
             except Exception:
-                queue_in_flight = False
+                # Fail closed to human reconciliation if queue persistence is unreadable/corrupt
+                queue_in_flight = True
 
         if (
             pkg.ambiguous_side_effects
@@ -804,11 +815,6 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                             ambiguous_side_effects=True,
                         )
                         failover_events.append(ambig_dec)
-                        self.repair_coordinator.handle_worker_interruption(
-                            task_id=contract.task_id,
-                            exc=exc,
-                            ambiguous_side_effects=True,
-                        )
                         hoff = self.record_handoff_package(
                             contract=contract,
                             project_id=proj_id,
@@ -826,6 +832,11 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                             ambiguous_side_effects=True,
                         )
                         handoffs.append(hoff)
+                        self.repair_coordinator.handle_worker_interruption(
+                            task_id=contract.task_id,
+                            exc=exc,
+                            ambiguous_side_effects=True,
+                        )
                         return MilestoneBOrchestrationResult(
                             final_status="WAITING_HUMAN",
                             task_id=contract.task_id,
@@ -865,11 +876,6 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         self.task_queue.resume_after_recovery(contract.task_id, clean_resume)
                         worker_attempted.append(selected_worker_binding.binding_id)
                         continue
-                    self.task_queue.mark_interrupted(
-                        contract.task_id,
-                        reason=f"Worker provider interruption ({exc.condition.value})",
-                        quota_exhausted=False,
-                    )
                     self.record_handoff_package(
                         contract=contract,
                         project_id=proj_id,
@@ -884,13 +890,13 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         blockers=("Worker interrupted with unknown external state.",),
                         ambiguous_side_effects=True,
                     )
-                    raise
-                except Exception as exc:
                     self.task_queue.mark_interrupted(
                         contract.task_id,
-                        reason=f"Unhandled worker execution crash: {type(exc).__name__}",
+                        reason=f"Worker provider interruption ({exc.condition.value})",
                         quota_exhausted=False,
                     )
+                    raise
+                except Exception as exc:
                     self.record_handoff_package(
                         contract=contract,
                         project_id=proj_id,
@@ -904,6 +910,11 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         next_authorized_action="RECONCILE_AMBIGUOUS_SIDE_EFFECTS",
                         blockers=(f"Unhandled worker crash ({type(exc).__name__}).",),
                         ambiguous_side_effects=True,
+                    )
+                    self.task_queue.mark_interrupted(
+                        contract.task_id,
+                        reason=f"Unhandled worker execution crash: {type(exc).__name__}",
+                        quota_exhausted=False,
                     )
                     raise
 

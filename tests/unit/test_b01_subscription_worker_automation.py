@@ -288,9 +288,13 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
             f"Tampered plan{_NL}",
             encoding="utf-8",
         )
-        # Worker commits MASTER_PLAN.md directly and creates a gitignored .env.production
+        (c_wt / "AGENTS.md").write_text(
+            f"Newly added forbidden file{_NL}",
+            encoding="utf-8",
+        )
+        # Worker commits MASTER_PLAN.md and newly added AGENTS.md directly
         subprocess.run(
-            ["git", "add", "MASTER_PLAN.md"],
+            ["git", "add", "MASTER_PLAN.md", "AGENTS.md"],
             cwd=str(c_wt),
             check=True,
             capture_output=True,
@@ -331,10 +335,20 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
     assert outcome.agent_result.metadata["error_code"] == "FORBIDDEN_PATH_VIOLATION"
     assert ".env.production" in outcome.receipt.forbidden_paths_violated
     assert "MASTER_PLAN.md" in outcome.receipt.forbidden_paths_violated
+    assert "AGENTS.md" in outcome.receipt.forbidden_paths_violated
     assert outcome.receipt.candidate_commit_sha == base_sha
     assert (wt / "MASTER_PLAN.md").read_text(encoding="utf-8") == f"# Master Plan{_NL}"
+    assert not (wt / "AGENTS.md").exists()
     assert not (wt / ".env.production").exists()
     assert (wt / "preexisting_note.txt").read_text(encoding="utf-8") == "keep-me"
+    cached_diff = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=str(wt),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert cached_diff.stdout.strip() == ""
 
     # Also verify mid-task mutation followed by quota error sets ambiguous_side_effects=True
     async def dirty_quota_invoker(

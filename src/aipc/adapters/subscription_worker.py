@@ -584,12 +584,11 @@ class AntigravitySubscriptionWorkerAutomation:
         pre_snap: Mapping[str, str] | None = None,
     ) -> None:
         if base_sha is not None:
-            try:
-                cur_head = self._read_head_sha(worktree, env)
-            except AgentError:
-                cur_head = ""
-            if cur_head and cur_head != base_sha:
-                _run_git(worktree, ["reset", "--soft", base_sha], env)
+            reset_res = _run_git(worktree, ["reset", "--mixed", base_sha], env)
+            if reset_res.returncode != 0:
+                raise AgentError(
+                    f"Failed to reset candidate worktree '{worktree}' to base SHA '{base_sha}'."
+                )
 
         current_changes, _ = self._collect_git_changes_and_diff(
             worktree,
@@ -603,6 +602,11 @@ class AntigravitySubscriptionWorkerAutomation:
         for fc in current_changes:
             target = (worktree / PurePosixPath(fc.path)).resolve()
             if fc.path in protected:
+                _run_git(
+                    worktree,
+                    ["rm", "-f", "--cached", "--ignore-unmatch", "--", fc.path],
+                    env,
+                )
                 if fc.path in saved_bytes and target.is_relative_to(worktree.resolve()):
                     orig = saved_bytes[fc.path]
                     try:
@@ -616,6 +620,11 @@ class AntigravitySubscriptionWorkerAutomation:
                         pass
                 continue
             if fc.change_type == ChangeType.ADDED:
+                _run_git(
+                    worktree,
+                    ["rm", "-f", "--cached", "--ignore-unmatch", "--", fc.path],
+                    env,
+                )
                 if target.is_relative_to(worktree.resolve()) and target.exists():
                     try:
                         if target.is_file() or target.is_symlink():
@@ -623,7 +632,11 @@ class AntigravitySubscriptionWorkerAutomation:
                     except OSError:
                         pass
             else:
-                _run_git(worktree, ["checkout", ref, "--", fc.path], env)
+                co_res = _run_git(worktree, ["checkout", ref, "--", fc.path], env)
+                if co_res.returncode != 0:
+                    raise AgentError(
+                        f"Failed to restore tracked path '{fc.path}' to '{ref}' during rollback."
+                    )
 
         for rel_path, orig in saved_bytes.items():
             target = (worktree / PurePosixPath(rel_path)).resolve()

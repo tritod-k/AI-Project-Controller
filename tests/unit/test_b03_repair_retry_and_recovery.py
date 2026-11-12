@@ -919,3 +919,21 @@ def test_b03_all_providers_exhausted_and_boundary_interrupt_restart_recovery_mat
     assert res_inflight.next_authorized_action == "RECONCILE_AMBIGUOUS_SIDE_EFFECTS"
     assert res_inflight.requires_worker_redispatch is False
     assert res_inflight.requires_human_reconciliation is True
+
+    # Even if mark_interrupted ran before POST_WORKER_MUTATION handoff was saved -> WAITING_HUMAN
+    run_queue.mark_interrupted(
+        run_contract.task_id,
+        reason="Crash after mark_interrupted",
+        quota_exhausted=False,
+    )
+    res_interrupted = run_orch.evaluate_boundary_resume(run_contract.task_id)
+    assert res_interrupted.resume_status == "WAITING_HUMAN"
+    assert res_interrupted.next_authorized_action == "RECONCILE_AMBIGUOUS_SIDE_EFFECTS"
+    assert res_interrupted.requires_worker_redispatch is False
+
+    # And if queue persistence is corrupted at PRE_DISPATCH -> fail closed to WAITING_HUMAN
+    (tmp_path / "queue_running_crash.json").write_text("{corrupt-json", encoding="utf-8")
+    res_corrupt = run_orch.evaluate_boundary_resume(run_contract.task_id)
+    assert res_corrupt.resume_status == "WAITING_HUMAN"
+    assert res_corrupt.next_authorized_action == "RECONCILE_AMBIGUOUS_SIDE_EFFECTS"
+    assert res_corrupt.requires_worker_redispatch is False
