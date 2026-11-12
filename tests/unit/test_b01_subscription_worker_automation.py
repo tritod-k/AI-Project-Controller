@@ -402,7 +402,9 @@ def test_b01_unqualified_runtime_or_failing_tests_fail_closed(tmp_path: Path) ->
         asyncio.run(unqual_auto.execute_worker_task(_task(wt, task_id="task-unqual")))
 
     # Omitting qualification_report still enforces runtime qualification (no bypass)
-    unqual_report = _qualified_report().model_copy(update={"runtime_state": "UNAVAILABLE"})
+    unqual_report = _qualified_report().model_copy(
+        update={"eligibility_state": "UNAVAILABLE", "available": False}
+    )
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
             "aipc.adapters.subscription_worker.qualify_antigravity_subscription_runtime",
