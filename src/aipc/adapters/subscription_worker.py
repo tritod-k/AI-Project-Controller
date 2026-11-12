@@ -369,13 +369,13 @@ class AntigravitySubscriptionWorkerAutomation:
         assert_child_env_isolated(env)
         return env
 
-    def _verify_runtime_qualification(self) -> str:
+    def _verify_runtime_qualification(self, *, worktree_is_clean: bool = True) -> str:
         req_model = self._config.model_requested.strip()
         if req_model.lower() in _UNVERIFIED_WORKER_MODELS:
             raise ProviderInterruption(
                 ProviderCondition.UNAVAILABLE,
-                pre_start_clean=True,
-                ambiguous_side_effects=False,
+                pre_start_clean=worktree_is_clean,
+                ambiguous_side_effects=not worktree_is_clean,
             )
         report = self._qualification_report
         if report is None:
@@ -400,8 +400,8 @@ class AntigravitySubscriptionWorkerAutomation:
         if not decision.eligible or decision.resolved_model is None:
             raise ProviderInterruption(
                 ProviderCondition.UNAVAILABLE,
-                pre_start_clean=True,
-                ambiguous_side_effects=False,
+                pre_start_clean=worktree_is_clean,
+                ambiguous_side_effects=not worktree_is_clean,
             )
         return decision.resolved_model
 
@@ -560,6 +560,21 @@ class AntigravitySubscriptionWorkerAutomation:
             else:
                 _run_git(worktree, ["checkout", ref, "--", fc.path], env)
 
+        for rel_path, orig in saved_bytes.items():
+            target = (worktree / PurePosixPath(rel_path)).resolve()
+            if not target.is_relative_to(worktree.resolve()):
+                continue
+            try:
+                if orig is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    if not target.exists() or target.read_bytes() != orig:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(orig)
+            except OSError:
+                pass
+
     def _write_retained_evidence(
         self,
         *,
@@ -605,7 +620,6 @@ class AntigravitySubscriptionWorkerAutomation:
     async def execute_worker_task(self, task: TaskRequest) -> AutomatedWorkerOutcome:
         """Execute a bounded implementation task in the candidate worktree."""
         task = TaskRequest.model_validate(task)
-        resolved_model = self._verify_runtime_qualification()
         sanitized_env = self._prepare_sanitized_env()
 
         worktree = Path(self._config.candidate_worktree).resolve()
@@ -613,6 +627,10 @@ class AntigravitySubscriptionWorkerAutomation:
             raise AgentError(
                 "TaskRequest.workspace must match SubscriptionWorkerConfig.candidate_worktree."
             )
+
+        pre_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
+        worktree_is_clean = not bool(pre_changes)
+        resolved_model = self._verify_runtime_qualification(worktree_is_clean=worktree_is_clean)
 
         base_sha = self._read_head_sha(worktree, sanitized_env)
         started_at = datetime.now(UTC)
@@ -649,11 +667,10 @@ class AntigravitySubscriptionWorkerAutomation:
         if self._worker_invoker is None:
             raise ProviderInterruption(
                 ProviderCondition.UNAVAILABLE,
-                pre_start_clean=True,
-                ambiguous_side_effects=False,
+                pre_start_clean=worktree_is_clean,
+                ambiguous_side_effects=not worktree_is_clean,
             )
 
-        pre_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
         pre_paths = {fc.path for fc in pre_changes}
         pre_snap = snapshot_candidate_workspace(worktree)
         pre_file_bytes: dict[str, bytes | None] = {}
