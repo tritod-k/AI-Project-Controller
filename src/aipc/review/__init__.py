@@ -1,5 +1,7 @@
 """Offline provider-neutral review contracts and reference review implementation."""
 
+from typing import TYPE_CHECKING, Any
+
 from aipc.review.consensus import (
     ConsensusDecision,
     ConsensusEngine,
@@ -22,6 +24,38 @@ from aipc.review.models import (
 )
 from aipc.review.reviewer import DeterministicReviewer, Reviewer, bind_review
 
+if TYPE_CHECKING:
+    from aipc.review.subscription_reviewer_gate import (
+        IndependentSubscriptionReviewerGate,
+        ReviewerGateOutcome,
+        ReviewerRejectionCode,
+        SessionIsolationAuditReceipt,
+        SubscriptionReviewerGateConfig,
+        SubscriptionReviewerGateDecision,
+        TransportFactoryCallable,
+        default_subscription_reviewer_transport_factory,
+    )
+
+_LAZY_B02_EXPORTS = {
+    "IndependentSubscriptionReviewerGate",
+    "ReviewerGateOutcome",
+    "ReviewerRejectionCode",
+    "SessionIsolationAuditReceipt",
+    "SubscriptionReviewerGateConfig",
+    "SubscriptionReviewerGateDecision",
+    "TransportFactoryCallable",
+    "default_subscription_reviewer_transport_factory",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_B02_EXPORTS:
+        from aipc.review import subscription_reviewer_gate
+
+        return getattr(subscription_reviewer_gate, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "BoundReview",
     "ConsensusDecision",
@@ -33,6 +67,7 @@ __all__ = [
     "CriterionRule",
     "DeterministicReviewer",
     "GateAction",
+    "IndependentSubscriptionReviewerGate",
     "MemberReviewRecord",
     "PhaseGate",
     "PhaseGateDecision",
@@ -42,6 +77,13 @@ __all__ = [
     "ReviewContextError",
     "ReviewProvenance",
     "Reviewer",
+    "ReviewerGateOutcome",
+    "ReviewerRejectionCode",
     "ReviewerSlot",
+    "SessionIsolationAuditReceipt",
+    "SubscriptionReviewerGateConfig",
+    "SubscriptionReviewerGateDecision",
+    "TransportFactoryCallable",
     "bind_review",
+    "default_subscription_reviewer_transport_factory",
 ]

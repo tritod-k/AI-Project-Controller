@@ -3312,4 +3312,13 @@ Following verification and merge of Milestone A (`PR #5`, `ff1fa4a58f5a21fb71897
 
 Milestones C (`C01`–`C03`) and D (`D01`–`D03`) remain planning-only until Milestone B is independently reviewed and accepted by the Human Commander.
 
+## 38.5 Milestone B Implementation & Verification Summary (`B01`–`B03`)
+
+Workstreams `B01`–`B03` (reconciling and preserving all original `B01`–`B04` acceptance and exit criteria in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` v0.5) have been sequentially implemented and verified on `gemini/aipc-2.0-milestone-b`:
+- **B01 (`3942f4a`)**: `src/aipc/adapters/subscription_worker.py` & `tests/unit/test_b01_subscription_worker_automation.py` (`5 passed`).
+- **B02**: `src/aipc/review/subscription_reviewer_gate.py`, `src/aipc/review/__init__.py`, & `tests/unit/test_b02_subscription_reviewer_gate.py` (`5 passed`).
+- **B03**: `src/aipc/controller/milestone_b_orchestrator.py`, `src/aipc/controller/__init__.py`, & `tests/unit/test_b03_repair_retry_and_recovery.py` (`4 passed`).
+- **Verification**: `14 passed` in `B01`–`B03` unit/boundary suites, `65 passed` in combined Milestone A/B + Phase 24 suite, `122 passed` in `tests/review/` + `tests/consensus/`, `31 passed` in `tests/gemini/test_antigravity_transport.py` (including live `aipc-verify:py313-v1` Docker container isolation), and `ruff check` & `ruff format --check` clean (`0 errors`). See `docs/AIPC_2_0_MILESTONE_B_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_B_COMPLETION_REPORT.md`.
+
+
 
