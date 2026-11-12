@@ -89,5 +89,12 @@ Executed live cross-provider Codex subscription review (`codex-cli 0.167.1`, `Lo
   5. **Sanitized Environment Propagation in Live Codex Reviewer Transport & Worker Qualification**: `_run_live_codex_sdk` did not apply `sanitized_env` or external `state_dir`, and `_verify_runtime_qualification` did not auto-qualify when `qualification_report` was omitted in live mode.
   6. **LF Line Ending & Trailing Whitespace Hygiene**: Normalized all touched files to LF (`\n`) with zero `git diff --check` warnings.
 
-### Attempt 02 Bounded Repair Resolutions
-All 6 findings from the live Codex `read-only` review were repaired and covered with deterministic unit tests in `tests/unit/test_b01_subscription_worker_automation.py`, `tests/unit/test_b02_subscription_reviewer_gate.py`, and `tests/unit/test_b03_repair_retry_and_recovery.py` (`30 passed` across B01–B03 + review/repair suites, `git diff --check` exit code `0`).
+### Attempt 02 Candidate (`e5dfe581e3428239df4bb52a9a358994f2e92efb`) — Verdict: `REVISE`
+All 6 Attempt 01 findings were verified as fixed, and the live Codex `read-only` reviewer identified 4 secondary edge-case refinements:
+1. **Pre-existing dirty worktree / modified-file content hash check on interruption**: Use `snapshot_candidate_workspace(worktree)` (`pre_snap` / `post_snap`) and `bool(pre_changes)` when classifying `ProviderInterruption` so modifying an already-dirty file or failing in a dirty worktree always sets `ambiguous_side_effects=True` and `pre_start_clean=False`, and restore exact `pre_file_bytes` on rollback.
+2. **Git worktree root vs subdirectory verification (`_verify_git_worktree_head`)**: Use `git rev-parse --show-toplevel` so passing a subdirectory inside a git repository as `candidate_worktree` is rejected with `STALE_COMMIT_SHA` instead of bypassing git HEAD/clean verification.
+3. **Unconditional runtime qualification when `qualification_report=None`**: Always run `qualify_antigravity_subscription_runtime` / `qualify_codex_subscription_runtime` in `_verify_runtime_qualification` when `qualification_report` is omitted, even if a custom `worker_invoker` is provided.
+4. **Concurrency-safe `sanitized_env` propagation in `SdkCodexTransport`**: Pass `env=sanitized_env` directly into `SdkCodexTransport` and guard child process environment setup with `_SPAWN_ENV_LOCK` during `client.__aenter__()` rather than mutating `os.environ` across unlocked `await` points in `_run_live_codex_sdk`.
+
+### Attempt 03 Bounded Repair Resolutions
+All 4 secondary refinements were implemented and covered with deterministic unit tests in `tests/unit/test_b01_subscription_worker_automation.py`, `tests/unit/test_b02_subscription_reviewer_gate.py`, and `tests/unit/test_b03_repair_retry_and_recovery.py`.

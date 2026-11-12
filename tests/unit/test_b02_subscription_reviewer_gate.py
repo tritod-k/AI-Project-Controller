@@ -200,6 +200,25 @@ def test_b02_rejects_stale_commit_sha_and_missing_evidence(
     assert stale_dec.session_audit.rejection_code == "STALE_COMMIT_SHA"
     assert stale_dec.phase_gate_decision is None
 
+    # 1b. Subdirectory of a git repository is rejected as non-root worktree
+    git_repo = tmp_path / "real_git_repo"
+    sub_dir = git_repo / "sub_pkg"
+    sub_dir.mkdir(parents=True)
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=str(git_repo), check=True, capture_output=True)
+    subdir_cfg = SubscriptionReviewerGateConfig(
+        candidate_worktree=str(sub_dir),
+        evidence_output_dir=str(tmp_path / "evidence_subdir"),
+    )
+    subdir_gate = IndependentSubscriptionReviewerGate(
+        config=subdir_cfg,
+        role_registry=_registry(),
+    )
+    subdir_dec = subdir_gate.evaluate(b02_ctx, expected_candidate_sha=EXPECTED_SHA)
+    assert subdir_dec.gate_outcome == "BLOCKED"
+    assert subdir_dec.session_audit.rejection_code == "STALE_COMMIT_SHA"
+
     # 2. Missing/failed test evidence parse status
     bad_ev = b02_ctx.evidence.model_copy(
         update={

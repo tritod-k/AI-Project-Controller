@@ -55,6 +55,7 @@ from aipc.hardening.env_isolation import (
 from aipc.hardening.secrets import assert_no_secrets
 from aipc.normalization.validation import validate_agent_result
 from aipc.recovery.models import ProviderCondition
+from aipc.review.llm.subscription_transports import snapshot_candidate_workspace
 
 _NL = chr(10)
 _BS = chr(92)
@@ -377,7 +378,7 @@ class AntigravitySubscriptionWorkerAutomation:
                 ambiguous_side_effects=False,
             )
         report = self._qualification_report
-        if report is None and self._worker_invoker is None:
+        if report is None:
             report = (
                 qualify_antigravity_subscription_runtime(
                     operating_profile=self._config.operating_profile,
@@ -391,8 +392,6 @@ class AntigravitySubscriptionWorkerAutomation:
                     allow_api_key_fallback=self._config.allow_api_key_fallback,
                 )
             )
-        if report is None:
-            return req_model
         decision = evaluate_runtime_eligibility(
             report,
             role="worker",
@@ -529,16 +528,29 @@ class AntigravitySubscriptionWorkerAutomation:
         env: Mapping[str, str],
         *,
         pre_existing_paths: set[str] | None = None,
+        pre_file_bytes: Mapping[str, bytes | None] | None = None,
         base_sha: str | None = None,
     ) -> None:
         current_changes, _ = self._collect_git_changes_and_diff(worktree, env)
         protected = pre_existing_paths or set()
+        saved_bytes = pre_file_bytes or {}
         ref = base_sha or "HEAD"
         for fc in current_changes:
+            target = (worktree / PurePosixPath(fc.path)).resolve()
             if fc.path in protected:
+                if fc.path in saved_bytes and target.is_relative_to(worktree.resolve()):
+                    orig = saved_bytes[fc.path]
+                    try:
+                        if orig is None:
+                            if target.exists():
+                                target.unlink()
+                        else:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_bytes(orig)
+                    except OSError:
+                        pass
                 continue
             if fc.change_type == ChangeType.ADDED:
-                target = (worktree / PurePosixPath(fc.path)).resolve()
                 if target.is_relative_to(worktree.resolve()) and target.exists():
                     try:
                         if target.is_file() or target.is_symlink():
@@ -643,6 +655,17 @@ class AntigravitySubscriptionWorkerAutomation:
 
         pre_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
         pre_paths = {fc.path for fc in pre_changes}
+        pre_snap = snapshot_candidate_workspace(worktree)
+        pre_file_bytes: dict[str, bytes | None] = {}
+        for p in pre_paths:
+            f_path = (worktree / PurePosixPath(p)).resolve()
+            if f_path.is_relative_to(worktree) and f_path.is_file():
+                try:
+                    pre_file_bytes[p] = f_path.read_bytes()
+                except OSError:
+                    pre_file_bytes[p] = None
+            else:
+                pre_file_bytes[p] = None
 
         async def _invoke() -> WorkerInvocationResponse:
             assert self._worker_invoker is not None
@@ -657,6 +680,7 @@ class AntigravitySubscriptionWorkerAutomation:
                 worktree,
                 sanitized_env,
                 pre_existing_paths=pre_paths,
+                pre_file_bytes=pre_file_bytes,
                 base_sha=base_sha,
             )
             return self._build_outcome(
@@ -683,11 +707,17 @@ class AntigravitySubscriptionWorkerAutomation:
             )
         except Exception as exc:
             post_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
+            post_snap = snapshot_candidate_workspace(worktree)
             try:
                 post_sha = self._read_head_sha(worktree, sanitized_env)
             except AgentError:
                 post_sha = "mutated"
-            workspace_mutated = (post_changes != pre_changes) or (post_sha != base_sha)
+            workspace_mutated = (
+                (post_snap != pre_snap)
+                or bool(pre_changes)
+                or bool(post_changes)
+                or (post_sha != base_sha)
+            )
             exc_ambig = bool(
                 getattr(exc, "ambiguous_side_effects", False)
                 or not getattr(exc, "pre_start_clean", True)
@@ -715,6 +745,7 @@ class AntigravitySubscriptionWorkerAutomation:
                 worktree,
                 sanitized_env,
                 pre_existing_paths=pre_paths,
+                pre_file_bytes=pre_file_bytes,
                 base_sha=base_sha,
             )
             err_msg = "FORBIDDEN_PATH_VIOLATION: worker modified unauthorized paths: " + ", ".join(

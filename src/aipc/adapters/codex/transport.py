@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import importlib.metadata
+import os
 import re
 from pathlib import Path
 from typing import Protocol
@@ -88,8 +89,11 @@ def mcp_disables(servers):
 
 
 class SdkCodexTransport:
-    def __init__(self, config):
+    _SPAWN_ENV_LOCK = asyncio.Lock()
+
+    def __init__(self, config, *, env=None):
         self.config = config
+        self.env = dict(env) if env is not None else None
         self.client = None
         self.sdk = None
         self.threads = {}
@@ -153,6 +157,20 @@ class SdkCodexTransport:
         )
         return result.config.model_dump(mode="json")
 
+    async def _enter_client_with_env(self, client):
+        if self.env is None:
+            await client.__aenter__()
+            return
+        async with self._SPAWN_ENV_LOCK:
+            prev_env = dict(os.environ)
+            os.environ.clear()
+            os.environ.update(self.env)
+            try:
+                await client.__aenter__()
+            finally:
+                os.environ.clear()
+                os.environ.update(prev_env)
+
     async def readiness(self, workspace):
         workspace = authorized_root(workspace)
         if self.client is not None:
@@ -190,7 +208,7 @@ class SdkCodexTransport:
         )
         install_denial_guard(client)
         try:
-            await client.__aenter__()
+            await self._enter_client_with_env(client)
             version = client.metadata.serverInfo.version.split()[0]
             if version not in RUNTIME_VERSIONS:
                 raise CodexUnsupportedVersionError()
@@ -213,7 +231,7 @@ class SdkCodexTransport:
                     )
                 )
                 install_denial_guard(client)
-                await client.__aenter__()
+                await self._enter_client_with_env(client)
                 effective = await self._effective(client, workspace)
             validate_effective_config(effective, self.config.sandbox)
         except BaseException as exc:

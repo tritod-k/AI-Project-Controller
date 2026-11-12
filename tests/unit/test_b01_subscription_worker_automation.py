@@ -401,6 +401,21 @@ def test_b01_unqualified_runtime_or_failing_tests_fail_closed(tmp_path: Path) ->
     with pytest.raises(ProviderInterruption):
         asyncio.run(unqual_auto.execute_worker_task(_task(wt, task_id="task-unqual")))
 
+    # Omitting qualification_report still enforces runtime qualification (no bypass)
+    unqual_report = _qualified_report().model_copy(update={"runtime_state": "UNAVAILABLE"})
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "aipc.adapters.subscription_worker.qualify_antigravity_subscription_runtime",
+            lambda **_kw: unqual_report,
+        )
+        no_rep_auto = AntigravitySubscriptionWorkerAutomation(
+            cfg,
+            qualification_report=None,
+            worker_invoker=lambda *_a: asyncio.sleep(0),  # type: ignore[arg-type,return-value]
+        )
+        with pytest.raises(ProviderInterruption):
+            asyncio.run(no_rep_auto.execute_worker_task(_task(wt, task_id="task-no-rep")))
+
     async def valid_edit_invoker(
         _task: TaskRequest,
         c: SubscriptionWorkerConfig,

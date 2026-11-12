@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -294,7 +293,11 @@ class CodexSubscriptionReviewerTransport:
             model=effective_model,
             sandbox="read_only",
         )
-        sdk_transport = codex_tr_mod.SdkCodexTransport(adapter_cfg)
+        try:
+            sdk_transport = codex_tr_mod.SdkCodexTransport(adapter_cfg, env=sanitized_env)
+        except TypeError:
+            sdk_transport = codex_tr_mod.SdkCodexTransport(adapter_cfg)
+            sdk_transport.env = dict(sanitized_env)
         nl = chr(10)
         prompt = nl.join(
             [
@@ -307,9 +310,6 @@ class CodexSubscriptionReviewerTransport:
                 request.input_json,
             ]
         )
-        prev_env = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(sanitized_env)
         try:
             await sdk_transport.readiness(workspace)
             thread_id = await sdk_transport.start_thread(workspace)
@@ -358,11 +358,7 @@ class CodexSubscriptionReviewerTransport:
                 usage=usage,
             )
         finally:
-            try:
-                await sdk_transport.close()
-            finally:
-                os.environ.clear()
-                os.environ.update(prev_env)
+            await sdk_transport.close()
 
     def _coerce_raw_result(
         self,
