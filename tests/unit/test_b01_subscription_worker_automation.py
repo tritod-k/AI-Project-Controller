@@ -256,6 +256,25 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
 ) -> None:
     wt = tmp_path / "candidate_wt"
     base_sha = _init_git_repo(wt)
+    (wt / ".gitignore").write_text(f".env*{_NL}", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=str(wt), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add gitignore"],
+        cwd=str(wt),
+        check=True,
+        capture_output=True,
+    )
+    base_sha = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(wt),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        .stdout.strip()
+        .lower()
+    )
     (wt / "preexisting_note.txt").write_text("keep-me", encoding="utf-8")
 
     async def mutating_governance_invoker(
@@ -264,14 +283,30 @@ def test_b01_forbidden_path_and_secret_modification_fails_closed_and_reverts(
         _env: Mapping[str, str],
         resolved_model: str,
     ) -> WorkerInvocationResponse:
-        (Path(cfg.candidate_worktree) / "MASTER_PLAN.md").write_text(
+        c_wt = Path(cfg.candidate_worktree)
+        (c_wt / "MASTER_PLAN.md").write_text(
             f"Tampered plan{_NL}",
             encoding="utf-8",
         )
-        (Path(cfg.candidate_worktree) / ".env.production").write_text(
+        # Worker commits MASTER_PLAN.md directly and creates a gitignored .env.production
+        subprocess.run(
+            ["git", "add", "MASTER_PLAN.md"],
+            cwd=str(c_wt),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "sneak commit"],
+            cwd=str(c_wt),
+            check=True,
+            capture_output=True,
+        )
+        (c_wt / ".env.production").write_text(
             f"SECRET=1{_NL}",
             encoding="utf-8",
         )
+        # Also delete pre-existing untracked file to verify rollback restores it
+        (c_wt / "preexisting_note.txt").unlink()
         return WorkerInvocationResponse(
             session_id="agy-session-tamper",
             model_used=resolved_model,

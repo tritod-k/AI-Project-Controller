@@ -451,8 +451,26 @@ class MilestoneBRepairAndRecoveryOrchestrator:
     def evaluate_boundary_resume(self, task_id: str) -> BoundaryResumeDecision:
         """Inspect persisted handoff package after restart/switch and compute safe resume action."""
         pkg = self.load_latest_handoff(task_id)
+        queue_in_flight = False
+        q_obj = getattr(self, "task_queue", None)
+        if q_obj is not None and getattr(q_obj, "path", None) is not None and q_obj.path.is_file():
+            try:
+                snap = q_obj.load()
+                q_rec = next((t for t in snap.tasks if t.contract.task_id == task_id), None)
+                if q_rec is not None and q_rec.status in (
+                    QueuedTaskStatus.RUNNING,
+                    QueuedTaskStatus.WAITING_HUMAN,
+                ):
+                    queue_in_flight = pkg.boundary_stage in (
+                        "PRE_DISPATCH",
+                        "POST_WORKER_MUTATION",
+                    )
+            except Exception:
+                queue_in_flight = False
+
         if (
             pkg.ambiguous_side_effects
+            or queue_in_flight
             or pkg.boundary_stage == "POST_WORKER_MUTATION"
             or pkg.next_authorized_action == "RECONCILE_AMBIGUOUS_SIDE_EFFECTS"
         ):
@@ -468,7 +486,7 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                 requires_reviewer_dispatch=False,
                 requires_human_reconciliation=True,
                 reason=(
-                    "Interrupted at POST_WORKER_MUTATION or with ambiguous side effects; "
+                    "Interrupted while worker was in-flight or with ambiguous side effects; "
                     "human/RecoveryManager reconciliation required before any redispatch."
                 ),
             )
@@ -739,6 +757,25 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                 selected_worker_binding = worker_res.selected_binding
                 snap_now = self.task_queue.load()
                 t_now = next(t for t in snap_now.tasks if t.contract.task_id == contract.task_id)
+                next_att_num = (
+                    t_now.current_attempt
+                    if t_now.status == QueuedTaskStatus.RUNNING
+                    else t_now.current_attempt + 1
+                )
+                pre_hoff = self.record_handoff_package(
+                    contract=contract,
+                    project_id=proj_id,
+                    attempt_number=next_att_num,
+                    candidate_sha=last_sha,
+                    worktree=worktree,
+                    binding=selected_worker_binding,
+                    role="worker",
+                    session_identity=f"worker-pre-{contract.task_id}-att-{next_att_num:02d}",
+                    boundary_stage="PRE_DISPATCH",
+                    next_authorized_action="DISPATCH_WORKER",
+                )
+                handoffs.append(pre_hoff)
+
                 if t_now.status != QueuedTaskStatus.RUNNING:
                     task_rec = self.task_queue.begin_dispatch(
                         contract.task_id,
@@ -746,20 +783,6 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         provider=selected_worker_binding.provider_id,
                     )
                 attempt_num = task_rec.current_attempt
-
-                pre_hoff = self.record_handoff_package(
-                    contract=contract,
-                    project_id=proj_id,
-                    attempt_number=attempt_num,
-                    candidate_sha=last_sha,
-                    worktree=worktree,
-                    binding=selected_worker_binding,
-                    role="worker",
-                    session_identity=f"worker-pre-{contract.task_id}-att-{attempt_num:02d}",
-                    boundary_stage="PRE_DISPATCH",
-                    next_authorized_action="DISPATCH_WORKER",
-                )
-                handoffs.append(pre_hoff)
 
                 try:
                     worker_outcome = worker_step(
@@ -842,6 +865,46 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         self.task_queue.resume_after_recovery(contract.task_id, clean_resume)
                         worker_attempted.append(selected_worker_binding.binding_id)
                         continue
+                    self.task_queue.mark_interrupted(
+                        contract.task_id,
+                        reason=f"Worker provider interruption ({exc.condition.value})",
+                        quota_exhausted=False,
+                    )
+                    self.record_handoff_package(
+                        contract=contract,
+                        project_id=proj_id,
+                        attempt_number=attempt_num,
+                        candidate_sha=last_sha,
+                        worktree=worktree,
+                        binding=selected_worker_binding,
+                        role="worker",
+                        session_identity=f"worker-crash-{contract.task_id}-att-{attempt_num:02d}",
+                        boundary_stage="POST_WORKER_MUTATION",
+                        next_authorized_action="RECONCILE_AMBIGUOUS_SIDE_EFFECTS",
+                        blockers=("Worker interrupted with unknown external state.",),
+                        ambiguous_side_effects=True,
+                    )
+                    raise
+                except Exception as exc:
+                    self.task_queue.mark_interrupted(
+                        contract.task_id,
+                        reason=f"Unhandled worker execution crash: {type(exc).__name__}",
+                        quota_exhausted=False,
+                    )
+                    self.record_handoff_package(
+                        contract=contract,
+                        project_id=proj_id,
+                        attempt_number=attempt_num,
+                        candidate_sha=last_sha,
+                        worktree=worktree,
+                        binding=selected_worker_binding,
+                        role="worker",
+                        session_identity=f"worker-crash-{contract.task_id}-att-{attempt_num:02d}",
+                        boundary_stage="POST_WORKER_MUTATION",
+                        next_authorized_action="RECONCILE_AMBIGUOUS_SIDE_EFFECTS",
+                        blockers=(f"Unhandled worker crash ({type(exc).__name__}).",),
+                        ambiguous_side_effects=True,
+                    )
                     raise
 
             assert worker_outcome is not None

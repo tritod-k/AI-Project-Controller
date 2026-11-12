@@ -878,3 +878,44 @@ def test_b03_all_providers_exhausted_and_boundary_interrupt_restart_recovery_mat
     assert res_blk_bound.next_authorized_action == "HALT_ON_BLOCKER"
     assert res_blk_bound.requires_worker_redispatch is False
     assert res_blk_bound.requires_reviewer_dispatch is False
+
+    # Boundary H: PRE_DISPATCH handoff while queue is RUNNING (in-flight crash) -> WAITING_HUMAN
+    run_contract = _b03_contract("task-b03-running-crash", max_attempts=2)
+    run_queue = PersistentTaskQueue(tmp_path / "queue_running_crash.json")
+    run_queue.initialize(
+        project_id="example",
+        milestone_id="milestone-b",
+        contracts=(run_contract,),
+    )
+    run_queue.begin_dispatch(
+        run_contract.task_id,
+        worker_id=worker_binding.binding_id,
+        provider=worker_binding.provider_id,
+    )
+    run_orch = MilestoneBRepairAndRecoveryOrchestrator(
+        role_registry=full_reg,
+        task_queue=run_queue,
+        repair_coordinator=BoundedRepairCoordinator(
+            queue=run_queue,
+            review_authority="milestone-b-independent-subscription-reviewer",
+        ),
+        reviewer_gate=rev_gate,
+        handoff_dir=tmp_path / "handoffs_running_crash",
+    )
+    run_orch.record_handoff_package(
+        contract=run_contract,
+        project_id="example",
+        attempt_number=1,
+        candidate_sha=BASE_SHA,
+        worktree=ws,
+        binding=worker_binding,
+        role="worker",
+        session_identity="sess-inflight-01",
+        boundary_stage="PRE_DISPATCH",
+        next_authorized_action="DISPATCH_WORKER",
+    )
+    res_inflight = run_orch.evaluate_boundary_resume(run_contract.task_id)
+    assert res_inflight.resume_status == "WAITING_HUMAN"
+    assert res_inflight.next_authorized_action == "RECONCILE_AMBIGUOUS_SIDE_EFFECTS"
+    assert res_inflight.requires_worker_redispatch is False
+    assert res_inflight.requires_human_reconciliation is True

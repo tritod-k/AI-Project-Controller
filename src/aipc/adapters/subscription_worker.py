@@ -431,8 +431,15 @@ class AntigravitySubscriptionWorkerAutomation:
         self,
         worktree: Path,
         env: Mapping[str, str],
+        *,
+        base_sha: str | None = None,
+        pre_snap: Mapping[str, str] | None = None,
     ) -> tuple[list[FileChange], str]:
-        status_res = _run_git(worktree, ["status", "--porcelain", "-uall"], env)
+        status_res = _run_git(
+            worktree,
+            ["status", "--porcelain", "-uall", "--ignored=matching"],
+            env,
+        )
         changes: list[FileChange] = []
         seen_paths: set[str] = set()
         for raw_line in (status_res.stdout or "").splitlines():
@@ -444,11 +451,19 @@ class AntigravitySubscriptionWorkerAutomation:
                 raw_path = raw_path.split(" -> ", 1)[1].strip()
             if raw_path.startswith('"') and raw_path.endswith('"'):
                 raw_path = raw_path[1:-1]
-            rel_posix = _normalize_rel_posix(raw_path)
+            rel_posix = _normalize_rel_posix(raw_path.rstrip("/"))
             if not rel_posix or rel_posix in seen_paths:
                 continue
+            if xy == "!!" and pre_snap is not None:
+                cur_target = worktree / PurePosixPath(rel_posix)
+                if cur_target.is_dir():
+                    continue
+                if rel_posix in pre_snap and cur_target.is_file():
+                    cur_hash = hashlib.sha256(cur_target.read_bytes()).hexdigest()
+                    if cur_hash == pre_snap[rel_posix]:
+                        continue
             seen_paths.add(rel_posix)
-            if "?" in xy or "A" in xy:
+            if "?" in xy or "!" in xy or "A" in xy:
                 ctype = ChangeType.ADDED
             elif "D" in xy:
                 ctype = ChangeType.DELETED
@@ -456,7 +471,43 @@ class AntigravitySubscriptionWorkerAutomation:
                 ctype = ChangeType.MODIFIED
             changes.append(FileChange(path=rel_posix, change_type=ctype))
 
-        diff_res = _run_git(worktree, ["diff", "HEAD"], env)
+        ref = base_sha or "HEAD"
+        if base_sha is not None:
+            ns_res = _run_git(worktree, ["diff", "--name-status", base_sha], env)
+            for raw_ns in (ns_res.stdout or "").splitlines():
+                parts = raw_ns.strip().split("\t")
+                if len(parts) < 2:
+                    continue
+                st_code = parts[0].strip().upper()
+                rel_posix = _normalize_rel_posix(parts[-1].strip())
+                if not rel_posix or rel_posix in seen_paths:
+                    continue
+                seen_paths.add(rel_posix)
+                if st_code.startswith("A"):
+                    ctype = ChangeType.ADDED
+                elif st_code.startswith("D"):
+                    ctype = ChangeType.DELETED
+                else:
+                    ctype = ChangeType.MODIFIED
+                changes.append(FileChange(path=rel_posix, change_type=ctype))
+
+        if pre_snap is not None:
+            cur_snap = snapshot_candidate_workspace(worktree)
+            for rel_p, cur_digest in cur_snap.items():
+                if rel_p in seen_paths:
+                    continue
+                if rel_p not in pre_snap:
+                    seen_paths.add(rel_p)
+                    changes.append(FileChange(path=rel_p, change_type=ChangeType.ADDED))
+                elif pre_snap[rel_p] != cur_digest:
+                    seen_paths.add(rel_p)
+                    changes.append(FileChange(path=rel_p, change_type=ChangeType.MODIFIED))
+            for rel_p in pre_snap:
+                if rel_p not in cur_snap and rel_p not in seen_paths:
+                    seen_paths.add(rel_p)
+                    changes.append(FileChange(path=rel_p, change_type=ChangeType.DELETED))
+
+        diff_res = _run_git(worktree, ["diff", ref], env)
         diff_parts: list[str] = []
         if (diff_res.stdout or "").strip():
             diff_parts.append(diff_res.stdout)
@@ -530,8 +581,22 @@ class AntigravitySubscriptionWorkerAutomation:
         pre_existing_paths: set[str] | None = None,
         pre_file_bytes: Mapping[str, bytes | None] | None = None,
         base_sha: str | None = None,
+        pre_snap: Mapping[str, str] | None = None,
     ) -> None:
-        current_changes, _ = self._collect_git_changes_and_diff(worktree, env)
+        if base_sha is not None:
+            try:
+                cur_head = self._read_head_sha(worktree, env)
+            except AgentError:
+                cur_head = ""
+            if cur_head and cur_head != base_sha:
+                _run_git(worktree, ["reset", "--soft", base_sha], env)
+
+        current_changes, _ = self._collect_git_changes_and_diff(
+            worktree,
+            env,
+            base_sha=base_sha,
+            pre_snap=pre_snap,
+        )
         protected = pre_existing_paths or set()
         saved_bytes = pre_file_bytes or {}
         ref = base_sha or "HEAD"
@@ -699,6 +764,7 @@ class AntigravitySubscriptionWorkerAutomation:
                 pre_existing_paths=pre_paths,
                 pre_file_bytes=pre_file_bytes,
                 base_sha=base_sha,
+                pre_snap=pre_snap,
             )
             return self._build_outcome(
                 task=task,
@@ -723,7 +789,12 @@ class AntigravitySubscriptionWorkerAutomation:
                 error_code="CANCELLED",
             )
         except Exception as exc:
-            post_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
+            post_changes, _ = self._collect_git_changes_and_diff(
+                worktree,
+                sanitized_env,
+                base_sha=base_sha,
+                pre_snap=pre_snap,
+            )
             post_snap = snapshot_candidate_workspace(worktree)
             try:
                 post_sha = self._read_head_sha(worktree, sanitized_env)
@@ -753,7 +824,12 @@ class AntigravitySubscriptionWorkerAutomation:
         finally:
             self._active_tasks.pop(task.task_id, None)
 
-        files_changed, diff_text = self._collect_git_changes_and_diff(worktree, sanitized_env)
+        files_changed, diff_text = self._collect_git_changes_and_diff(
+            worktree,
+            sanitized_env,
+            base_sha=base_sha,
+            pre_snap=pre_snap,
+        )
 
         # 1. Forbidden-path guard
         forbidden_violations = self._detect_forbidden_paths(worktree, files_changed)
@@ -764,6 +840,7 @@ class AntigravitySubscriptionWorkerAutomation:
                 pre_existing_paths=pre_paths,
                 pre_file_bytes=pre_file_bytes,
                 base_sha=base_sha,
+                pre_snap=pre_snap,
             )
             err_msg = "FORBIDDEN_PATH_VIOLATION: worker modified unauthorized paths: " + ", ".join(
                 forbidden_violations
