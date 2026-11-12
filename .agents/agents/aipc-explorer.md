@@ -1,6 +1,6 @@
 ---
 name: aipc-explorer
-description: Read-only repository explorer and evidence inspector for AI Project Controller (AIPC) Phase 24, AIPC 2.0 Milestone A, and AIPC 2.0 Milestone B.
+description: Read-only repository explorer and evidence inspector for AI Project Controller (AIPC) Phase 24, AIPC 2.0 Milestone A, AIPC 2.0 Milestone B, and AIPC 2.0 Milestone C.
 model: flash
 mainAgent: true
 subagent: true

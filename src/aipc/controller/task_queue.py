@@ -32,6 +32,12 @@ _PROHIBITED_MILESTONE_PREFIXES: tuple[str, ...] = (
     "aipc-2-",
     "aipc_2_0",
     "aipc2",
+    "milestone-d",
+    "milestone_d",
+    "workstream-d",
+    "d01",
+    "d02",
+    "d03",
 )
 
 

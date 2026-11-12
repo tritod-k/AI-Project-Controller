@@ -52,15 +52,32 @@ _UNAUTHORIZED_MILESTONE_TOKENS: tuple[str, ...] = (
     "workstream-c",
     "workstream-d",
 )
+_STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS: tuple[str, ...] = (
+    "milestone-d",
+    "milestone_d",
+    "workstream-d",
+)
+_APPROVED_MILESTONE_C_TOKENS: tuple[str, ...] = (
+    "milestone-c",
+    "milestone_c",
+    "workstream-c",
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _references_unauthorized_milestone(text: str) -> bool:
+def _references_unauthorized_milestone(text: str, *, allow_milestone_c: bool = False) -> bool:
     lowered = text.strip().lower()
-    return any(tok in lowered for tok in _UNAUTHORIZED_MILESTONE_TOKENS)
+    if any(tok in lowered for tok in _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS):
+        return True
+    tokens = (
+        tuple(t for t in _UNAUTHORIZED_MILESTONE_TOKENS if t not in _APPROVED_MILESTONE_C_TOKENS)
+        if allow_milestone_c
+        else _UNAUTHORIZED_MILESTONE_TOKENS
+    )
+    return any(tok in lowered for tok in tokens)
 
 
 class HumanGoalSpec(CanonicalRecord):
@@ -93,7 +110,7 @@ class HumanGoalSpec(CanonicalRecord):
             ("phase_id", self.phase_id),
             ("phase_name", self.phase_name),
         ):
-            if _references_unauthorized_milestone(val):
+            if _references_unauthorized_milestone(val, allow_milestone_c=self.approval_granted):
                 raise ValueError(f"{label} references unauthorized future milestone scope: '{val}'")
         overlap = set(self.in_scope_paths) & set(self.out_of_scope_paths)
         if overlap:
