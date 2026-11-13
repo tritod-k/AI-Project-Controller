@@ -1,0 +1,747 @@
+"""Unit tests for Workstream C02: Multi-Language Isolated Verification & E2E Pipeline."""
+
+from __future__ import annotations
+
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+import aipc.controller as controller_pkg
+from aipc.agents.role_registry import RoleModelBinding
+from aipc.controller.milestone_b_orchestrator import WorkerAttemptExecutionOutcome
+from aipc.controller.milestone_c_pipeline import (
+    ContainerResourceLimits,
+    MilestoneCEndToEndPipeline,
+    MultiLanguageIsolatedVerifier,
+    MultiLanguageVerificationReceipt,
+    PRReadinessBundle,
+)
+from aipc.controller.self_dev_runner import VERIFICATION_ISOLATION_BLOCKED
+from aipc.controller.task_queue import ApprovedTaskContract, PersistentTaskQueue, QueuedTaskStatus
+from aipc.domain.enums import AgentStatus, CriterionStatus, ReviewVerdict
+from aipc.domain.models import (
+    AgentResult,
+    CriterionResult,
+    EvidenceReferences,
+    ReviewResult,
+    TaskRequest,
+    TestSummary,
+)
+from aipc.evidence.models import (
+    ArtifactRecord,
+    EvidenceBundle,
+    EvidenceItem,
+    GitEvidence,
+    TestEvidence,
+)
+from aipc.hardening.errors import SecretExposureError
+from aipc.project.models import AcceptanceCriterion, PhaseDefinition
+from aipc.project.state_models import ProjectState, ProjectStatus
+from aipc.project.universal_profiles import OnboardedProjectBundle, onboard_universal_project
+from aipc.review.models import (
+    BoundReview,
+    GateAction,
+    PhaseGateDecision,
+    PhaseReviewStage,
+    ReviewContext,
+    ReviewProvenance,
+)
+from aipc.review.subscription_reviewer_gate import (
+    SessionIsolationAuditReceipt,
+    SubscriptionReviewerGateDecision,
+)
+from aipc.version.models import CheckpointMetadata, CheckpointType
+
+_SHA_CANDIDATE = "a" * 40
+_SHA256_DUMMY = "0" * 64
+
+
+def _make_phases() -> tuple[PhaseDefinition, ...]:
+    return (
+        PhaseDefinition(
+            id="phase-01",
+            name="Verification",
+            objective="Verify project candidate in isolation",
+            acceptance_criteria=(
+                AcceptanceCriterion(
+                    id="AC-01",
+                    statement="All tests pass in isolated verification",
+                    required=True,
+                ),
+            ),
+        ),
+    )
+
+
+def _make_onboarded_python_project(
+    tmp_path: Path,
+    *,
+    with_git_file: bool = False,
+) -> OnboardedProjectBundle:
+    ws = tmp_path / "py-repo"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "pyproject.toml").write_text("[project]\nname='demo-py'\n", encoding="utf-8")
+    (ws / "tests").mkdir(exist_ok=True)
+    (ws / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    if with_git_file:
+        (ws / ".git").write_text("gitdir: /tmp/fake-git-dir\n", encoding="utf-8")
+    return onboard_universal_project(
+        workspace=ws,
+        project_id="demo-py",
+        project_name="Demo Python",
+        phases=_make_phases(),
+    )
+
+
+def _make_onboarded_node_project(tmp_path: Path) -> OnboardedProjectBundle:
+    ws = tmp_path / "node-repo"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "package.json").write_text(
+        '{"name":"demo-node","scripts":{"test":"npm test"}}',
+        encoding="utf-8",
+    )
+    return onboard_universal_project(
+        workspace=ws,
+        project_id="demo-node",
+        project_name="Demo Node",
+        phases=_make_phases(),
+    )
+
+
+def _make_onboarded_gas_project(tmp_path: Path) -> OnboardedProjectBundle:
+    ws = tmp_path / "gas-repo"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "appsscript.json").write_text('{"timeZone":"UTC"}', encoding="utf-8")
+    (ws / "Code.gs").write_text("function doGet() { return 'ok'; }\n", encoding="utf-8")
+    return onboard_universal_project(
+        workspace=ws,
+        project_id="demo-gas",
+        project_name="Demo GAS",
+        phases=_make_phases(),
+    )
+
+
+def _make_onboarded_static_project(tmp_path: Path) -> OnboardedProjectBundle:
+    ws = tmp_path / "static-repo"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "index.html").write_text("<html><body>hello</body></html>\n", encoding="utf-8")
+    return onboard_universal_project(
+        workspace=ws,
+        project_id="demo-static",
+        project_name="Demo Static",
+        phases=_make_phases(),
+    )
+
+
+def _make_review_context(bundle: OnboardedProjectBundle, candidate_sha: str) -> ReviewContext:
+    now = datetime.now(UTC)
+    pid = bundle.project_definition.project.id
+    task_id = "task-01"
+    phase_id = "phase-01"
+    state = ProjectState(
+        schema_version="1.0",
+        project_id=pid,
+        run_id="run-01",
+        current_phase=phase_id,
+        current_attempt=1,
+        status=ProjectStatus.RUNNING,
+        completed_phases=(),
+        blocked_phases=(),
+        active_task_id=task_id,
+        last_review=None,
+        updated_at=now,
+    )
+    task = TaskRequest(
+        schema_version="1.0",
+        task_id=task_id,
+        project_id=pid,
+        phase_id=phase_id,
+        attempt=1,
+        task_type="implementation",
+        prompt="Implement and verify feature",
+        workspace=bundle.workspace_root,
+        allowed_tools=["read_file", "write_file"],
+        forbidden_actions=["live_deploy"],
+        timeout_seconds=120,
+    )
+    agent_result = AgentResult(
+        schema_version="1.0",
+        task_id=task_id,
+        agent_id="worker-01",
+        provider="google_antigravity",
+        status=AgentStatus.COMPLETED,
+        started_at=now,
+        completed_at=now,
+        summary="Completed task",
+        files_changed=[],
+        commands=[],
+        tests=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        artifacts=[],
+        warnings=[],
+        errors=[],
+        approval_requests=[],
+        worker_claimed_complete=True,
+        evidence=EvidenceReferences(
+            git_diff_path="git_diff.patch",
+            test_log_path="test.log",
+            terminal_log_path="terminal.log",
+            screenshots=[],
+        ),
+        raw_output_ref=None,
+    )
+    required_ids = (
+        ("task", "task.json"),
+        ("agent_result", "agent_result.json"),
+        ("commands", "commands.json"),
+        ("artifact_index", "artifact_index.json"),
+        ("git_status", "git_status.txt"),
+        ("git_diff", "git_diff.patch"),
+        ("git_summary", "git_summary.txt"),
+        ("test_log", "test.log"),
+        ("terminal_log", "terminal.log"),
+        ("raw_output", "raw_output.txt"),
+    )
+    items = tuple(
+        EvidenceItem(evidence_id=eid, kind=eid, status="collected", path=path, source="test")
+        for eid, path in required_ids
+    )
+    artifacts = tuple(
+        ArtifactRecord(
+            artifact_id=f"art-{eid}",
+            path=path,
+            kind=eid,
+            size=10,
+            sha256=_SHA256_DUMMY,
+            source="test",
+        )
+        for eid, path in required_ids
+    )
+    evidence = EvidenceBundle(
+        project_id=pid,
+        run_id="run-01",
+        phase_id=phase_id,
+        attempt=1,
+        task_id=task_id,
+        status="COMPLETE",
+        git=GitEvidence(
+            status="collected",
+            head=candidate_sha,
+            baseline=candidate_sha,
+            branch="main",
+            changes=(),
+        ),
+        tests=TestEvidence(
+            parse_status="collected",
+            log_ref="test.log",
+            structured=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            parsed=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            agrees=True,
+        ),
+        commands=(),
+        items=items,
+        artifacts=artifacts,
+    )
+    checkpoint = CheckpointMetadata(
+        checkpoint_id="phase-phase-01-attempt-01",
+        checkpoint_type=CheckpointType.ATTEMPT,
+        project_id=pid,
+        phase_id=phase_id,
+        attempt=1,
+        git_commit=candidate_sha,
+        git_ref=f"refs/tags/aipc/{pid}/phase-phase-01/attempt-01",
+        source_branch="main",
+        created_at=now,
+        parent_checkpoint="phase-phase-01-pre",
+    )
+    return ReviewContext(
+        project=bundle.project_definition,
+        state=state,
+        task=task,
+        agent_result=agent_result,
+        evidence=evidence,
+        evidence_root=bundle.workspace_root,
+        checkpoint=checkpoint,
+        phase_stage=PhaseReviewStage.AWAITING_REVIEW,
+    )
+
+
+def _make_gate_decision(
+    *,
+    bundle: OnboardedProjectBundle,
+    candidate_sha: str,
+    verdict: ReviewVerdict,
+    gate_outcome: str,
+) -> SubscriptionReviewerGateDecision:
+    pid = bundle.project_definition.project.id
+    review_result = ReviewResult(
+        schema_version="1.0",
+        review_id="rev-01",
+        task_id="task-01",
+        verdict=verdict,
+        confidence=0.95,
+        criteria=[
+            CriterionResult(
+                criterion_id="AC-01",
+                status=(
+                    CriterionStatus.PASS
+                    if verdict == ReviewVerdict.PASS
+                    else CriterionStatus.FAIL
+                ),
+                evidence=["test.log"],
+                notes="Checked",
+            )
+        ],
+        failed_criteria=[] if verdict == ReviewVerdict.PASS else ["AC-01"],
+        required_fixes=[] if verdict == ReviewVerdict.PASS else ["Fix failing check"],
+        risks=[],
+        next_phase_allowed=(verdict == ReviewVerdict.PASS),
+    )
+    bound_review = (
+        BoundReview(
+            review=review_result,
+            context_digest=_SHA256_DUMMY,
+            review_digest=_SHA256_DUMMY,
+            authority="codex-reviewer",
+            provenance=ReviewProvenance(
+                project_id=pid,
+                run_id="run-01",
+                phase_id="phase-01",
+                attempt=1,
+                task_id="task-01",
+                attempt_checkpoint_id="phase-phase-01-attempt-01",
+                git_commit=candidate_sha,
+                agent_result_digest=_SHA256_DUMMY,
+                evidence_digest=_SHA256_DUMMY,
+            ),
+        )
+        if gate_outcome == "PASS"
+        else None
+    )
+    phase_gate = (
+        PhaseGateDecision(
+            verdict=verdict,
+            project_id=pid,
+            phase_id="phase-01",
+            attempt=1,
+            task_id="task-01",
+            review_id="rev-01",
+            actions=(GateAction.MARK_PHASE_PASS,),
+            next_phase_allowed=True,
+            stable_checkpoint_allowed=True,
+            repair_required=False,
+            human_intervention_required=False,
+            reasons=("All criteria passed",),
+            failed_criteria=(),
+            required_fixes=(),
+        )
+        if gate_outcome == "PASS"
+        else None
+    )
+    session_audit = SessionIsolationAuditReceipt(
+        audit_id="audit-01",
+        task_id="task-01",
+        candidate_commit_sha=candidate_sha,
+        worker_agent_id="worker-gemini",
+        worker_provider_family="google_antigravity",
+        reviewer_binding_id="reviewer-codex",
+        reviewer_provider_id="codex",
+        reviewer_provider_family="openai_codex",
+        reviewer_model_id="gpt-5-codex",
+        reviewer_session_id="rev-sess-01",
+        fresh_isolated_session=True,
+        inherited_chat_history=False,
+        read_only_sandbox_enforced=True,
+        workspace_snapshot_before_sha256=_SHA256_DUMMY,
+        workspace_snapshot_after_sha256=_SHA256_DUMMY,
+        workspace_mutated=False,
+        independence_level="cross_provider",
+        reduced_independence=False,
+    )
+    return SubscriptionReviewerGateDecision(
+        gate_outcome=gate_outcome,  # type: ignore[arg-type]
+        task_id="task-01",
+        candidate_commit_sha=candidate_sha,
+        reviewed_commit_sha=candidate_sha if gate_outcome == "PASS" else None,
+        review_result=review_result,
+        bound_review=bound_review,
+        phase_gate_decision=phase_gate,
+        session_audit=session_audit,
+        receipt_path=str(Path(bundle.workspace_root) / "review_receipt.json"),
+        reasons=() if gate_outcome == "PASS" else ("Fix failing check",),
+    )
+
+
+def test_lazy_controller_exports() -> None:
+    for name in (
+        "ContainerResourceLimits",
+        "MilestoneCEndToEndPipeline",
+        "MultiLanguageIsolatedVerifier",
+        "MultiLanguageIsolationMode",
+        "MultiLanguageVerificationReceipt",
+        "PRReadinessBundle",
+    ):
+        assert hasattr(controller_pkg, name)
+        assert name in controller_pkg.__all__
+
+
+def test_python_container_command_and_execution(tmp_path: Path) -> None:
+    bundle = _make_onboarded_python_project(tmp_path, with_git_file=True)
+    verifier = MultiLanguageIsolatedVerifier()
+    captured_argv: list[str] = []
+
+    def fake_runner(argv, **kwargs):
+        captured_argv.extend(argv)
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="5 passed in 0.42s\n",
+            stderr="",
+        )
+
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=fake_runner,
+    )
+
+    assert receipt.passed is True
+    assert receipt.isolation_mode == "container"
+    assert receipt.container_argv is not None
+    assert isinstance(receipt.resource_limits, ContainerResourceLimits)
+    assert "--rm" in captured_argv
+    assert "--network" in captured_argv
+    assert captured_argv[captured_argv.index("--network") + 1] == "none"
+    assert "--read-only" in captured_argv
+    assert "--user" in captured_argv
+    assert captured_argv[captured_argv.index("--user") + 1] == "65534:65534"
+    assert "--cap-drop" in captured_argv
+    assert captured_argv[captured_argv.index("--cap-drop") + 1] == "ALL"
+    assert "--security-opt" in captured_argv
+    assert "no-new-privileges" in captured_argv
+    assert "--pids-limit" in captured_argv
+    assert "--memory" in captured_argv
+    assert any(arg.endswith(":/workspace:ro") for arg in captured_argv)
+    assert any(arg.endswith(":/workspace-out:rw") for arg in captured_argv)
+    assert "/dev/null:/workspace/.git:ro" in captured_argv
+    assert receipt.tests_summary == TestSummary(total=5, passed=5, failed=0, skipped=0)
+
+
+def test_node_test_output_parsing_and_isolated_verification(tmp_path: Path) -> None:
+    bundle = _make_onboarded_node_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+
+    jest_summary = verifier.parse_multilang_test_output(
+        "node_javascript_typescript",
+        "Test Suites: 1 passed, 1 total\nTests: 4 passed, 0 failed, 4 total\n",
+        exit_code=0,
+    )
+    assert jest_summary == TestSummary(total=4, passed=4, failed=0, skipped=0)
+
+    mocha_summary = verifier.parse_multilang_test_output(
+        "node_javascript_typescript",
+        "  3 passing (12ms)\n",
+        exit_code=0,
+    )
+    assert mocha_summary == TestSummary(total=3, passed=3, failed=0, skipped=0)
+
+    node_tap_summary = verifier.parse_multilang_test_output(
+        "node_javascript_typescript",
+        "# tests 2\n# pass 2\n# fail 0\n",
+        exit_code=0,
+    )
+    assert node_tap_summary == TestSummary(total=2, passed=2, failed=0, skipped=0)
+
+    def fake_node_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Tests: 4 passed, 0 failed, 4 total\n",
+            stderr="",
+        )
+
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="isolated_subprocess",
+        runner=fake_node_runner,
+    )
+    assert receipt.passed is True
+    assert receipt.stack_type == "node_javascript_typescript"
+    assert receipt.tests_summary == TestSummary(total=4, passed=4, failed=0, skipped=0)
+
+
+def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
+    static_bundle = _make_onboarded_static_project(tmp_path)
+    gas_bundle = _make_onboarded_gas_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="2 passing\n",
+            stderr="",
+        )
+
+    static_receipt = verifier.verify_project_candidate(
+        bundle=static_bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert static_receipt.passed is True
+    assert static_receipt.offline_mock_only is False
+
+    gas_receipt = verifier.verify_project_candidate(
+        bundle=gas_bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert gas_receipt.passed is True
+    assert gas_receipt.offline_mock_only is True
+    assert gas_receipt.live_deployment_or_external_proof_claimed is False
+    assert gas_receipt.simulation_disclaimer is not None
+    assert "Offline simulation only" in gas_receipt.simulation_disclaimer
+
+    with pytest.raises(ValidationError):
+        MultiLanguageVerificationReceipt(
+            receipt_id="rcpt-bad-gas",
+            project_id="demo-gas",
+            stack_type="google_apps_script_offline_mock",
+            isolation_mode="isolated_subprocess",
+            candidate_sha=_SHA_CANDIDATE,
+            command_executed=("npm", "test"),
+            exit_code=0,
+            passed=True,
+            tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            offline_mock_only=False,
+            simulation_disclaimer="Offline only",
+        )
+
+
+def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(tmp_path: Path) -> None:
+    bundle = _make_onboarded_python_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+
+    blocked_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="blocked",
+    )
+    assert blocked_receipt.passed is False
+    assert blocked_receipt.failure_reason == VERIFICATION_ISOLATION_BLOCKED
+
+    missing_runtime_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="container",
+        container_runtime_bin=None,
+    )
+    assert missing_runtime_receipt.passed is False
+    assert missing_runtime_receipt.failure_reason == "CONTAINER_RUNTIME_OR_IMAGE_UNAVAILABLE"
+
+    def mutating_runner(argv, **kwargs):
+        (Path(bundle.workspace_root) / "mutated.txt").write_text("oops", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="1 passed in 0.1s\n",
+            stderr="",
+        )
+
+    mutated_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="isolated_subprocess",
+        runner=mutating_runner,
+    )
+    assert mutated_receipt.workspace_mutated_during_verification is True
+    assert mutated_receipt.passed is False
+    assert mutated_receipt.failure_reason == "WORKSPACE_MUTATED_DURING_VERIFICATION"
+
+    def empty_output_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    zero_tests_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=_SHA_CANDIDATE,
+        isolation_mode="isolated_subprocess",
+        runner=empty_output_runner,
+    )
+    assert zero_tests_receipt.passed is False
+    assert zero_tests_receipt.tests_summary.failed == 1
+
+    with pytest.raises(ValueError, match="unsafe_host_opt_in"):
+        verifier.verify_project_candidate(
+            bundle=bundle,
+            candidate_sha=_SHA_CANDIDATE,
+            isolation_mode="isolated_subprocess",
+            command_override=("python", "-m", "pytest", "--unsafe_host_opt_in"),
+        )
+
+
+def test_receipt_secret_scanning_rejects_leaked_token() -> None:
+    fake_val = "s" + "k-" + ("b" * 24)
+    with pytest.raises(SecretExposureError):
+        MultiLanguageVerificationReceipt(
+            receipt_id="rcpt-secret",
+            project_id="demo-py",
+            stack_type="python_cli_or_package",
+            isolation_mode="isolated_subprocess",
+            candidate_sha=_SHA_CANDIDATE,
+            command_executed=("python", "-m", "pytest"),
+            exit_code=0,
+            passed=True,
+            tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            failure_reason=fake_val,
+        )
+
+
+def _setup_queue(tmp_path: Path, project_id: str) -> PersistentTaskQueue:
+    queue = PersistentTaskQueue(tmp_path / "queue.json")
+    contract = ApprovedTaskContract(
+        task_id="task-01",
+        phase_id="phase-01",
+        milestone_id="milestone-c",
+        title="Verify project candidate",
+        objective="Run isolated verification and review",
+        in_scope=("src/app.py",),
+        validation_commands=("python -m pytest -q",),
+    )
+    queue.initialize(project_id=project_id, milestone_id="milestone-c", contracts=(contract,))
+    return queue
+
+
+def _make_worker_binding() -> RoleModelBinding:
+    return RoleModelBinding(
+        binding_id="worker-gemini",
+        role="worker",
+        provider_id="gemini-antigravity",
+        provider_family="google_antigravity",
+        model_id="gemini-3-flash",
+        model_tier="fast_worker",
+        execution_mode="worker",
+        auth_mode="antigravity_subscription",
+    )
+
+
+def test_e2e_pipeline_stops_at_human_merge_review(tmp_path: Path) -> None:
+    bundle = _make_onboarded_python_project(tmp_path)
+    queue = _setup_queue(tmp_path, bundle.project_definition.project.id)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, _SHA_CANDIDATE)
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=_SHA_CANDIDATE,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="3 passed in 0.2s\n", stderr=""
+        )
+
+    def pass_review(**kwargs):
+        return _make_gate_decision(
+            bundle=bundle,
+            candidate_sha=_SHA_CANDIDATE,
+            verdict=ReviewVerdict.PASS,
+            gate_outcome="PASS",
+        )
+
+    pipeline = MilestoneCEndToEndPipeline()
+    pr_bundle = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=queue,
+        worker_step=worker_step,
+        worker_binding=worker_binding,
+        review_callback=pass_review,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+
+    assert isinstance(pr_bundle, PRReadinessBundle)
+    assert pr_bundle.pr_ready is True
+    assert pr_bundle.human_merge_approval_required is True
+    assert pr_bundle.auto_merge_performed is False
+    assert pr_bundle.next_authorized_action == "HUMAN_MERGE_REVIEW"
+    assert pr_bundle.gate_verdict == "PASS"
+    assert pr_bundle.review_verdict == ReviewVerdict.PASS
+    assert queue.load().tasks[0].status == QueuedTaskStatus.COMPLETED
+
+
+def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_path: Path) -> None:
+    bundle = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, _SHA_CANDIDATE)
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=_SHA_CANDIDATE,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    # Case 1: verification fails -> BLOCKED
+    queue_fail = _setup_queue(tmp_path / "fail_case", bundle.project_definition.project.id)
+
+    def failing_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=1, stdout="1 failed, 1 passed in 0.2s\n", stderr=""
+        )
+
+    pipeline = MilestoneCEndToEndPipeline()
+    blocked_bundle = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=queue_fail,
+        worker_step=worker_step,
+        worker_binding=worker_binding,
+        review_callback=lambda **kw: _make_gate_decision(
+            bundle=bundle,
+            candidate_sha=_SHA_CANDIDATE,
+            verdict=ReviewVerdict.PASS,
+            gate_outcome="PASS",
+        ),
+        isolation_mode="isolated_subprocess",
+        runner=failing_runner,
+    )
+    assert blocked_bundle.pr_ready is False
+    assert blocked_bundle.gate_verdict == "BLOCKED"
+    assert blocked_bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert blocked_bundle.auto_merge_performed is False
+    assert queue_fail.load().tasks[0].status == QueuedTaskStatus.BLOCKED
+
+    # Case 2: verification passes, review returns REVISE -> DISPATCH_BOUNDED_REPAIR
+    queue_revise = _setup_queue(tmp_path / "revise_case", bundle.project_definition.project.id)
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="2 passed in 0.1s\n", stderr=""
+        )
+
+    revise_bundle = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=queue_revise,
+        worker_step=worker_step,
+        worker_binding=worker_binding,
+        review_callback=lambda **kw: _make_gate_decision(
+            bundle=bundle,
+            candidate_sha=_SHA_CANDIDATE,
+            verdict=ReviewVerdict.REVISE,
+            gate_outcome="REVISE",
+        ),
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert revise_bundle.pr_ready is False
+    assert revise_bundle.gate_verdict == "REVISE"
+    assert revise_bundle.next_authorized_action == "DISPATCH_BOUNDED_REPAIR"
+    assert queue_revise.load().tasks[0].status == QueuedTaskStatus.REPAIR_REQUIRED

@@ -46,6 +46,14 @@ if TYPE_CHECKING:
         WorkerAttemptExecutionOutcome,
         WorkerStepCallable,
     )
+    from aipc.controller.milestone_c_pipeline import (
+        ContainerResourceLimits,
+        MilestoneCEndToEndPipeline,
+        MultiLanguageIsolatedVerifier,
+        MultiLanguageIsolationMode,
+        MultiLanguageVerificationReceipt,
+        PRReadinessBundle,
+    )
     from aipc.controller.planner_engine import (
         ClosedLoopCycleResult,
         HumanGoalSpec,
@@ -68,6 +76,15 @@ _LAZY_B03_EXPORTS = {
     "WorkerStepCallable",
 }
 
+_LAZY_C02_EXPORTS = {
+    "ContainerResourceLimits",
+    "MilestoneCEndToEndPipeline",
+    "MultiLanguageIsolatedVerifier",
+    "MultiLanguageIsolationMode",
+    "MultiLanguageVerificationReceipt",
+    "PRReadinessBundle",
+}
+
 
 def __getattr__(name: str):
     if name in {
@@ -83,6 +100,10 @@ def __getattr__(name: str):
         from aipc.controller import milestone_b_orchestrator
 
         return getattr(milestone_b_orchestrator, name)
+    if name in _LAZY_C02_EXPORTS:
+        from aipc.controller import milestone_c_pipeline
+
+        return getattr(milestone_c_pipeline, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -93,6 +114,7 @@ __all__ = [
     "CandidateImportOriginReport",
     "CandidateVerificationReceipt",
     "ClosedLoopCycleResult",
+    "ContainerResourceLimits",
     "Controller",
     "ControllerError",
     "ControllerJournal",
@@ -108,6 +130,11 @@ __all__ = [
     "MilestoneBFinalStatus",
     "MilestoneBOrchestrationResult",
     "MilestoneBRepairAndRecoveryOrchestrator",
+    "MilestoneCEndToEndPipeline",
+    "MultiLanguageIsolatedVerifier",
+    "MultiLanguageIsolationMode",
+    "MultiLanguageVerificationReceipt",
+    "PRReadinessBundle",
     "PersistentTaskQueue",
     "PlannerOrchestrationEngine",
     "PlannerStageProposal",
