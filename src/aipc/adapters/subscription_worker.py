@@ -373,7 +373,7 @@ async def invoke_antigravity_cli_worker(
     settings_path.write_text(json.dumps(rules), encoding="utf-8")
     effort_args = ["--effort", config.reasoning_effort] if config.reasoning_effort else []
     argv = [
-        str(exe), "--agent", config.agent_name, "--model", resolved_model, *effort_args,
+        str(exe), "--model", resolved_model, *effort_args,
         "--mode", "accept-edits", "--sandbox", "--disable-slash-commands",
         "--output-format", "json", "--print-timeout", f"{max(30, int(task.timeout_seconds))}s",
         "--settings", str(settings_path), "-p", task.prompt,
