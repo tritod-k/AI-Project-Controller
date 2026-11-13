@@ -385,6 +385,8 @@ async def invoke_antigravity_cli_worker(
     lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip().startswith("{")]
     if res.returncode != 0 or not lines:
         raise RuntimeError(res.stderr or res.stdout or f"agy worker exited {res.returncode}")
+    raw_file = ev_dir / "raw_output.json"
+    raw_file.write_text(lines[-1], encoding="utf-8")
     payload = json.loads(lines[-1])
     if payload.get("status") != "SUCCESS":
         raise RuntimeError(str(payload.get("error") or payload.get("response") or "agy failed"))
@@ -393,6 +395,7 @@ async def invoke_antigravity_cli_worker(
         session_id=str(payload.get("conversation_id") or f"agy-{task.task_id}"),
         model_used=str(payload.get("model") or resolved_model),
         summary=str(payload.get("response") or "Completed worker invocation.")[:400],
+        raw_output_ref=str(raw_file),
         input_tokens=usage.get("input_tokens"),
         output_tokens=usage.get("output_tokens"),
         total_tokens=usage.get("total_tokens"),
