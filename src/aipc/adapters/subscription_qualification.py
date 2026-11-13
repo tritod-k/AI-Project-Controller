@@ -47,9 +47,15 @@ ProviderFamily = Literal["openai_codex", "google_antigravity"]
 OrchestrationRole = Literal["planner", "worker", "reviewer"]
 CapabilityState = Literal["AVAILABLE", "BLOCKED", "UNVERIFIED", "SANDBOXED"]
 
+PRIMARY_ANTIGRAVITY_WORKER_MODEL: str = "gemini-4-hydrogen-medium"
+FALLBACK_ANTIGRAVITY_WORKER_MODEL: str = "gemini-3.8-flash-medium"
 QUALIFIED_ANTIGRAVITY_HEADLESS_MODELS: tuple[str, ...] = (
-    "gemini-3.8-flash-medium",
+    FALLBACK_ANTIGRAVITY_WORKER_MODEL,
     "flash",
+    PRIMARY_ANTIGRAVITY_WORKER_MODEL,
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-xhigh",
 )
 UNVERIFIED_ANTIGRAVITY_MODELS: tuple[str, ...] = (
     "argon",
@@ -744,8 +750,10 @@ def qualify_all_subscription_runtimes(
 __all__ = [
     "CapabilityState",
     "ChildEnvironmentIsolationError",
+    "FALLBACK_ANTIGRAVITY_WORKER_MODEL",
     "OperatingProfile",
     "OrchestrationRole",
+    "PRIMARY_ANTIGRAVITY_WORKER_MODEL",
     "ProviderFamily",
     "ProviderRuntimeQualificationReport",
     "QUALIFIED_ANTIGRAVITY_HEADLESS_MODELS",

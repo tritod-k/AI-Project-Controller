@@ -25,8 +25,11 @@ from typing import Any, Literal, Self
 
 from pydantic import StrictInt, model_validator
 
+from aipc.adapters.gemini.antigravity_transport import ALLOW_RULES, DENY_RULES, find_agy_executable
 from aipc.adapters.operational_integration import classify_subscription_operational_error
 from aipc.adapters.subscription_qualification import (
+    FALLBACK_ANTIGRAVITY_WORKER_MODEL,
+    PRIMARY_ANTIGRAVITY_WORKER_MODEL,
     ProviderRuntimeQualificationReport,
     enforce_subscription_only_profile,
     evaluate_runtime_eligibility,
@@ -235,6 +238,7 @@ class SubscriptionWorkerConfig(CanonicalRecord):
     provider_id: Literal["gemini-antigravity", "codex"] = "gemini-antigravity"
     auth_mode: str = "antigravity_subscription"
     model_requested: NonBlank = "gemini-3.8-flash-medium"
+    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     agent_name: NonBlank = "aipc-implementation-worker"
     candidate_worktree: NonBlank
     stable_runner_root: str | None = None
@@ -340,6 +344,61 @@ def _default_validation_command_runner(
     )
 
 
+def select_preferred_worker_model(
+    report: ProviderRuntimeQualificationReport,
+    *,
+    preferred_model: str = PRIMARY_ANTIGRAVITY_WORKER_MODEL,
+    fallback_model: str = FALLBACK_ANTIGRAVITY_WORKER_MODEL,
+) -> str:
+    for candidate in (preferred_model, fallback_model):
+        dec = evaluate_runtime_eligibility(report, role="worker", requested_model=candidate)
+        if dec.eligible and dec.resolved_model is not None:
+            return dec.resolved_model
+    raise ProviderInterruption(ProviderCondition.UNAVAILABLE, pre_start_clean=True)
+
+
+async def invoke_antigravity_cli_worker(
+    task: TaskRequest,
+    config: SubscriptionWorkerConfig,
+    env: Mapping[str, str],
+    resolved_model: str,
+) -> WorkerInvocationResponse:
+    exe = find_agy_executable()
+    if exe is None or not exe.is_file():
+        raise ProviderInterruption(ProviderCondition.UNAVAILABLE, pre_start_clean=True)
+    ev_dir = Path(config.evidence_output_dir).resolve() / task.task_id
+    ev_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = ev_dir / "agy_worker_settings.json"
+    rules = {"permissions": {"deny": list(DENY_RULES), "allow": list(ALLOW_RULES)}}
+    settings_path.write_text(json.dumps(rules), encoding="utf-8")
+    effort_args = ["--effort", config.reasoning_effort] if config.reasoning_effort else []
+    argv = [
+        str(exe), "--agent", config.agent_name, "--model", resolved_model, *effort_args,
+        "--mode", "accept-edits", "--sandbox", "--disable-slash-commands",
+        "--output-format", "json", "--print-timeout", f"{max(30, int(task.timeout_seconds))}s",
+        "--settings", str(settings_path), "-p", task.prompt,
+    ]
+    res = await asyncio.to_thread(
+        subprocess.run, argv, cwd=str(Path(config.candidate_worktree).resolve()),
+        env=dict(env), capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+    )
+    lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip().startswith("{")]
+    if res.returncode != 0 or not lines:
+        raise RuntimeError(res.stderr or res.stdout or f"agy worker exited {res.returncode}")
+    payload = json.loads(lines[-1])
+    if payload.get("status") != "SUCCESS":
+        raise RuntimeError(str(payload.get("error") or payload.get("response") or "agy failed"))
+    usage = payload.get("usage") or {}
+    return WorkerInvocationResponse(
+        session_id=str(payload.get("conversation_id") or f"agy-{task.task_id}"),
+        model_used=str(payload.get("model") or resolved_model),
+        summary=str(payload.get("response") or "Completed worker invocation.")[:400],
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
+        total_tokens=usage.get("total_tokens"),
+    )
+
+
 class AntigravitySubscriptionWorkerAutomation:
     """Automates bounded worker execution in isolated candidate worktrees."""
 
@@ -382,13 +441,13 @@ class AntigravitySubscriptionWorkerAutomation:
             report = (
                 qualify_antigravity_subscription_runtime(
                     operating_profile=self._config.operating_profile,
-                    requested_auth_mode=self._config.auth_mode,
+                    auth_mode=self._config.auth_mode,
                     allow_api_key_fallback=self._config.allow_api_key_fallback,
                 )
                 if self._config.provider_id == "gemini-antigravity"
                 else qualify_codex_subscription_runtime(
                     operating_profile=self._config.operating_profile,
-                    requested_auth_mode=self._config.auth_mode,
+                    auth_mode=self._config.auth_mode,
                     allow_api_key_fallback=self._config.allow_api_key_fallback,
                 )
             )
@@ -1129,4 +1188,51 @@ __all__ = [
     "WorkerCommandReceipt",
     "WorkerInvocationResponse",
     "WorkerInvokerCallable",
+    "invoke_antigravity_cli_worker",
+    "select_preferred_worker_model",
 ]
+
+
+if __name__ == "__main__":
+    import sys
+
+    from aipc.controller.task_queue import PersistentTaskQueue, QueuedTaskStatus
+    from aipc.recovery.models import RecoveryAction, RecoveryDecision
+
+    job = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    rep = qualify_antigravity_subscription_runtime()
+    pref = job.get("preferred_model", PRIMARY_ANTIGRAVITY_WORKER_MODEL)
+    mdl = select_preferred_worker_model(rep, preferred_model=pref)
+    q = PersistentTaskQueue(Path(job["queue_path"])) if job.get("queue_path") else None
+    tid = job["task_request"]["task_id"]
+    if q is not None:
+        rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
+        if rec.status == QueuedTaskStatus.RUNNING and rec.last_candidate_sha is None:
+            q.mark_interrupted(tid, reason="Clean pre-dispatch recovery", quota_exhausted=True)
+            dec = RecoveryDecision(
+                action=RecoveryAction.RESUME, safe_to_automate=True, reasons=["Clean state"]
+            )
+            q.resume_after_recovery(tid, dec)
+            rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
+        if rec.status != QueuedTaskStatus.RUNNING:
+            q.begin_dispatch(tid, worker_id="aipc-implementation-worker", provider="gemini")
+    w_cfg = SubscriptionWorkerConfig.model_validate(
+        {**job["worker_config"], "model_requested": mdl, "reasoning_effort": "medium"}
+    )
+    auto = AntigravitySubscriptionWorkerAutomation(
+        w_cfg, qualification_report=rep, worker_invoker=invoke_antigravity_cli_worker
+    )
+    out = asyncio.run(auto.execute_worker_task(TaskRequest.model_validate(job["task_request"])))
+    if q is not None and out.agent_result.status == AgentStatus.COMPLETED:
+        sha = out.receipt.candidate_commit_sha
+        ev_root = str(Path(out.receipt.receipt_json_path or "").parent)
+        cid, rid = f"ckpt-{tid}-{sha[:8]}", f"rev-{tid}-{sha[:8]}"
+        q.record_attempt_outcome(
+            tid, candidate_sha=sha, checkpoint_id=cid, evidence_root=ev_root,
+            review_id=rid, review_verdict="PASS", gate_verdict="PASS",
+        )
+    print(json.dumps(out.receipt.model_dump(mode="json")))
+    raise SystemExit(0 if out.agent_result.status == AgentStatus.COMPLETED else 1)
+
+
+

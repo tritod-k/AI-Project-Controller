@@ -9,7 +9,9 @@ from pathlib import Path
 
 from aipc.hardening.env_isolation import build_sanitized_child_env
 
-QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2", "1.5.3", "1.5.5", "1.5.6"})
+QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset(
+    {"1.5.2", "1.5.3", "1.5.5", "1.5.6", "1.5.7", "1.5.8", "1.5.9"}
+)
 REQUIRED_AGY_FLAGS: tuple[str, ...] = (
     "--sandbox",
     "--mode",
