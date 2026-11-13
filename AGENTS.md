@@ -959,7 +959,7 @@ The authoritative operating rules for the Outer Main Supervisor across session r
 
 Mandatory invariants enforced by `.agents/policies/OUTER_SUPERVISOR_RULES.md`:
 
-1. **No Inline Python Execution:** Never invoke `python -c`, `python.exe -c`, or `py -c`. Execute trusted modules through `python -m tools.sanitized_exec` with `stdin=subprocess.DEVNULL`.
+1. **Targeted Inline Python Execution Policy (2-Tier Scope):** The Outer Argon Supervisor must avoid direct inline Python execution (`python -c`, `python.exe -c`, `py -c`) and execute trusted modules through `python -m tools.sanitized_exec` with `stdin=subprocess.DEVNULL`. Do not globally prohibit `python -c` inside AIPC runtime components, unit/integration tests, or worker verification probes (e.g., import-origin checks), and do not add a blanket `python -c` block inside `tools/sanitized_exec.py`.
 2. **AIPC-First Delegation & <120-Line Direct-Authoring Cap:** Keep cumulative Outer Supervisor Python authoring strictly under 120 lines per task (including bootstrap/runtime scripts). Delegate substantive implementation and test suites to qualified AIPC-managed subscription workers.
 3. **Real Runtime Qualification Only:** Never fabricate `ProviderRuntimeQualificationReport` objects; always call trusted qualification probes in `subscription_only` mode and fail closed when unavailable.
 4. **Durable Queue Recovery & Boundary Isolation:** Reconcile `PersistentTaskQueue` state idempotently without overwriting existing queues, maintain strict Stable/Candidate/Runtime isolation, and never touch parent or sibling directories under `H:\000ProjectCode`.

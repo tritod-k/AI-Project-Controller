@@ -2,14 +2,11 @@
 
 Attributed to Human Commander **K.TRITOD**. These permanent rules apply across all authorized AIPC milestones and after Gemini CLI session restarts or `/clear`.
 
-## 1. Prohibited Inline Python Execution
-The Outer Main Supervisor MUST NOT execute inline Python code using:
-- `python -c`
-- `python.exe -c`
-- `py -c`
-- Any equivalent inline interpreter execution flag.
+## 1. Targeted Inline Python Execution Policy (2-Tier Scope)
+- **Outer Supervisor (Argon) Tier:** The Outer Argon Supervisor must avoid direct inline Python execution (`python -c`, `python.exe -c`, `py -c`, and equivalent inline interpreter flags) and instead invoke existing trusted modules with `python -m` or reviewed script files through `python -m tools.sanitized_exec` with `stdin=subprocess.DEVNULL`.
+- **AIPC Runtime / Worker / Tests Tier:** Do **not** globally prohibit `python -c` inside AIPC runtime components, unit/integration tests, dependencies, or qualified worker verification environments where needed (such as candidate import-origin probes in `src/aipc/controller/self_dev_runner.py`). Do not add a blanket `python -c` block inside `tools/sanitized_exec.py` that would break legitimate inner test or verification workflows.
 
-**Required Execution Path:**
+**Required Outer Supervisor Execution Path:**
 - Always invoke existing trusted modules via `python -m tools.sanitized_exec <python_exe> -m <module>` or bounded, reviewed, reusable Python module/CLI entrypoints.
 - Launch all child processes through `python -m tools.sanitized_exec`.
 - Preserve non-interactive stdin handling (`stdin=subprocess.DEVNULL`).
