@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -19,6 +20,7 @@ from aipc.project.models import (
     ProjectDefinition,
     ProjectIdentity,
 )
+from aipc.project.project_loader import load_project
 
 ProjectStackType = Literal[
     "python_cli_or_package",
@@ -37,6 +39,8 @@ _GAS_DISCLAIMER = (
 )
 _WEB_FRAMEWORK_MARKERS = ("fastapi", "flask", "django", "uvicorn", "starlette")
 _ALLOWED_ENV_TEMPLATE_NAMES = frozenset({".env.example", ".env.sample", ".env.template"})
+PROFILE_COMPANION_FILENAME = "PROJECT.profile.json"
+_PROFILE_BUNDLE_COMMENT_PREFIX = "# aipc_profile_bundle_json:"
 
 
 def _validate_relative_repo_path(path_value: str) -> None:
@@ -467,12 +471,70 @@ def onboard_universal_project(
 
 def render_project_yaml_template(bundle: OnboardedProjectBundle) -> str:
     """Serialize an OnboardedProjectBundle into PROJECT.yaml loadable by load_project."""
+    bundle_json = json.dumps(
+        bundle.model_dump(mode="json"),
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
     header_lines = [
         f"# profile_id: {bundle.profile.profile_id}",
         f"# stack_type: {bundle.profile.stack_type}",
         f"# operating_profile: {bundle.profile.operating_profile}",
         f"# onboarding_status: {bundle.onboarding_status}",
+        f"{_PROFILE_BUNDLE_COMMENT_PREFIX} {bundle_json}",
     ]
     payload = bundle.project_definition.model_dump(mode="json")
     yaml_body = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
     return "\n".join(header_lines) + "\n" + yaml_body
+
+
+def write_onboarded_project_artifacts(
+    bundle: OnboardedProjectBundle, output_dir: Path
+) -> tuple[Path, Path]:
+    """Write PROJECT.yaml and PROJECT.profile.json after secret-hygiene validation."""
+    assert_no_secrets(bundle.model_dump(mode="json"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    project_yaml_path = output_dir / "PROJECT.yaml"
+    companion_path = output_dir / PROFILE_COMPANION_FILENAME
+    project_yaml_path.write_text(render_project_yaml_template(bundle), encoding="utf-8")
+    companion_path.write_text(bundle.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return project_yaml_path, companion_path
+
+
+def _extract_embedded_bundle_json(project_yaml_path: Path) -> str | None:
+    for line in project_yaml_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(_PROFILE_BUNDLE_COMMENT_PREFIX):
+            return line[len(_PROFILE_BUNDLE_COMMENT_PREFIX) :].strip()
+    return None
+
+
+def load_onboarded_project_bundle(
+    project_yaml_path: Path, *, companion_profile_path: Path | None = None
+) -> OnboardedProjectBundle:
+    """Load PROJECT.yaml and losslessly restore the validated OnboardedProjectBundle."""
+    project_def = load_project(project_yaml_path)
+
+    raw_json: str | None = None
+    if companion_profile_path is not None:
+        if not companion_profile_path.is_file():
+            raise ValueError(f"Companion profile file not found: {companion_profile_path}")
+        raw_json = companion_profile_path.read_text(encoding="utf-8")
+    else:
+        default_companion = project_yaml_path.parent / PROFILE_COMPANION_FILENAME
+        if default_companion.is_file():
+            raw_json = default_companion.read_text(encoding="utf-8")
+        else:
+            raw_json = _extract_embedded_bundle_json(project_yaml_path)
+
+    if not raw_json:
+        raise ValueError(
+            f"No companion profile or embedded profile bundle found for {project_yaml_path}"
+        )
+
+    raw_payload = json.loads(raw_json)
+    bundle = OnboardedProjectBundle.model_validate(raw_payload)
+    if bundle.project_definition != project_def:
+        raise ValueError(
+            "Restored OnboardedProjectBundle project_definition does not match PROJECT.yaml"
+        )
+    return bundle

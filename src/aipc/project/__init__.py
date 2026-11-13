@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from aipc.project.universal_profiles import (
         BUILTIN_UNIVERSAL_PROFILES,
+        PROFILE_COMPANION_FILENAME,
         ExternalSystemSafetyPolicy,
         OnboardedProjectBundle,
         ProjectStackType,
@@ -13,12 +14,15 @@ if TYPE_CHECKING:
         ValidationPackSpec,
         detect_repository_stack,
         get_builtin_project_profile,
+        load_onboarded_project_bundle,
         onboard_universal_project,
         render_project_yaml_template,
+        write_onboarded_project_artifacts,
     )
 
 __all__ = [
     "BUILTIN_UNIVERSAL_PROFILES",
+    "PROFILE_COMPANION_FILENAME",
     "ExternalSystemSafetyPolicy",
     "OnboardedProjectBundle",
     "ProjectStackType",
@@ -27,8 +31,10 @@ __all__ = [
     "ValidationPackSpec",
     "detect_repository_stack",
     "get_builtin_project_profile",
+    "load_onboarded_project_bundle",
     "onboard_universal_project",
     "render_project_yaml_template",
+    "write_onboarded_project_artifacts",
 ]
 
 

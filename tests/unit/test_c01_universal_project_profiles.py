@@ -14,6 +14,7 @@ from aipc.project.models import AcceptanceCriterion, PhaseDefinition
 from aipc.project.project_loader import load_project
 from aipc.project.universal_profiles import (
     BUILTIN_UNIVERSAL_PROFILES,
+    PROFILE_COMPANION_FILENAME,
     ExternalSystemSafetyPolicy,
     OnboardedProjectBundle,
     RepoInstructionRefs,
@@ -21,8 +22,10 @@ from aipc.project.universal_profiles import (
     ValidationPackSpec,
     detect_repository_stack,
     get_builtin_project_profile,
+    load_onboarded_project_bundle,
     onboard_universal_project,
     render_project_yaml_template,
+    write_onboarded_project_artifacts,
 )
 
 
@@ -45,6 +48,7 @@ def _sample_phases() -> tuple[PhaseDefinition, ...]:
 def test_public_exports_and_provider_neutrality() -> None:
     expected_exports = {
         "BUILTIN_UNIVERSAL_PROFILES",
+        "PROFILE_COMPANION_FILENAME",
         "ExternalSystemSafetyPolicy",
         "OnboardedProjectBundle",
         "ProjectStackType",
@@ -53,8 +57,10 @@ def test_public_exports_and_provider_neutrality() -> None:
         "ValidationPackSpec",
         "detect_repository_stack",
         "get_builtin_project_profile",
+        "load_onboarded_project_bundle",
         "onboard_universal_project",
         "render_project_yaml_template",
+        "write_onboarded_project_artifacts",
     }
     assert expected_exports.issubset(set(project_pkg.__all__))
     for symbol in expected_exports:
@@ -384,3 +390,217 @@ def test_negative_unrecognized_or_missing_workspace(tmp_path: Path) -> None:
     empty_dir.mkdir()
     with pytest.raises(ValueError, match="No recognized stack markers"):
         detect_repository_stack(empty_dir)
+
+
+def test_roundtrip_custom_and_gas_bundles_with_companion_artifacts(tmp_path: Path) -> None:
+    custom_repo = tmp_path / "custom_roundtrip"
+    (custom_repo / "docs").mkdir(parents=True)
+    (custom_repo / "Makefile").write_text("test:\n\techo ok\n", encoding="utf-8")
+    (custom_repo / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+    (custom_repo / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+    (custom_repo / "docs" / "RULES.md").write_text("# Rules\n", encoding="utf-8")
+
+    custom_profile = UniversalProjectProfile(
+        profile_id="custom-roundtrip-profile",
+        stack_type="custom_toolchain",
+        display_name="Custom Roundtrip Project",
+        description="Custom toolchain with explicit instructions and globs.",
+        validation_pack=ValidationPackSpec(
+            pack_id="custom-roundtrip-pack",
+            stack_type="custom_toolchain",
+            required_toolchains=("make", "shellcheck"),
+            test_commands=("make test", "make verify"),
+            lint_commands=("make lint",),
+            build_commands=("make build",),
+            default_verification_isolation="container",
+            recommended_container_image="ubuntu:24.04",
+        ),
+        safety_policy=ExternalSystemSafetyPolicy(
+            external_system_denylist=(
+                "live_trading",
+                "okx_live_api",
+                "custom_external_webhook",
+            ),
+            simulation_disclaimer="Custom offline verification only.",
+        ),
+        instruction_refs=RepoInstructionRefs(
+            agents_md_path="AGENTS.md",
+            skill_md_path="SKILL.md",
+            custom_instruction_paths=("docs/RULES.md",),
+        ),
+        default_in_scope_globs=("src/**", "Makefile", "docs/**"),
+        default_forbidden_globs=(".git/**", ".env*", "*.pem", "secrets/**"),
+        human_approval_required_for=("merge", "deploy", "new_milestone", "release"),
+    )
+    custom_bundle = onboard_universal_project(
+        workspace=custom_repo,
+        project_id="custom-roundtrip",
+        project_name="Custom Roundtrip",
+        phases=_sample_phases(),
+        profile=custom_profile,
+    )
+
+    custom_out = tmp_path / "custom_out"
+    yaml_path, companion_path = write_onboarded_project_artifacts(custom_bundle, custom_out)
+    assert yaml_path == custom_out / "PROJECT.yaml"
+    assert companion_path == custom_out / PROFILE_COMPANION_FILENAME
+    assert yaml_path.is_file()
+    assert companion_path.is_file()
+
+    restored_custom = load_onboarded_project_bundle(yaml_path)
+    assert restored_custom == custom_bundle
+    assert restored_custom.profile.validation_pack.test_commands == ("make test", "make verify")
+    assert restored_custom.profile.validation_pack.lint_commands == ("make lint",)
+    assert restored_custom.profile.validation_pack.build_commands == ("make build",)
+    assert restored_custom.profile.validation_pack.default_verification_isolation == "container"
+    assert (
+        restored_custom.profile.safety_policy.simulation_disclaimer
+        == "Custom offline verification only."
+    )
+    assert "custom_external_webhook" in (
+        restored_custom.profile.safety_policy.external_system_denylist
+    )
+    assert restored_custom.profile.instruction_refs.custom_instruction_paths == ("docs/RULES.md",)
+    assert restored_custom.profile.default_in_scope_globs == ("src/**", "Makefile", "docs/**")
+    assert restored_custom.profile.default_forbidden_globs == (
+        ".git/**",
+        ".env*",
+        "*.pem",
+        "secrets/**",
+    )
+    assert restored_custom.profile.human_approval_required_for == (
+        "merge",
+        "deploy",
+        "new_milestone",
+        "release",
+    )
+
+    gas_repo = tmp_path / "gas_roundtrip"
+    gas_repo.mkdir()
+    (gas_repo / "appsscript.json").write_text('{"timeZone": "UTC"}', encoding="utf-8")
+    (gas_repo / "AGENTS.md").write_text("# GAS Agents\n", encoding="utf-8")
+    gas_bundle = onboard_universal_project(
+        workspace=gas_repo,
+        project_id="gas-roundtrip",
+        project_name="GAS Roundtrip",
+        phases=_sample_phases(),
+    )
+    gas_out = tmp_path / "gas_out"
+    gas_yaml, gas_companion = write_onboarded_project_artifacts(gas_bundle, gas_out)
+    restored_gas = load_onboarded_project_bundle(gas_yaml, companion_profile_path=gas_companion)
+    assert restored_gas == gas_bundle
+    assert restored_gas.profile.validation_pack.offline_mock_only is True
+    assert restored_gas.profile.safety_policy.simulation_disclaimer is not None
+    assert "TradingView" in restored_gas.profile.safety_policy.simulation_disclaimer
+    assert "okx_live_api" in restored_gas.profile.safety_policy.external_system_denylist
+
+
+def test_roundtrip_embedded_yaml_without_companion_file(tmp_path: Path) -> None:
+    custom_repo = tmp_path / "custom_embedded"
+    custom_repo.mkdir()
+    (custom_repo / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+    custom_profile = UniversalProjectProfile(
+        profile_id="embedded-custom",
+        stack_type="custom_toolchain",
+        display_name="Embedded Custom",
+        description="Embedded YAML comment restoration test.",
+        validation_pack=ValidationPackSpec(
+            pack_id="embedded-pack",
+            stack_type="custom_toolchain",
+            required_toolchains=("just",),
+            test_commands=("just test",),
+            lint_commands=("just lint",),
+            default_verification_isolation="isolated_subprocess",
+        ),
+        safety_policy=ExternalSystemSafetyPolicy(
+            simulation_disclaimer="Embedded offline disclaimer.",
+        ),
+        instruction_refs=RepoInstructionRefs(
+            agents_md_path="AGENTS.md",
+            custom_instruction_paths=("docs/GUIDE.md",),
+        ),
+        default_in_scope_globs=("src/**", "justfile"),
+    )
+    custom_bundle = onboard_universal_project(
+        workspace=custom_repo,
+        project_id="embedded-custom-id",
+        project_name="Embedded Custom Project",
+        phases=_sample_phases(),
+        profile=custom_profile,
+    )
+
+    yaml_only_path = tmp_path / "custom_yaml_only" / "PROJECT.yaml"
+    yaml_only_path.parent.mkdir()
+    yaml_only_path.write_text(render_project_yaml_template(custom_bundle), encoding="utf-8")
+    assert not (yaml_only_path.parent / PROFILE_COMPANION_FILENAME).exists()
+
+    restored = load_onboarded_project_bundle(yaml_only_path)
+    assert restored == custom_bundle
+    assert restored.profile.validation_pack.test_commands == ("just test",)
+    assert restored.profile.safety_policy.simulation_disclaimer == "Embedded offline disclaimer."
+    assert restored.profile.instruction_refs.custom_instruction_paths == ("docs/GUIDE.md",)
+
+    gas_repo = tmp_path / "gas_embedded"
+    gas_repo.mkdir()
+    (gas_repo / "appsscript.json").write_text('{"timeZone": "UTC"}', encoding="utf-8")
+    gas_bundle = onboard_universal_project(
+        workspace=gas_repo,
+        project_id="gas-embedded-id",
+        project_name="GAS Embedded",
+        phases=_sample_phases(),
+    )
+    gas_yaml_only = tmp_path / "gas_yaml_only" / "PROJECT.yaml"
+    gas_yaml_only.parent.mkdir()
+    gas_yaml_only.write_text(render_project_yaml_template(gas_bundle), encoding="utf-8")
+    restored_gas = load_onboarded_project_bundle(gas_yaml_only)
+    assert restored_gas == gas_bundle
+    assert restored_gas.profile.safety_policy.simulation_disclaimer is not None
+    assert "Google Sheets" in restored_gas.profile.safety_policy.simulation_disclaimer
+
+
+def test_load_onboarded_bundle_rejects_tampered_artifacts(tmp_path: Path) -> None:
+    repo = tmp_path / "tamper_repo"
+    repo.mkdir()
+    (repo / "appsscript.json").write_text('{"timeZone": "UTC"}', encoding="utf-8")
+    bundle = onboard_universal_project(
+        workspace=repo,
+        project_id="tamper-proj",
+        project_name="Original Project Name",
+        phases=_sample_phases(),
+    )
+
+    out_dir = tmp_path / "tamper_out"
+    yaml_path, companion_path = write_onboarded_project_artifacts(bundle, out_dir)
+
+    tampered_yaml = yaml_path.read_text(encoding="utf-8").replace(
+        "Original Project Name", "Tampered Project Name"
+    )
+    yaml_path.write_text(tampered_yaml, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match PROJECT.yaml"):
+        load_onboarded_project_bundle(yaml_path)
+
+    yaml_path.write_text(render_project_yaml_template(bundle), encoding="utf-8")
+    tampered_companion = companion_path.read_text(encoding="utf-8").replace(
+        "Original Project Name", "Companion Tampered Name"
+    )
+    companion_path.write_text(tampered_companion, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match PROJECT.yaml"):
+        load_onboarded_project_bundle(yaml_path)
+
+    with pytest.raises(ValueError, match="Companion profile file not found"):
+        load_onboarded_project_bundle(yaml_path, companion_profile_path=tmp_path / "missing.json")
+
+    no_embed_yaml = tmp_path / "no_embed.yaml"
+    no_embed_yaml.write_text(
+        "\n".join(
+            line
+            for line in render_project_yaml_template(bundle).splitlines()
+            if not line.startswith("# aipc_profile_bundle_json:")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="No companion profile or embedded profile bundle"):
+        load_onboarded_project_bundle(no_embed_yaml)
