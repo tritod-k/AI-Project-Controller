@@ -98,11 +98,15 @@ def test_builtin_profiles_cover_required_stacks() -> None:
 
     gas_profile = get_builtin_project_profile("google_apps_script_offline_mock")
     assert gas_profile.validation_pack.offline_mock_only is True
+    assert gas_profile.validation_pack.default_verification_isolation == "container"
     assert gas_profile.safety_policy.external_network_allowed is False
     assert gas_profile.safety_policy.simulation_disclaimer is not None
     assert "TradingView" in gas_profile.safety_policy.simulation_disclaimer
     assert "Google Sheets" in gas_profile.safety_policy.simulation_disclaimer
     assert "OKX" in gas_profile.safety_policy.simulation_disclaimer
+
+    static_profile = get_builtin_project_profile("static_web_frontend")
+    assert static_profile.validation_pack.default_verification_isolation == "container"
 
     with pytest.raises(ValueError, match="No built-in universal profile"):
         get_builtin_project_profile("custom_toolchain")

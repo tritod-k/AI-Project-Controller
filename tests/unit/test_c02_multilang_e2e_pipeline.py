@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 
 import aipc.controller as controller_pkg
 from aipc.agents.role_registry import RoleModelBinding
+from aipc.controller.errors import ControllerError
 from aipc.controller.milestone_b_orchestrator import WorkerAttemptExecutionOutcome
 from aipc.controller.milestone_c_pipeline import (
     ContainerResourceLimits,
@@ -76,64 +78,103 @@ def _make_phases() -> tuple[PhaseDefinition, ...]:
     )
 
 
+def _git(cwd: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _commit_all_clean(ws: Path, message: str = "init") -> str:
+    _git(ws, "config", "user.name", "AIPC Test")
+    _git(ws, "config", "user.email", "aipc-test@example.com")
+    _git(ws, "add", ".")
+    _git(ws, "commit", "-m", message)
+    return _git(ws, "rev-parse", "HEAD")
+
+
 def _make_onboarded_python_project(
     tmp_path: Path,
     *,
     with_git_file: bool = False,
-) -> OnboardedProjectBundle:
+) -> tuple[OnboardedProjectBundle, str]:
     ws = tmp_path / "py-repo"
-    ws.mkdir(parents=True, exist_ok=True)
+    if with_git_file:
+        origin = tmp_path / "py-repo-origin"
+        origin.mkdir(parents=True, exist_ok=True)
+        _git(origin, "init")
+        (origin / "README.md").write_text("origin\n", encoding="utf-8")
+        _commit_all_clean(origin, "origin init")
+        _git(origin, "worktree", "add", "-b", "cand", str(ws))
+    else:
+        ws.mkdir(parents=True, exist_ok=True)
+        _git(ws, "init")
+
     (ws / "pyproject.toml").write_text("[project]\nname='demo-py'\n", encoding="utf-8")
     (ws / "tests").mkdir(exist_ok=True)
     (ws / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
-    if with_git_file:
-        (ws / ".git").write_text("gitdir: /tmp/fake-git-dir\n", encoding="utf-8")
-    return onboard_universal_project(
+    head_sha = _commit_all_clean(ws, "add python project")
+    bundle = onboard_universal_project(
         workspace=ws,
         project_id="demo-py",
         project_name="Demo Python",
         phases=_make_phases(),
     )
+    return bundle, head_sha
 
 
-def _make_onboarded_node_project(tmp_path: Path) -> OnboardedProjectBundle:
+def _make_onboarded_node_project(tmp_path: Path) -> tuple[OnboardedProjectBundle, str]:
     ws = tmp_path / "node-repo"
     ws.mkdir(parents=True, exist_ok=True)
+    _git(ws, "init")
     (ws / "package.json").write_text(
         '{"name":"demo-node","scripts":{"test":"npm test"}}',
         encoding="utf-8",
     )
-    return onboard_universal_project(
+    head_sha = _commit_all_clean(ws, "add node project")
+    bundle = onboard_universal_project(
         workspace=ws,
         project_id="demo-node",
         project_name="Demo Node",
         phases=_make_phases(),
     )
+    return bundle, head_sha
 
 
-def _make_onboarded_gas_project(tmp_path: Path) -> OnboardedProjectBundle:
+def _make_onboarded_gas_project(tmp_path: Path) -> tuple[OnboardedProjectBundle, str]:
     ws = tmp_path / "gas-repo"
     ws.mkdir(parents=True, exist_ok=True)
+    _git(ws, "init")
     (ws / "appsscript.json").write_text('{"timeZone":"UTC"}', encoding="utf-8")
     (ws / "Code.gs").write_text("function doGet() { return 'ok'; }\n", encoding="utf-8")
-    return onboard_universal_project(
+    head_sha = _commit_all_clean(ws, "add gas project")
+    bundle = onboard_universal_project(
         workspace=ws,
         project_id="demo-gas",
         project_name="Demo GAS",
         phases=_make_phases(),
     )
+    return bundle, head_sha
 
 
-def _make_onboarded_static_project(tmp_path: Path) -> OnboardedProjectBundle:
+def _make_onboarded_static_project(tmp_path: Path) -> tuple[OnboardedProjectBundle, str]:
     ws = tmp_path / "static-repo"
     ws.mkdir(parents=True, exist_ok=True)
+    _git(ws, "init")
     (ws / "index.html").write_text("<html><body>hello</body></html>\n", encoding="utf-8")
-    return onboard_universal_project(
+    head_sha = _commit_all_clean(ws, "add static project")
+    bundle = onboard_universal_project(
         workspace=ws,
         project_id="demo-static",
         project_name="Demo Static",
         phases=_make_phases(),
     )
+    return bundle, head_sha
 
 
 def _make_review_context(bundle: OnboardedProjectBundle, candidate_sha: str) -> ReviewContext:
@@ -386,7 +427,7 @@ def test_lazy_controller_exports() -> None:
 
 
 def test_python_container_command_and_execution(tmp_path: Path) -> None:
-    bundle = _make_onboarded_python_project(tmp_path, with_git_file=True)
+    bundle, head_sha = _make_onboarded_python_project(tmp_path, with_git_file=True)
     verifier = MultiLanguageIsolatedVerifier()
     captured_argv: list[str] = []
 
@@ -401,7 +442,7 @@ def test_python_container_command_and_execution(tmp_path: Path) -> None:
 
     receipt = verifier.verify_project_candidate(
         bundle=bundle,
-        candidate_sha=_SHA_CANDIDATE,
+        candidate_sha=head_sha,
         isolation_mode="container",
         container_runtime_bin="docker",
         runner=fake_runner,
@@ -411,6 +452,11 @@ def test_python_container_command_and_execution(tmp_path: Path) -> None:
     assert receipt.isolation_mode == "container"
     assert receipt.container_argv is not None
     assert isinstance(receipt.resource_limits, ContainerResourceLimits)
+    assert receipt.tool_versions == {
+        "isolation_mode": "container",
+        "stack_type": "python_cli_or_package",
+        "commands_count": "2",
+    }
     assert "--rm" in captured_argv
     assert "--network" in captured_argv
     assert captured_argv[captured_argv.index("--network") + 1] == "none"
@@ -430,7 +476,7 @@ def test_python_container_command_and_execution(tmp_path: Path) -> None:
 
 
 def test_node_test_output_parsing_and_isolated_verification(tmp_path: Path) -> None:
-    bundle = _make_onboarded_node_project(tmp_path)
+    bundle, head_sha = _make_onboarded_node_project(tmp_path)
     verifier = MultiLanguageIsolatedVerifier()
 
     jest_summary = verifier.parse_multilang_test_output(
@@ -462,20 +508,31 @@ def test_node_test_output_parsing_and_isolated_verification(tmp_path: Path) -> N
             stderr="",
         )
 
+    rejected = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        runner=fake_node_runner,
+    )
+    assert rejected.passed is False
+    assert rejected.failure_reason == "UNSANDBOXED_HOST_SUBPROCESS_REJECTED"
+
     receipt = verifier.verify_project_candidate(
         bundle=bundle,
-        candidate_sha=_SHA_CANDIDATE,
-        isolation_mode="isolated_subprocess",
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
         runner=fake_node_runner,
     )
     assert receipt.passed is True
     assert receipt.stack_type == "node_javascript_typescript"
+    assert receipt.tool_versions["commands_count"] == "3"
     assert receipt.tests_summary == TestSummary(total=4, passed=4, failed=0, skipped=0)
 
 
 def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
-    static_bundle = _make_onboarded_static_project(tmp_path)
-    gas_bundle = _make_onboarded_gas_project(tmp_path)
+    static_bundle, static_sha = _make_onboarded_static_project(tmp_path)
+    gas_bundle, gas_sha = _make_onboarded_gas_project(tmp_path)
     verifier = MultiLanguageIsolatedVerifier()
 
     def ok_runner(argv, **kwargs):
@@ -486,10 +543,20 @@ def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
             stderr="",
         )
 
+    gas_rejected = verifier.verify_project_candidate(
+        bundle=gas_bundle,
+        candidate_sha=gas_sha,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert gas_rejected.passed is False
+    assert gas_rejected.failure_reason == "UNSANDBOXED_HOST_SUBPROCESS_REJECTED"
+
     static_receipt = verifier.verify_project_candidate(
         bundle=static_bundle,
-        candidate_sha=_SHA_CANDIDATE,
-        isolation_mode="isolated_subprocess",
+        candidate_sha=static_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
         runner=ok_runner,
     )
     assert static_receipt.passed is True
@@ -497,8 +564,9 @@ def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
 
     gas_receipt = verifier.verify_project_candidate(
         bundle=gas_bundle,
-        candidate_sha=_SHA_CANDIDATE,
-        isolation_mode="isolated_subprocess",
+        candidate_sha=gas_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
         runner=ok_runner,
     )
     assert gas_receipt.passed is True
@@ -512,7 +580,7 @@ def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
             receipt_id="rcpt-bad-gas",
             project_id="demo-gas",
             stack_type="google_apps_script_offline_mock",
-            isolation_mode="isolated_subprocess",
+            isolation_mode="container",
             candidate_sha=_SHA_CANDIDATE,
             command_executed=("npm", "test"),
             exit_code=0,
@@ -524,12 +592,12 @@ def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
 
 
 def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(tmp_path: Path) -> None:
-    bundle = _make_onboarded_python_project(tmp_path)
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
     verifier = MultiLanguageIsolatedVerifier()
 
     blocked_receipt = verifier.verify_project_candidate(
         bundle=bundle,
-        candidate_sha=_SHA_CANDIDATE,
+        candidate_sha=head_sha,
         isolation_mode="blocked",
     )
     assert blocked_receipt.passed is False
@@ -537,7 +605,7 @@ def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(tmp_path: P
 
     missing_runtime_receipt = verifier.verify_project_candidate(
         bundle=bundle,
-        candidate_sha=_SHA_CANDIDATE,
+        candidate_sha=head_sha,
         isolation_mode="container",
         container_runtime_bin=None,
     )
@@ -555,20 +623,21 @@ def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(tmp_path: P
 
     mutated_receipt = verifier.verify_project_candidate(
         bundle=bundle,
-        candidate_sha=_SHA_CANDIDATE,
+        candidate_sha=head_sha,
         isolation_mode="isolated_subprocess",
         runner=mutating_runner,
     )
     assert mutated_receipt.workspace_mutated_during_verification is True
     assert mutated_receipt.passed is False
     assert mutated_receipt.failure_reason == "WORKSPACE_MUTATED_DURING_VERIFICATION"
+    (Path(bundle.workspace_root) / "mutated.txt").unlink()
 
     def empty_output_runner(argv, **kwargs):
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
 
     zero_tests_receipt = verifier.verify_project_candidate(
         bundle=bundle,
-        candidate_sha=_SHA_CANDIDATE,
+        candidate_sha=head_sha,
         isolation_mode="isolated_subprocess",
         runner=empty_output_runner,
     )
@@ -578,7 +647,7 @@ def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(tmp_path: P
     with pytest.raises(ValueError, match="unsafe_host_opt_in"):
         verifier.verify_project_candidate(
             bundle=bundle,
-            candidate_sha=_SHA_CANDIDATE,
+            candidate_sha=head_sha,
             isolation_mode="isolated_subprocess",
             command_override=("python", "-m", "pytest", "--unsafe_host_opt_in"),
         )
@@ -630,14 +699,14 @@ def _make_worker_binding() -> RoleModelBinding:
 
 
 def test_e2e_pipeline_stops_at_human_merge_review(tmp_path: Path) -> None:
-    bundle = _make_onboarded_python_project(tmp_path)
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
     queue = _setup_queue(tmp_path, bundle.project_definition.project.id)
     worker_binding = _make_worker_binding()
-    review_ctx = _make_review_context(bundle, _SHA_CANDIDATE)
+    review_ctx = _make_review_context(bundle, head_sha)
 
     def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
         return WorkerAttemptExecutionOutcome(
-            candidate_sha=_SHA_CANDIDATE,
+            candidate_sha=head_sha,
             verification_passed=True,
             review_context=review_ctx,
         )
@@ -650,7 +719,7 @@ def test_e2e_pipeline_stops_at_human_merge_review(tmp_path: Path) -> None:
     def pass_review(**kwargs):
         return _make_gate_decision(
             bundle=bundle,
-            candidate_sha=_SHA_CANDIDATE,
+            candidate_sha=head_sha,
             verdict=ReviewVerdict.PASS,
             gate_outcome="PASS",
         )
@@ -677,13 +746,13 @@ def test_e2e_pipeline_stops_at_human_merge_review(tmp_path: Path) -> None:
 
 
 def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_path: Path) -> None:
-    bundle = _make_onboarded_python_project(tmp_path)
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
     worker_binding = _make_worker_binding()
-    review_ctx = _make_review_context(bundle, _SHA_CANDIDATE)
+    review_ctx = _make_review_context(bundle, head_sha)
 
     def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
         return WorkerAttemptExecutionOutcome(
-            candidate_sha=_SHA_CANDIDATE,
+            candidate_sha=head_sha,
             verification_passed=True,
             review_context=review_ctx,
         )
@@ -704,7 +773,7 @@ def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_pa
         worker_binding=worker_binding,
         review_callback=lambda **kw: _make_gate_decision(
             bundle=bundle,
-            candidate_sha=_SHA_CANDIDATE,
+            candidate_sha=head_sha,
             verdict=ReviewVerdict.PASS,
             gate_outcome="PASS",
         ),
@@ -732,7 +801,7 @@ def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_pa
         worker_binding=worker_binding,
         review_callback=lambda **kw: _make_gate_decision(
             bundle=bundle,
-            candidate_sha=_SHA_CANDIDATE,
+            candidate_sha=head_sha,
             verdict=ReviewVerdict.REVISE,
             gate_outcome="REVISE",
         ),
@@ -743,3 +812,238 @@ def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_pa
     assert revise_bundle.gate_verdict == "REVISE"
     assert revise_bundle.next_authorized_action == "DISPATCH_BOUNDED_REPAIR"
     assert queue_revise.load().tasks[0].status == QueuedTaskStatus.REPAIR_REQUIRED
+
+
+def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+
+    net_probe = (
+        "import socket\n"
+        "try:\n"
+        "    socket.create_connection(('127.0.0.1', 1))\n"
+        "except PermissionError as exc:\n"
+        "    if 'NETWORK_ISOLATION_BLOCKED' in str(exc):\n"
+        "        print('1 passed')\n"
+        "    else:\n"
+        "        raise\n"
+    )
+    net_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", net_probe),
+    )
+    assert net_receipt.passed is True
+
+    outside_file = tmp_path / "outside_escape.txt"
+    write_probe = (
+        "try:\n"
+        f"    with open({str(outside_file)!r}, 'w', encoding='utf-8') as f:\n"
+        "        f.write('escape')\n"
+        "except PermissionError as exc:\n"
+        "    if 'WORKSPACE_WRITE_ISOLATION_BLOCKED' in str(exc):\n"
+        "        print('1 passed')\n"
+        "    else:\n"
+        "        raise\n"
+    )
+    write_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", write_probe),
+    )
+    assert write_receipt.passed is True
+    assert not outside_file.exists()
+
+
+def test_wrong_head_or_dirty_worktree_and_lint_failure_fail_closed(tmp_path: Path) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+
+    wrong_head = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha="b" * 40,
+        isolation_mode="isolated_subprocess",
+    )
+    assert wrong_head.passed is False
+    assert wrong_head.failure_reason == "CANDIDATE_WORKTREE_HEAD_OR_DIRTY_MISMATCH"
+
+    dirty_path = Path(bundle.workspace_root) / "dirty.txt"
+    dirty_path.write_text("uncommitted\n", encoding="utf-8")
+    dirty_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+    )
+    assert dirty_receipt.passed is False
+    assert dirty_receipt.failure_reason == "CANDIDATE_WORKTREE_HEAD_OR_DIRTY_MISMATCH"
+    dirty_path.unlink()
+
+    def lint_fail_runner(argv, **kwargs):
+        if "ruff" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="", stderr="lint error"
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="2 passed in 0.1s\n", stderr=""
+        )
+
+    lint_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        runner=lint_fail_runner,
+    )
+    assert lint_receipt.passed is False
+    assert lint_receipt.failure_reason == "VALIDATION_LINT_OR_BUILD_FAILED"
+
+
+def test_e2e_pipeline_rejects_mismatched_review_provenance(tmp_path: Path) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, head_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="2 passed in 0.1s\n", stderr=""
+        )
+
+    # Case 1: wrong candidate_commit_sha
+    q1 = _setup_queue(tmp_path / "q1", bundle.project_definition.project.id)
+    bad_sha_decision = _make_gate_decision(
+        bundle=bundle,
+        candidate_sha="c" * 40,
+        verdict=ReviewVerdict.PASS,
+        gate_outcome="PASS",
+    )
+    res1 = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=q1,
+        worker_step=worker_step,
+        worker_binding=worker_binding,
+        review_callback=lambda **kw: bad_sha_decision,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert res1.pr_ready is False
+    assert res1.gate_verdict == "BLOCKED"
+    assert res1.blockers == ("REVIEW_PROVENANCE_MISMATCH",)
+
+    # Case 2: wrong task_id
+    q2 = _setup_queue(tmp_path / "q2", bundle.project_definition.project.id)
+    valid_decision = _make_gate_decision(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        verdict=ReviewVerdict.PASS,
+        gate_outcome="PASS",
+    )
+    bad_task_decision = valid_decision.model_copy(update={"task_id": "other-task"})
+    res2 = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=q2,
+        worker_step=worker_step,
+        worker_binding=worker_binding,
+        review_callback=lambda **kw: bad_task_decision,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert res2.pr_ready is False
+    assert res2.blockers == ("REVIEW_PROVENANCE_MISMATCH",)
+
+    # Case 3: wrong bound_review.provenance.attempt
+    q3 = _setup_queue(tmp_path / "q3", bundle.project_definition.project.id)
+    assert valid_decision.bound_review is not None
+    bad_prov = valid_decision.bound_review.provenance.model_copy(update={"attempt": 99})
+    bad_bound = valid_decision.bound_review.model_copy(update={"provenance": bad_prov})
+    bad_attempt_decision = valid_decision.model_copy(update={"bound_review": bad_bound})
+    res3 = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=q3,
+        worker_step=worker_step,
+        worker_binding=worker_binding,
+        review_callback=lambda **kw: bad_attempt_decision,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert res3.pr_ready is False
+    assert res3.blockers == ("REVIEW_PROVENANCE_MISMATCH",)
+
+
+def test_e2e_pipeline_validates_reviewer_before_dispatch_and_marks_interrupted(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, head_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    # Missing reviewer_gate and review_callback must fail BEFORE begin_dispatch
+    q_missing = _setup_queue(tmp_path / "q_missing", bundle.project_definition.project.id)
+    with pytest.raises(ControllerError, match="Either reviewer_gate or review_callback"):
+        pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q_missing,
+            worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
+                candidate_sha=head_sha,
+                verification_passed=True,
+                review_context=review_ctx,
+            ),
+            worker_binding=worker_binding,
+        )
+    assert q_missing.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+    # Exception in worker_step must transition task to INTERRUPTED
+    q_worker_err = _setup_queue(tmp_path / "q_worker_err", bundle.project_definition.project.id)
+
+    def crashing_worker(binding: RoleModelBinding, attempt: int, repair_plan):
+        raise RuntimeError("worker crashed")
+
+    with pytest.raises(RuntimeError, match="worker crashed"):
+        pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q_worker_err,
+            worker_step=crashing_worker,
+            worker_binding=worker_binding,
+            review_callback=lambda **kw: _make_gate_decision(
+                bundle=bundle,
+                candidate_sha=head_sha,
+                verdict=ReviewVerdict.PASS,
+                gate_outcome="PASS",
+            ),
+        )
+    assert q_worker_err.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+    # Exception in review_callback must transition task to INTERRUPTED
+    q_rev_err = _setup_queue(tmp_path / "q_rev_err", bundle.project_definition.project.id)
+
+    def crashing_review(**kwargs):
+        raise RuntimeError("reviewer crashed")
+
+    with pytest.raises(RuntimeError, match="reviewer crashed"):
+        pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q_rev_err,
+            worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
+                candidate_sha=head_sha,
+                verification_passed=True,
+                review_context=review_ctx,
+            ),
+            worker_binding=worker_binding,
+            review_callback=crashing_review,
+            isolation_mode="isolated_subprocess",
+            runner=lambda argv, **kw: subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+            ),
+        )
+    assert q_rev_err.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
