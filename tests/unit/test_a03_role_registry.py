@@ -9,6 +9,7 @@ from aipc.agents.role_registry import (
     RoleBasedModelRegistry,
     RoleModelBinding,
     RoleSelectionRequest,
+    build_default_subscription_role_registry,
 )
 from aipc.agents.routing_models import CapabilityStatus
 from aipc.domain.errors import DuplicateAgentError
@@ -310,3 +311,47 @@ def test_a03_rejects_paid_api_auth_mode_role_mode_mismatch_and_duplicates() -> N
                 auth_mode="antigravity_subscription",
             )
         )
+
+
+def test_default_subscription_role_registry_prefers_hydrogen_then_flash() -> None:
+    """Default subscription registry prefers Hydrogen worker and falls back to Flash."""
+    base_obs = _default_observations()
+    with_hydrogen = tuple(
+        obs.model_copy(
+            update={
+                "supported_models": (
+                    "gemini-4-hydrogen-medium",
+                    "gemini-3.8-flash-medium",
+                    "flash",
+                )
+            }
+        )
+        if obs.provider_id == "gemini-antigravity"
+        else obs
+        for obs in base_obs
+    )
+
+    reg = build_default_subscription_role_registry(with_hydrogen)
+    decision = reg.resolve(RoleSelectionRequest(role="worker"))
+    assert decision.outcome == "SELECTED"
+    assert decision.selected_binding is not None
+    assert decision.selected_binding.binding_id == "worker-agy-hydrogen-medium"
+    assert decision.selected_binding.model_id == "gemini-4-hydrogen-medium"
+
+    fallback_attempted = reg.resolve(
+        RoleSelectionRequest(
+            role="worker",
+            attempted_binding_ids=("worker-agy-hydrogen-medium",),
+        )
+    )
+    assert fallback_attempted.outcome == "SELECTED"
+    assert fallback_attempted.selected_binding is not None
+    assert fallback_attempted.selected_binding.binding_id == "worker-agy-fast"
+    assert fallback_attempted.selected_binding.model_id == "gemini-3.8-flash-medium"
+
+    reg_without_hydrogen = build_default_subscription_role_registry(base_obs)
+    fallback_omitted = reg_without_hydrogen.resolve(RoleSelectionRequest(role="worker"))
+    assert fallback_omitted.outcome == "SELECTED"
+    assert fallback_omitted.selected_binding is not None
+    assert fallback_omitted.selected_binding.binding_id == "worker-agy-fast"
+    assert fallback_omitted.selected_binding.model_id == "gemini-3.8-flash-medium"

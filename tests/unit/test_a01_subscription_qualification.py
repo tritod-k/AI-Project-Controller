@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from aipc.adapters.gemini.doctor import AntigravityQualificationResult
+from aipc.adapters.gemini.doctor import QUALIFIED_AGY_VERSIONS, AntigravityQualificationResult
 from aipc.adapters.subscription_qualification import (
     QUALIFIED_ANTIGRAVITY_HEADLESS_MODELS,
     QUALIFIED_CODEX_SUBSCRIPTION_MODELS,
@@ -327,3 +327,28 @@ def test_a01_suite_strips_outer_credentials_and_blocks_secret_leakage(
     with pytest.raises(SecretExposureError):
         tampered = agy_rep.model_copy(update={"reasons": (f"Leaked {SYNTHETIC_API_KEY}",)})
         tampered.validate_report_invariants()
+
+
+def test_antigravity_1_5_8_and_hydrogen_qualification(tmp_path: Path) -> None:
+    """Antigravity 1.5.8 is qualified with Hydrogen supported and argon unverified."""
+    assert "1.5.8" in QUALIFIED_AGY_VERSIONS
+
+    home = tmp_path / "home"
+    (home / ".gemini" / "antigravity").mkdir(parents=True)
+    fake_agy = tmp_path / "agy.exe"
+    fake_agy.write_text("binary", encoding="utf-8")
+
+    report = qualify_antigravity_subscription_runtime(
+        executable=fake_agy,
+        home_dir=home,
+        qualification_override=AntigravityQualificationResult(
+            qualified=True,
+            version="1.5.8",
+            reason="qualified",
+            cli_compatible=True,
+            effective_security_verified=True,
+        ),
+    )
+    assert report.eligibility_state == "QUALIFIED"
+    assert "gemini-4-hydrogen-medium" in report.supported_model_ids
+    assert "argon" in report.unverified_or_unavailable_model_ids

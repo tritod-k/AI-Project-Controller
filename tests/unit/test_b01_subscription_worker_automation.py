@@ -19,6 +19,7 @@ from aipc.adapters.subscription_worker import (
     SubscriptionWorkerConfig,
     WorkerCommandReceipt,
     WorkerInvocationResponse,
+    select_preferred_worker_model,
 )
 from aipc.controller.errors import ProviderInterruption
 from aipc.domain.enums import AgentStatus
@@ -511,3 +512,20 @@ def test_b01_unqualified_runtime_or_failing_tests_fail_closed(tmp_path: Path) ->
     assert fail_outcome.agent_result.tests.failed == 1
     assert fail_outcome.agent_result.tests.passed == 1
     assert fail_outcome.receipt.candidate_commit_sha == base_sha
+
+
+def test_select_preferred_worker_model_hydrogen_and_flash_fallback() -> None:
+    """select_preferred_worker_model prefers Hydrogen when supported and falls back to Flash."""
+    hydrogen_report = _qualified_report().model_copy(
+        update={
+            "supported_model_ids": (
+                "gemini-4-hydrogen-medium",
+                "gemini-3.8-flash-medium",
+                "flash",
+            )
+        }
+    )
+    assert select_preferred_worker_model(hydrogen_report) == "gemini-4-hydrogen-medium"
+
+    flash_only_report = _qualified_report()
+    assert select_preferred_worker_model(flash_only_report) == "gemini-3.8-flash-medium"
