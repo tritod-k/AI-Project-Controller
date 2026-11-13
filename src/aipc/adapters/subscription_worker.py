@@ -1200,7 +1200,12 @@ if __name__ == "__main__":
     import sys
 
     from aipc.controller.task_queue import PersistentTaskQueue, QueuedTaskStatus
-    from aipc.recovery.models import RecoveryAction, RecoveryDecision
+    from aipc.recovery.models import (
+        FailureClassification,
+        RecoveryAction,
+        RecoveryDecision,
+        RecoveryRequest,
+    )
 
     job = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     rep = qualify_antigravity_subscription_runtime()
@@ -1210,10 +1215,16 @@ if __name__ == "__main__":
     tid = job["task_request"]["task_id"]
     if q is not None:
         rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
-        if rec.status == QueuedTaskStatus.RUNNING and rec.last_candidate_sha is None:
-            q.mark_interrupted(tid, reason="Clean pre-dispatch recovery", quota_exhausted=True)
+        if rec.status in (QueuedTaskStatus.INTERRUPTED, QueuedTaskStatus.WAITING_PROVIDER):
             dec = RecoveryDecision(
-                action=RecoveryAction.RESUME, safe_to_automate=True, reasons=["Clean state"]
+                request=RecoveryRequest(
+                    recovery_id=f"rec-{tid}",
+                    classification=FailureClassification.CONTROLLER_RESTART,
+                ),
+                action=RecoveryAction.NO_RECOVERY_NEEDED,
+                safe_to_automate=True,
+                reasons=("Clean pre-dispatch state",),
+                precondition="a" * 64,
             )
             q.resume_after_recovery(tid, dec)
             rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
