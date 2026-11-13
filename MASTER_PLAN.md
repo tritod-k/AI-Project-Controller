@@ -3318,5 +3318,27 @@ Workstreams `B01`–`B03` (reconciling and preserving all original `B01`–`B04`
 - **B01 (`3942f4a`)**: `src/aipc/adapters/subscription_worker.py` & `tests/unit/test_b01_subscription_worker_automation.py` (`5 passed`).
 - **B02**: `src/aipc/review/subscription_reviewer_gate.py`, `src/aipc/review/__init__.py`, & `tests/unit/test_b02_subscription_reviewer_gate.py` (`5 passed`).
 - **B03**: `src/aipc/controller/milestone_b_orchestrator.py`, `src/aipc/controller/__init__.py`, & `tests/unit/test_b03_repair_retry_and_recovery.py` (`4 passed`).
-- **Verification & Live Independent Review**: `14 passed` in `B01`–`B03` unit/boundary suites, `65 passed` in combined Milestone A/B + Phase 24 suite, `122 passed` in `tests/review/` + `tests/consensus/`, `31 passed` in `tests/gemini/test_antigravity_transport.py` (including live `aipc-verify:py313-v1` Docker container isolation), `ruff check` & `ruff format --check` clean (`0 errors`), and live cross-provider Codex subscription independent review (`codex-cli 0.167.1` in `read-only` sandbox) returned verdict **`PASS`** (`confidence: 0.95`) on `76a5b5748424e627a241fd8475646c855afacafd`. See `docs/AIPC_2_0_MILESTONE_B_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_B_COMPLETION_REPORT.md`.
+- **Verification & Live Independent Review**: `14 passed` in `B01`–`B03` unit/boundary suites, `65 passed` in combined Milestone A/B + Phase 24 suite, `122 passed` in `tests/review/` + `tests/consensus/`, `31 passed` in `tests/gemini/test_antigravity_transport.py` (including live `aipc-verify:py313-v1` Docker container isolation), `ruff check` & `ruff format --check` clean (`0 errors`), and live cross-provider Codex subscription independent review (`codex-cli 0.167.1` in `read-only` sandbox) returned verdict **`PASS`** (`confidence: 0.95`) on `76a5b5748424e627a241fd8475646c855afacafd`. Merged into `master` via PR #6 (`849c866`). See `docs/AIPC_2_0_MILESTONE_B_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_B_COMPLETION_REPORT.md`.
+
+## 38.6 AIPC 2.0 Milestone C Authorization & Gemini 4 Hydrogen Worker Integration (`C01`–`C03`)
+
+Following merge of Milestone B (`PR #6`, `849c866`) into `master`, Human Commander **K.TRITOD** authorized:
+1. **Targeted Two-Tier Inline Python Execution Policy (`f997783`)**: Outer Argon Supervisor remains strictly prohibited from running `python -c` / `python.exe -c` / `py -c`, while Inner AIPC modules, subprocesses, and tests may use bounded `[sys.executable, "-c", ...]` invocations with `stdin=subprocess.DEVNULL` and sanitized environments.
+2. **Gemini 4 Hydrogen Subscription Worker Integration (`4c1aab3`, `4db2134`)**: Qualified `agy 1.5.8` and `gemini-4-hydrogen-medium` as the primary subscription coding worker (`priority=98`, `fallback_order=0`) with automatic fallback to `gemini-3.8-flash-medium` (`priority=95`, `fallback_order=1`), while keeping `argon` strictly excluded from inner AIPC roles.
+3. **AIPC 2.0 — Milestone C (`C01`–`C03`)** on feature branch `gemini/aipc-2.0-milestone-c`:
+   - **Workstream C01 — Universal Project Adapters, Profiles & Templates**
+   - **Workstream C02 — Multi-Language Isolated Verification & End-to-End Pipeline**
+   - **Workstream C03 — Trusted Acceptance Test Harness & Self-Development Dogfooding**
+
+Milestone D (`D01`–`D03`) remains unauthorized.
+
+## 38.7 Milestone C Implementation & Verification Summary (`C01`–`C03`)
+
+All Milestone C workstreams were executed through AIPC-managed Gemini 4 Hydrogen subscription worker dispatch (`AntigravitySubscriptionWorkerAutomation`) on `gemini/aipc-2.0-milestone-c`:
+- **Hydrogen Worker & Role Registry Integration (`4c1aab3`, `4db2134`)**: `src/aipc/adapters/gemini/doctor.py`, `src/aipc/adapters/subscription_qualification.py`, `src/aipc/adapters/subscription_worker.py`, `src/aipc/agents/role_registry.py`, and unit tests (`26 passed` in `test_a01`, `test_a03`, `test_b01`).
+- **C01 (`2df59c7`)**: `src/aipc/project/universal_profiles.py`, `src/aipc/project/__init__.py`, & `tests/unit/test_c01_universal_project_profiles.py` (`15 passed`).
+- **C02 (`2c0a84b`)**: `src/aipc/controller/milestone_c_pipeline.py`, `src/aipc/controller/__init__.py`, & `tests/unit/test_c02_multilang_e2e_pipeline.py` (`7 passed`).
+- **C03 (`eae7689`)**: `src/aipc/review/trusted_acceptance_harness.py`, `src/aipc/review/__init__.py`, & `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (`13 passed`).
+- **Full CI Verification**: `1133 passed` across the full CI regression suite, `ruff check .` and `ruff format --check .` clean (`0 errors`), and canonical/project JSON schemas verified. See `docs/AIPC_2_0_MILESTONE_C_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_C_COMPLETION_REPORT.md`.
+
 
