@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -19,13 +21,20 @@ from aipc.adapters.subscription_worker import (
     SubscriptionWorkerConfig,
     WorkerCommandReceipt,
     WorkerInvocationResponse,
+    invoke_antigravity_cli_worker,
+    run_cli_worker_job,
     select_preferred_worker_model,
 )
-from aipc.controller.errors import ProviderInterruption
+from aipc.controller.errors import ControllerError, ProviderInterruption
+from aipc.controller.task_queue import (
+    ApprovedTaskContract,
+    PersistentTaskQueue,
+    QueuedTaskStatus,
+)
 from aipc.domain.enums import AgentStatus
 from aipc.domain.errors import AgentTimeoutError
 from aipc.domain.models import TaskRequest
-from aipc.hardening.env_isolation import SubscriptionBoundaryError
+from aipc.hardening.env_isolation import SubscriptionBoundaryError, build_sanitized_child_env
 
 SYNTHETIC_API_KEY = "AIza" + "W" * 35
 _NL = chr(10)
@@ -529,3 +538,242 @@ def test_select_preferred_worker_model_hydrogen_and_flash_fallback() -> None:
 
     flash_only_report = _qualified_report()
     assert select_preferred_worker_model(flash_only_report) == "gemini-3.8-flash-medium"
+
+
+def _approved_contract(
+    task_id: str,
+    *,
+    depends_on: tuple[str, ...] = (),
+) -> ApprovedTaskContract:
+    return ApprovedTaskContract(
+        task_id=task_id,
+        phase_id="01",
+        milestone_id="milestone-b",
+        title=f"Task {task_id}",
+        objective=f"Execute bounded work for {task_id}",
+        depends_on=depends_on,
+        in_scope=("src/module.py",),
+        validation_commands=("pytest -q",),
+    )
+
+
+def test_b01_cli_worker_job_does_not_self_approve_in_queue(tmp_path: Path) -> None:
+    """R1: run_cli_worker_job must not mark COMPLETED without verified reviewer gate."""
+    wt = tmp_path / "candidate_wt"
+    _init_git_repo(wt)
+    q_path = tmp_path / "queue.json"
+    q = PersistentTaskQueue(q_path)
+    q.initialize(
+        project_id="proj-b01",
+        milestone_id="milestone-b",
+        contracts=[
+            _approved_contract("task-b01-1"),
+            _approved_contract("task-b01-2", depends_on=("task-b01-1",)),
+        ],
+    )
+    job_path = tmp_path / "job.json"
+    job_payload = {
+        "queue_path": str(q_path),
+        "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
+        "worker_config": {
+            "candidate_worktree": str(wt),
+            "evidence_output_dir": str(tmp_path / "evidence"),
+            "in_scope_paths": ["src/module.py"],
+            "auto_commit_candidate": True,
+        },
+    }
+    job_path.write_text(json.dumps(job_payload), encoding="utf-8")
+
+    async def edit_invoker(
+        _task: TaskRequest,
+        cfg: SubscriptionWorkerConfig,
+        _env: Mapping[str, str],
+        resolved_model: str,
+    ) -> WorkerInvocationResponse:
+        (Path(cfg.candidate_worktree) / "src" / "module.py").write_text(
+            f"def calc(x: int) -> int:{_NL}    return x * 3{_NL}",
+            encoding="utf-8",
+        )
+        return WorkerInvocationResponse(
+            session_id="agy-session-r1",
+            model_used=resolved_model,
+            summary="Implemented calc*3.",
+        )
+
+    rc = run_cli_worker_job(
+        job_path,
+        qualification_report=_qualified_report(),
+        worker_invoker=edit_invoker,
+    )
+    assert rc == 0
+    snap = q.load()
+    by_id = {t.contract.task_id: t for t in snap.tasks}
+    assert by_id["task-b01-1"].status == QueuedTaskStatus.RUNNING
+    assert by_id["task-b01-2"].status == QueuedTaskStatus.PENDING
+    assert q.next_eligible_task() is None
+
+
+def test_b01_cli_worker_job_rejects_duplicate_running_and_unverified_recovery(
+    tmp_path: Path,
+) -> None:
+    """R2: reject duplicate RUNNING dispatch and INTERRUPTED/WAITING_PROVIDER without recovery."""
+    wt = tmp_path / "candidate_wt"
+    _init_git_repo(wt)
+
+    async def noop_invoker(
+        _task: TaskRequest,
+        _cfg: SubscriptionWorkerConfig,
+        _env: Mapping[str, str],
+        resolved_model: str,
+    ) -> WorkerInvocationResponse:
+        return WorkerInvocationResponse(
+            session_id="agy-session-r2",
+            model_used=resolved_model,
+            summary="Noop.",
+        )
+
+    q_path = tmp_path / "queue.json"
+    q = PersistentTaskQueue(q_path)
+    q.initialize(
+        project_id="proj-b01",
+        milestone_id="milestone-b",
+        contracts=[_approved_contract("task-b01-1")],
+    )
+    job_path = tmp_path / "job.json"
+    job_payload = {
+        "queue_path": str(q_path),
+        "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
+        "worker_config": {
+            "candidate_worktree": str(wt),
+            "evidence_output_dir": str(tmp_path / "evidence"),
+            "in_scope_paths": ["src/module.py"],
+        },
+    }
+    job_path.write_text(json.dumps(job_payload), encoding="utf-8")
+
+    q.begin_dispatch("task-b01-1", worker_id="w1", provider="gemini")
+    with pytest.raises(ControllerError, match="duplicate dispatch rejected"):
+        run_cli_worker_job(
+            job_path,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+
+    q.mark_interrupted("task-b01-1", reason="crash", quota_exhausted=False)
+    with pytest.raises(ControllerError, match="requires verified recovery decision"):
+        run_cli_worker_job(
+            job_path,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+
+    q2_path = tmp_path / "queue2.json"
+    q2 = PersistentTaskQueue(q2_path)
+    q2.initialize(
+        project_id="proj-b01",
+        milestone_id="milestone-b",
+        contracts=[_approved_contract("task-b01-1")],
+    )
+    q2.begin_dispatch("task-b01-1", worker_id="w1", provider="gemini")
+    q2.mark_interrupted("task-b01-1", reason="quota", quota_exhausted=True)
+    job2_path = tmp_path / "job2.json"
+    job2_path.write_text(
+        json.dumps({**job_payload, "queue_path": str(q2_path)}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ControllerError, match="requires verified recovery decision"):
+        run_cli_worker_job(
+            job2_path,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+
+
+def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3: kill and reap child process on timeout/cancellation, require conversation_id."""
+    wt = tmp_path / "candidate_wt"
+    _init_git_repo(wt)
+    fake_agy = tmp_path / "agy.exe"
+    fake_agy.write_text("stub", encoding="utf-8")
+    monkeypatch.setattr("aipc.adapters.subscription_worker.find_agy_executable", lambda: fake_agy)
+
+    cfg = SubscriptionWorkerConfig(
+        candidate_worktree=str(wt),
+        evidence_output_dir=str(tmp_path / "evidence"),
+        in_scope_paths=("src/module.py",),
+    )
+    env = build_sanitized_child_env()
+    real_exec = asyncio.create_subprocess_exec
+    spawned: list[asyncio.subprocess.Process] = []
+
+    async def slow_subprocess_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        proc = await real_exec(
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdin=kwargs["stdin"],
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_subprocess_exec)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            invoke_antigravity_cli_worker(
+                _task(wt, task_id="task-r3-timeout", timeout=1),
+                cfg,
+                env,
+                "gemini-3.8-flash-medium",
+            )
+        )
+    assert len(spawned) == 1
+    assert spawned[0].returncode is not None
+
+    async def _cancel_runner() -> None:
+        t = asyncio.create_task(
+            invoke_antigravity_cli_worker(
+                _task(wt, task_id="task-r3-cancel", timeout=30),
+                cfg,
+                env,
+                "gemini-3.8-flash-medium",
+            )
+        )
+        await asyncio.sleep(0.2)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(_cancel_runner())
+    assert len(spawned) == 2
+    assert spawned[1].returncode is not None
+
+    async def missing_conv_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        return await real_exec(
+            sys.executable,
+            "-c",
+            "import json; print(json.dumps({'status': 'SUCCESS', 'response': 'ok'}))",
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdin=kwargs["stdin"],
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", missing_conv_exec)
+    with pytest.raises(RuntimeError, match="missing conversation_id"):
+        asyncio.run(
+            invoke_antigravity_cli_worker(
+                _task(wt, task_id="task-r3-noconv", timeout=10),
+                cfg,
+                env,
+                "gemini-3.8-flash-medium",
+            )
+        )

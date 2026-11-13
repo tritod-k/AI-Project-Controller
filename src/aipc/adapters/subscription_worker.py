@@ -36,7 +36,7 @@ from aipc.adapters.subscription_qualification import (
     qualify_antigravity_subscription_runtime,
     qualify_codex_subscription_runtime,
 )
-from aipc.controller.errors import ProviderInterruption
+from aipc.controller.errors import ControllerError, ProviderInterruption
 from aipc.domain.enums import AgentStatus, ChangeType
 from aipc.domain.errors import AgentError, AgentTimeoutError
 from aipc.domain.models import (
@@ -390,28 +390,42 @@ async def invoke_antigravity_cli_worker(
         "-p",
         task.prompt,
     ]
-    res = await asyncio.to_thread(
-        subprocess.run,
-        argv,
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
         cwd=str(Path(config.candidate_worktree).resolve()),
         env=dict(env),
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        check=False,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip().startswith("{")]
-    if res.returncode != 0 or not lines:
-        raise RuntimeError(res.stderr or res.stdout or f"agy worker exited {res.returncode}")
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=float(max(1, int(task.timeout_seconds))),
+        )
+    except (asyncio.CancelledError, TimeoutError):
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise
+    stdout_text = stdout_b.decode("utf-8", errors="replace")
+    stderr_text = stderr_b.decode("utf-8", errors="replace")
+    lines = [ln for ln in stdout_text.splitlines() if ln.strip().startswith("{")]
+    if proc.returncode != 0 or not lines:
+        raise RuntimeError(stderr_text or stdout_text or f"agy worker exited {proc.returncode}")
     raw_file = ev_dir / "raw_output.json"
     raw_file.write_text(lines[-1], encoding="utf-8")
     payload = json.loads(lines[-1])
     if payload.get("status") != "SUCCESS":
         raise RuntimeError(str(payload.get("error") or payload.get("response") or "agy failed"))
+    conv_id = str(payload.get("conversation_id") or "").strip()
+    if not conv_id:
+        raise RuntimeError("agy worker output missing conversation_id")
+    observed_model = str(payload.get("model") or "").strip() or resolved_model
     usage = payload.get("usage") or {}
     return WorkerInvocationResponse(
-        session_id=str(payload.get("conversation_id") or f"agy-{task.task_id}"),
-        model_used=str(payload.get("model") or resolved_model),
+        session_id=conv_id,
+        model_used=observed_model,
         summary=str(payload.get("response") or "Completed worker invocation.")[:400],
         raw_output_ref=str(raw_file),
         input_tokens=usage.get("input_tokens"),
@@ -1210,23 +1224,41 @@ __all__ = [
     "WorkerInvocationResponse",
     "WorkerInvokerCallable",
     "invoke_antigravity_cli_worker",
+    "run_cli_worker_job",
     "select_preferred_worker_model",
 ]
 
 
-if __name__ == "__main__":
-    import sys
+def _verify_clean_worktree_for_recovery(
+    worktree: Path,
+    dec_precondition: str,
+) -> bool:
+    sanitized_env = build_sanitized_child_env()
+    status_res = _run_git(worktree, ["status", "--porcelain"], sanitized_env)
+    if status_res.returncode != 0 or bool((status_res.stdout or "").strip()):
+        return False
+    head_res = _run_git(worktree, ["rev-parse", "HEAD"], sanitized_env)
+    head_sha = (head_res.stdout or "").strip().lower()
+    if head_res.returncode != 0 or not _HEX_SHA_RE.fullmatch(head_sha):
+        return False
+    expected_precondition = hashlib.sha256(head_sha.encode("utf-8")).hexdigest()
+    return dec_precondition == expected_precondition
 
+
+def run_cli_worker_job(
+    job_path: Path,
+    *,
+    qualification_report: ProviderRuntimeQualificationReport | None = None,
+    worker_invoker: WorkerInvokerCallable | None = None,
+) -> int:
+    """Execute a bounded CLI worker job with queue recovery and gate verification."""
     from aipc.controller.task_queue import PersistentTaskQueue, QueuedTaskStatus
-    from aipc.recovery.models import (
-        FailureClassification,
-        RecoveryAction,
-        RecoveryDecision,
-        RecoveryRequest,
-    )
+    from aipc.domain.enums import ReviewVerdict
+    from aipc.recovery.models import RecoveryDecision
+    from aipc.review.subscription_reviewer_gate import SubscriptionReviewerGateDecision
 
-    job = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    rep = qualify_antigravity_subscription_runtime()
+    job = json.loads(Path(job_path).read_text(encoding="utf-8"))
+    rep = qualification_report or qualify_antigravity_subscription_runtime()
     pref = job.get("preferred_model", PRIMARY_ANTIGRAVITY_WORKER_MODEL)
     mdl = select_preferred_worker_model(rep, preferred_model=pref)
     q = PersistentTaskQueue(Path(job["queue_path"])) if job.get("queue_path") else None
@@ -1234,39 +1266,92 @@ if __name__ == "__main__":
     if q is not None:
         rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
         if rec.status in (QueuedTaskStatus.INTERRUPTED, QueuedTaskStatus.WAITING_PROVIDER):
-            dec = RecoveryDecision(
-                request=RecoveryRequest(
-                    recovery_id=f"rec-{tid}",
-                    classification=FailureClassification.CONTROLLER_RESTART,
-                ),
-                action=RecoveryAction.NO_RECOVERY_NEEDED,
-                safe_to_automate=True,
-                reasons=("Clean pre-dispatch state",),
-                precondition="a" * 64,
-            )
+            rec_path = job.get("recovery_decision_path")
+            if not rec_path:
+                raise ControllerError(
+                    f"Task {tid} is {rec.status} and requires verified "
+                    "recovery decision before dispatch"
+                )
+            dec = RecoveryDecision.model_validate_json(Path(rec_path).read_text(encoding="utf-8"))
+            worktree = Path(job["worker_config"]["candidate_worktree"]).resolve()
+            if not dec.safe_to_automate or not _verify_clean_worktree_for_recovery(
+                worktree, dec.precondition
+            ):
+                raise ControllerError(
+                    f"Task {tid} is {rec.status} and requires verified "
+                    "recovery decision before dispatch"
+                )
             q.resume_after_recovery(tid, dec)
-            rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
-        if rec.status != QueuedTaskStatus.RUNNING:
-            q.begin_dispatch(tid, worker_id="aipc-implementation-worker", provider="gemini")
+        q.begin_dispatch(
+            tid,
+            worker_id=job.get("worker_id", "aipc-implementation-worker"),
+            provider="gemini",
+        )
+
     w_cfg = SubscriptionWorkerConfig.model_validate(
         {**job["worker_config"], "model_requested": mdl, "reasoning_effort": "medium"}
     )
     auto = AntigravitySubscriptionWorkerAutomation(
-        w_cfg, qualification_report=rep, worker_invoker=invoke_antigravity_cli_worker
+        w_cfg,
+        qualification_report=rep,
+        worker_invoker=worker_invoker or invoke_antigravity_cli_worker,
     )
-    out = asyncio.run(auto.execute_worker_task(TaskRequest.model_validate(job["task_request"])))
-    if q is not None and out.agent_result.status == AgentStatus.COMPLETED:
-        sha = out.receipt.candidate_commit_sha
-        ev_root = str(Path(out.receipt.receipt_json_path or "").parent)
-        cid, rid = f"ckpt-{tid}-{sha[:8]}", f"rev-{tid}-{sha[:8]}"
-        q.record_attempt_outcome(
-            tid,
-            candidate_sha=sha,
-            checkpoint_id=cid,
-            evidence_root=ev_root,
-            review_id=rid,
-            review_verdict="PASS",
-            gate_verdict="PASS",
-        )
+    try:
+        out = asyncio.run(auto.execute_worker_task(TaskRequest.model_validate(job["task_request"])))
+    except Exception as exc:
+        if q is not None:
+            reason = str(exc).strip()[:200] or type(exc).__name__
+            q.mark_interrupted(tid, reason=reason, quota_exhausted=False)
+        raise
+
+    if out.agent_result.status != AgentStatus.COMPLETED:
+        if q is not None:
+            q.mark_interrupted(tid, reason="Worker execution failed", quota_exhausted=False)
+        print(json.dumps(out.receipt.model_dump(mode="json")))
+        return 1
+
+    if q is not None:
+        gate_path = job.get("review_gate_decision_path")
+        if gate_path:
+            gate_dec = SubscriptionReviewerGateDecision.model_validate_json(
+                Path(gate_path).read_text(encoding="utf-8")
+            )
+            sha = out.receipt.candidate_commit_sha
+            verified_pass = (
+                gate_dec.task_id == tid
+                and gate_dec.candidate_commit_sha == sha
+                and gate_dec.reviewed_commit_sha == sha
+                and gate_dec.gate_outcome == "PASS"
+                and gate_dec.review_result.verdict == ReviewVerdict.PASS
+                and gate_dec.phase_gate_decision is not None
+                and gate_dec.phase_gate_decision.verdict == ReviewVerdict.PASS
+            )
+            if not verified_pass:
+                raise ControllerError(
+                    f"Review gate decision for task '{tid}' is not a verified PASS for '{sha}'."
+                )
+            ev_root = str(Path(out.receipt.receipt_json_path or "").parent)
+            q.record_attempt_outcome(
+                tid,
+                candidate_sha=sha,
+                checkpoint_id=f"ckpt-{tid}-{sha[:8]}",
+                evidence_root=ev_root,
+                review_id=gate_dec.review_result.review_id,
+                review_verdict="PASS",
+                gate_verdict="PASS",
+            )
+        elif job.get("defer_review_to_waiting_provider", False):
+            q.mark_interrupted(
+                tid,
+                reason="Awaiting independent subscription review",
+                quota_exhausted=True,
+            )
+
     print(json.dumps(out.receipt.model_dump(mode="json")))
-    raise SystemExit(0 if out.agent_result.status == AgentStatus.COMPLETED else 1)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(run_cli_worker_job(Path(sys.argv[1])))
