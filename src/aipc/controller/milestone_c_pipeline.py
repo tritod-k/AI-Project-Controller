@@ -120,9 +120,7 @@ class MultiLanguageVerificationReceipt(CanonicalRecord):
             )
         if self.stack_type == "google_apps_script_offline_mock":
             if not self.offline_mock_only:
-                raise ValueError(
-                    "google_apps_script_offline_mock requires offline_mock_only=True"
-                )
+                raise ValueError("google_apps_script_offline_mock requires offline_mock_only=True")
             if self.simulation_disclaimer is None or not self.simulation_disclaimer.strip():
                 raise ValueError(
                     "google_apps_script_offline_mock requires non-blank simulation_disclaimer"

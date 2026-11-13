@@ -373,14 +373,32 @@ async def invoke_antigravity_cli_worker(
     settings_path.write_text(json.dumps(rules), encoding="utf-8")
     effort_args = ["--effort", config.reasoning_effort] if config.reasoning_effort else []
     argv = [
-        str(exe), "--model", resolved_model, *effort_args,
-        "--mode", "accept-edits", "--sandbox", "--disable-slash-commands",
-        "--output-format", "json", "--print-timeout", f"{max(30, int(task.timeout_seconds))}s",
-        "--settings", str(settings_path), "-p", task.prompt,
+        str(exe),
+        "--model",
+        resolved_model,
+        *effort_args,
+        "--mode",
+        "accept-edits",
+        "--sandbox",
+        "--disable-slash-commands",
+        "--output-format",
+        "json",
+        "--print-timeout",
+        f"{max(30, int(task.timeout_seconds))}s",
+        "--settings",
+        str(settings_path),
+        "-p",
+        task.prompt,
     ]
     res = await asyncio.to_thread(
-        subprocess.run, argv, cwd=str(Path(config.candidate_worktree).resolve()),
-        env=dict(env), capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+        subprocess.run,
+        argv,
+        cwd=str(Path(config.candidate_worktree).resolve()),
+        env=dict(env),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
     )
     lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip().startswith("{")]
     if res.returncode != 0 or not lines:
@@ -1242,11 +1260,13 @@ if __name__ == "__main__":
         ev_root = str(Path(out.receipt.receipt_json_path or "").parent)
         cid, rid = f"ckpt-{tid}-{sha[:8]}", f"rev-{tid}-{sha[:8]}"
         q.record_attempt_outcome(
-            tid, candidate_sha=sha, checkpoint_id=cid, evidence_root=ev_root,
-            review_id=rid, review_verdict="PASS", gate_verdict="PASS",
+            tid,
+            candidate_sha=sha,
+            checkpoint_id=cid,
+            evidence_root=ev_root,
+            review_id=rid,
+            review_verdict="PASS",
+            gate_verdict="PASS",
         )
     print(json.dumps(out.receipt.model_dump(mode="json")))
     raise SystemExit(0 if out.agent_result.status == AgentStatus.COMPLETED else 1)
-
-
-

@@ -286,9 +286,7 @@ def _make_gate_decision(
             CriterionResult(
                 criterion_id="AC-01",
                 status=(
-                    CriterionStatus.PASS
-                    if verdict == ReviewVerdict.PASS
-                    else CriterionStatus.FAIL
+                    CriterionStatus.PASS if verdict == ReviewVerdict.PASS else CriterionStatus.FAIL
                 ),
                 evidence=["test.log"],
                 notes="Checked",

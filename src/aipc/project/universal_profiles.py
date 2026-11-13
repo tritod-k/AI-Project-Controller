@@ -162,9 +162,7 @@ class UniversalProjectProfile(CanonicalRecord):
             if pattern not in self.default_forbidden_globs
         ]
         if missing_globs:
-            raise ValueError(
-                "default_forbidden_globs must include: " + ", ".join(missing_globs)
-            )
+            raise ValueError("default_forbidden_globs must include: " + ", ".join(missing_globs))
 
         if self.stack_type == "google_apps_script_offline_mock":
             disclaimer = self.safety_policy.simulation_disclaimer

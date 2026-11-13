@@ -38,4 +38,3 @@ def __getattr__(name: str) -> Any:
 
         return getattr(universal_profiles, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

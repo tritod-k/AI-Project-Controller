@@ -4,28 +4,28 @@
 AI Project Controller
 
 ## Blueprint Version
-1.6 (AIPC 2.0 Roadmap v0.5 — Milestone A Merged via PR #5; Milestone B `B01`–`B03` Implemented & Verified)
+1.7 (AIPC 2.0 Roadmap v0.6 — Milestone B Merged via PR #6; Milestone C C01–C03 & Hydrogen Worker Implemented & Verified)
 
 ## Current Phase
-AIPC 2.0 — Milestone B (`B01`–`B03`: Autonomous Multi-Provider Development Loop)
+AIPC 2.0 — Milestone C (C01–C03: Universal Project Support, End-to-End Automation & Self-Development Dogfooding)
 
 ## Status
-AWAITING_HUMAN_COMMANDER_MERGE_REVIEW (Milestone B `B01`–`B03` implemented and verified on `gemini/aipc-2.0-milestone-b`; preserving all original `B01`–`B04` acceptance and exit criteria)
+AWAITING_HUMAN_COMMANDER_MERGE_REVIEW (Milestone C `C01`–`C03` and Gemini 4 Hydrogen subscription worker integration implemented and verified on `gemini/aipc-2.0-milestone-c`)
 
 ## Current Attempt
-Milestone B Attempt 01 (`gemini/aipc-2.0-milestone-b`)
+Milestone C Attempt 01 (`gemini/aipc-2.0-milestone-c`)
 
 ## Phase Gate
-MILESTONE_B_READY_FOR_REVIEW (Final merge authority belongs exclusively to Human Commander)
+MILESTONE_C_READY_FOR_REVIEW (Final merge authority belongs exclusively to Human Commander)
 
 ## Last Stable Checkpoint
-- `master` baseline: `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e` (Milestone A merge PR #5 from `65f1fc5` / `12efdcc`, following Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
+- `master` baseline: `849c866` (Milestone B merge PR #6, following Milestone A merge PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`, Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
 
 ## Current Branch / Worktree
-`gemini/aipc-2.0-milestone-b`, `H:/000ProjectCode/AI_Project_Controller`.
+`gemini/aipc-2.0-milestone-c`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-`ff1fa4a58f5a21fb71897afb55ce557a3d424b2e` (`Merge pull request #5 from tritod-k/gemini/aipc-2.0-milestone-a`).
+`eae7689` (`C03` — Trusted Acceptance Harness & Self-Development Dogfooding; following `2c0a84b` `C02`, `2df59c7` `C01`, `4db2134` / `4c1aab3` Gemini 4 Hydrogen worker integration, and `f997783` targeted 2-tier inline Python execution policy).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -55,16 +55,17 @@ MILESTONE_B_READY_FOR_REVIEW (Final merge authority belongs exclusively to Human
 - Phase 23 — Operational CLI & Multi-Phase Live Validation: PASS (Commander final merge authorization; PR #3 merged into `master` at `83578a4e56b4e549d33e8c941ea1679992ab4ebc`; post-merge CI `success`).
 - Phase 24 — Self-Development Automation & Independent Reviewer Integration: PASS (Commander final merge authorization; PR #4 merged into `master` at `26f455fd40d7728d99dcf5494c1cad9353e45988`; 380 regression tests PASS; live Antigravity Flash subagents & live Codex subscription Independent Reviewer qualified in sanitized child environments).
 - AIPC 2.0 — Milestone A (`A01`–`A04`: Subscription-Only Multi-Provider Foundations): PASS (Commander final merge authorization; PR #5 merged into `master` at `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`; 895 + 343 passing tests, live subscription-authenticated independent review `rev-aipc2-milestone-a-12efdcc7` `PASS`).
-- AIPC 2.0 — Milestone B (`B01`–`B03`: Autonomous Multi-Provider Development Loop): READY FOR COMMANDER MERGE REVIEW (`B01` Antigravity Subscription Worker Automation, `B02` Independent Subscription Reviewer Gate, and `B03` Repair Loop, Retry Governance & Quota-Aware Recovery implemented and verified on `gemini/aipc-2.0-milestone-b` at `76a5b5748424e627a241fd8475646c855afacafd`; live cross-provider Codex `read-only` subscription independent review verdict `PASS` with confidence `0.95`; 14 B01–B03 unit/boundary tests + 65 Milestone A/B/Phase 24 regression tests + 122 review/consensus tests + 31 Antigravity/Docker container isolation tests PASS).
+- AIPC 2.0 — Milestone B (`B01`–`B03`: Autonomous Multi-Provider Development Loop): PASS (Commander final merge authorization; PR #6 merged into `master` at `849c866`; live cross-provider Codex `read-only` subscription independent review verdict `PASS` with confidence `0.95`; 14 B01–B03 unit/boundary tests + 65 Milestone A/B/Phase 24 regression tests + 122 review/consensus tests + 31 Antigravity/Docker container isolation tests PASS).
+- AIPC 2.0 — Milestone C (`C01`–`C03`: Universal Project Support, End-to-End Automation & Self-Development Dogfooding): READY FOR COMMANDER MERGE REVIEW (`f997783` targeted 2-tier inline Python execution policy; `4c1aab3` / `4db2134` `agy 1.5.8` & `gemini-4-hydrogen-medium` subscription worker integration; `C01` `2df59c7` `15 passed`; `C02` `2c0a84b` `7 passed`; `C03` `eae7689` `13 passed`; `1133 passed` full CI regression, `ruff check` and `ruff format --check` clean, domain and project schemas verified).
 
 ## Documentation Alignment
-COMPLETED — Reconciled Milestone B (`B01`–`B03`) scope preserving all original `B01`–`B04` acceptance and exit criteria in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (v0.5), `MASTER_PLAN.md` Section 38.5, `CURRENT_STATE.md`, `docs/AIPC_2_0_MILESTONE_B_EVIDENCE.md`, and `docs/AIPC_2_0_MILESTONE_B_COMPLETION_REPORT.md`.
+COMPLETED — Updated Milestone C (`C01`–`C03`) and Gemini 4 Hydrogen subscription worker integration records in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (v0.6), `CURRENT_STATE.md`, `docs/AIPC_2_0_MILESTONE_C_EVIDENCE.md`, and `docs/AIPC_2_0_MILESTONE_C_COMPLETION_REPORT.md` (leaving `MASTER_PLAN.md` untouched).
 
 ## Authorized Current Phase
-AIPC 2.0 — Milestone B (`B01` Antigravity / Gemini Subscription Worker Automation, `B02` Independent Subscription Reviewer Gate, `B03` Repair Loop, Retry Governance & Quota-Aware Recovery) on branch `gemini/aipc-2.0-milestone-b`. Release classification remains `EXPERIMENTAL / SUPERVISED` (`UNATTENDED_PRODUCTION = NO-GO`).
+AIPC 2.0 — Milestone C (`C01`–`C03`: Universal Project Support, End-to-End Automation & Self-Development Dogfooding) on branch `gemini/aipc-2.0-milestone-c`. Release classification remains `EXPERIMENTAL / SUPERVISED` (`UNATTENDED_PRODUCTION = NO-GO`).
 
 ## Next Authorized Phase
-None beyond Milestone B (`B01`–`B03`) — Milestones C and D remain unauthorized until Milestone B is independently reviewed and accepted by the Human Commander.
+None beyond Milestone C (`C01`–`C03`) — Milestone D (`D01`–`D03`) remains unauthorized until Milestone C is independently reviewed and accepted by the Human Commander.
 
 ---
 
@@ -163,18 +164,18 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
    - **Correction B (Accurate Acceptance Reporting & Deterministic Reviewer Tests)**: Refined `_acceptance_report()` to report `explicit_rules_evaluated`, `verification_scope`, and `semantic_limitation` without overstating independence. Explicitly documented that `file_changed` verifies Git modifications (not semantic functional correctness) and `tests` verifies suite pass counts (not named test isolation). Added 5 deterministic Reviewer tests in `tests/review/test_reviewer.py` proving: (1) missing/unmodified files prevent Phase Gate PASS, (2) missing artifacts do not PASS, (3) failed tests prevent Reviewer PASS, (4) generic passing tests alone do not establish functional completeness without explicit criterion evaluation, and (5) valid explicit rules are evaluated by the canonical Reviewer. Documented semantic acceptance limitations and proposed bounded acceptance test harness.
 
 ## Tests
-- **Local `.venv` Suites**:
-  - `tests/review/test_reviewer.py`: `45 passed` (including 5 new Correction B deterministic tests).
-  - `tests/integration/test_cli.py`: `21 passed` (including `test_acceptance_rules_guide_example_loads_successfully`).
-  - `tests/gemini/test_antigravity_transport.py`: `31 passed` (unit + contract + host live Docker security qualification).
-  - `tests/routing/test_router.py`: `34 passed`.
-  - `tests/controller/test_contracts.py`: `15 passed`.
-  - `tests/contract/`: `98 passed`.
-  - `ruff check src/ tests/ docs/` & `ruff format --check src/ tests/ docs/`: `0 errors`, clean (`283 files already formatted`).
+- **Milestone C & Hydrogen Worker Suites (`gemini/aipc-2.0-milestone-c`)**:
+  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `26 passed`.
+  - `tests/unit/test_c01_universal_project_profiles.py`: `15 passed` (`2df59c7`).
+  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `7 passed` (`2c0a84b`).
+  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `13 passed` (`eae7689`).
+  - **Full CI Regression**: `1133 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
+  - `ruff check` and `ruff format --check`: clean (`0 errors`).
+  - Domain and project JSON schemas: verified (`Checked 4 canonical schemas`, `Checked 2 project schemas`).
 
 ## Required Fixes / Remaining Work
-- None — Phase 23 accepted and merged into master via PR #3 (`83578a4e56b4e549d33e8c941ea1679992ab4ebc`).
-- Full live Codex-to-Gemini handoff (`FULL_LIVE_CODEX_TO_GEMINI_HANDOFF_DEFERRED`) remains deferred until weekly Codex subscription quota resets.
+- None for Milestone C offline/unit/CI regression scope — Milestone C (`gemini/aipc-2.0-milestone-c`) is ready for Human Commander merge review.
+- Milestone D (`D01`–`D03`) remains unauthorized.
 
 ## Warnings / Known Issues
 - `CONTAINER_LIVE_VERIFIED` requires a running Docker Desktop / Linux Engine daemon and local `aipc-verify:py313-v1` image on the host machine; if Docker is stopped, `verification_isolation="container"` fails closed (`BLOCKED`).
@@ -183,11 +184,11 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 - Semantic code acceptance is bounded by structural verification (file modifications, artifact collections, aggregate test execution); full per-criterion behavioral isolation is a documented future consideration.
 
 ## Recovery Notes
-- Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`26f455fd40d7728d99dcf5494c1cad9353e45988`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`, `gemini/phase-24-self-development`) are preserved intact.
+- Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`849c866`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`, `gemini/phase-24-self-development`, `gemini/aipc-2.0-milestone-a`, `gemini/aipc-2.0-milestone-b`) are preserved intact.
 
 ## Next Action
-Submit `gemini/aipc-2.0-milestone-b` Pull Request (`B01`–`B03`) with live independent subscription review receipt for Human Commander review and merge decision. Do not start Milestone C (`C01`–`C03`) or Milestone D (`D01`–`D03`) without explicit Human Commander authorization.
+Submit `gemini/aipc-2.0-milestone-c` Pull Request (`C01`–`C03` + Gemini 4 Hydrogen subscription worker integration) for Human Commander review and merge decision. Do not start Milestone D (`D01`–`D03`) without explicit Human Commander authorization.
 
 ## Timestamp
-2026-11-12T10:30:00+07:00
+2026-11-13T21:10:00+07:00
 

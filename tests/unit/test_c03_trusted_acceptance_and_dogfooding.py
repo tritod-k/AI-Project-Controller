@@ -172,9 +172,7 @@ def test_deleting_test_file_fails_closed_with_reward_hacking(tmp_path: Path) -> 
         workspace=candidate_root,
         task_id="task-c03-del",
         candidate_sha=_CANDIDATE_SHA,
-        changed_files=(
-            FileChange(path="tests/unit/test_old.py", change_type=ChangeType.DELETED),
-        ),
+        changed_files=(FileChange(path="tests/unit/test_old.py", change_type=ChangeType.DELETED),),
         tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
     )
 
