@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -59,6 +60,7 @@ from aipc.hardening.env_isolation import (
 from aipc.hardening.secrets import assert_no_secrets
 from aipc.normalization.validation import validate_agent_result
 from aipc.recovery.models import ProviderCondition
+from aipc.review.context import digest
 from aipc.review.llm.subscription_transports import snapshot_candidate_workspace
 
 _NL = chr(10)
@@ -312,10 +314,33 @@ def _run_git(
     )
 
 
+def _terminate_pid_tree(pid: int | None, env: Mapping[str, str]) -> None:
+    if pid is None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                env=dict(env),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            pass
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
 def _default_validation_command_runner(
     command: str,
     worktree: Path,
     env: Mapping[str, str],
+    timeout_seconds: float | None = None,
 ) -> WorkerCommandReceipt:
     t0 = time.monotonic()
     argv = shlex.split(command, posix=False)
@@ -325,21 +350,31 @@ def _default_validation_command_runner(
         else token
         for token in argv
     ]
-    res = subprocess.run(
+    proc = subprocess.Popen(
         cleaned_argv,
         cwd=str(worktree),
         env=dict(env),
-        capture_output=True,
-        text=True,
         stdin=subprocess.DEVNULL,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=(os.name != "nt"),
     )
+    try:
+        stdout_text, stderr_text = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_pid_tree(proc.pid, env)
+        proc.communicate()
+        raise
+    finally:
+        if proc.poll() is None or os.name != "nt":
+            _terminate_pid_tree(proc.pid, env)
     elapsed_ms = max(0, int((time.monotonic() - t0) * 1000))
     return WorkerCommandReceipt(
         command=command,
-        exit_code=int(res.returncode),
-        stdout=res.stdout or "",
-        stderr=res.stderr or "",
+        exit_code=int(proc.returncode or 0),
+        stdout=stdout_text or "",
+        stderr=stderr_text or "",
         duration_ms=elapsed_ms,
         sanitized_env=True,
     )
@@ -362,18 +397,7 @@ def _terminate_worker_process_tree(
     proc: asyncio.subprocess.Process,
     env: Mapping[str, str],
 ) -> None:
-    if proc.pid is not None and os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                env=dict(env),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except OSError:
-            pass
+    _terminate_pid_tree(proc.pid, env)
     if proc.returncode is None:
         try:
             proc.kill()
@@ -421,6 +445,7 @@ async def invoke_antigravity_cli_worker(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=(os.name != "nt"),
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
@@ -1278,6 +1303,8 @@ def run_cli_worker_job(
     from aipc.controller.task_queue import PersistentTaskQueue, QueuedTaskStatus
     from aipc.domain.enums import ReviewVerdict
     from aipc.recovery.models import RecoveryDecision
+    from aipc.review.context import ReviewContext
+    from aipc.review.gate import PhaseGate
     from aipc.review.subscription_reviewer_gate import SubscriptionReviewerGateDecision
 
     job = json.loads(Path(job_path).read_text(encoding="utf-8"))
@@ -1347,6 +1374,23 @@ def run_cli_worker_job(
                     Path(gate_path).read_text(encoding="utf-8")
                 )
                 sha = out.receipt.candidate_commit_sha
+                context_ok = True
+                ctx_path = job.get("review_context_path")
+                if ctx_path and gate_dec.bound_review is not None:
+                    ctx = ReviewContext.model_validate_json(
+                        Path(ctx_path).read_text(encoding="utf-8")
+                    )
+                    context_ok = (
+                        ctx.task.task_id == tid
+                        and ctx.checkpoint.git_commit == sha
+                        and PhaseGate().evaluate(gate_dec.bound_review, ctx)
+                        == gate_dec.phase_gate_decision
+                    )
+                strict_agent_digest_ok = not job.get("require_strict_agent_result_digest") or (
+                    gate_dec.bound_review is not None
+                    and gate_dec.bound_review.provenance.agent_result_digest
+                    == digest(out.agent_result)
+                )
                 verified_pass = (
                     gate_dec.task_id == tid
                     and gate_dec.candidate_commit_sha == sha
@@ -1354,8 +1398,10 @@ def run_cli_worker_job(
                     and gate_dec.gate_outcome == "PASS"
                     and gate_dec.review_result.verdict == ReviewVerdict.PASS
                     and gate_dec.review_result.task_id == tid
+                    and gate_dec.review_result.next_phase_allowed is True
                     and gate_dec.bound_review is not None
                     and gate_dec.bound_review.review == gate_dec.review_result
+                    and gate_dec.bound_review.review_digest == digest(gate_dec.review_result)
                     and gate_dec.bound_review.review.review_id == gate_dec.review_result.review_id
                     and gate_dec.bound_review.review.task_id == tid
                     and gate_dec.bound_review.provenance.task_id == tid
@@ -1365,6 +1411,7 @@ def run_cli_worker_job(
                     and gate_dec.bound_review.provenance.git_commit == sha
                     and gate_dec.phase_gate_decision is not None
                     and gate_dec.phase_gate_decision.verdict == ReviewVerdict.PASS
+                    and gate_dec.phase_gate_decision.next_phase_allowed is True
                     and gate_dec.phase_gate_decision.task_id == tid
                     and gate_dec.phase_gate_decision.project_id == expected_project_id
                     and gate_dec.phase_gate_decision.phase_id == expected_phase_id
@@ -1374,9 +1421,17 @@ def run_cli_worker_job(
                     and gate_dec.session_audit.candidate_commit_sha == sha
                     and gate_dec.session_audit.read_only_sandbox_enforced
                     and not gate_dec.session_audit.inherited_chat_history
+                    and gate_dec.session_audit.rejection_code is None
                     and (
                         gate_dec.session_audit.independence_level
                         in ("cross_provider", "reduced_independence")
+                    )
+                    and (
+                        gate_dec.session_audit.independence_level != "cross_provider"
+                        or (
+                            gate_dec.session_audit.reviewer_provider_family
+                            != gate_dec.session_audit.worker_provider_family
+                        )
                     )
                     and not gate_dec.session_audit.workspace_mutated
                     and (
@@ -1392,6 +1447,8 @@ def run_cli_worker_job(
                         out.receipt.session_id
                         not in (None, gate_dec.session_audit.reviewer_session_id)
                     )
+                    and context_ok
+                    and strict_agent_digest_ok
                 )
                 if not verified_pass:
                     raise ControllerError(

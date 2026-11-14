@@ -270,11 +270,27 @@ class SubscriptionReviewerGateDecision(CanonicalRecord):
             if (
                 self.review_result.verdict != ReviewVerdict.PASS
                 or self.review_result.task_id != self.task_id
+                or self.review_result.next_phase_allowed is not True
+                or len(self.review_result.failed_criteria) != 0
+                or len(self.review_result.required_fixes) != 0
+                or any(c.status == "FAIL" for c in self.review_result.criteria)
             ):
                 raise ValueError("PASS gate_outcome requires review_result PASS matching task_id")
             if (
+                self.review_result.metadata.get("live_review_status", "VERIFIED") != "VERIFIED"
+                or self.review_result.metadata.get(
+                    "candidate_commit_sha",
+                    self.candidate_commit_sha,
+                )
+                != self.candidate_commit_sha
+            ):
+                raise ValueError(
+                    "PASS gate_outcome requires verified live_review_status and matching commit SHA"
+                )
+            if (
                 self.bound_review.review != self.review_result
                 or self.bound_review.review.verdict != ReviewVerdict.PASS
+                or self.bound_review.review_digest != digest(self.review_result)
             ):
                 raise ValueError(
                     "PASS gate_outcome requires bound_review.review == review_result with PASS"
@@ -292,6 +308,11 @@ class SubscriptionReviewerGateDecision(CanonicalRecord):
                 or pg.project_id != prov.project_id
                 or pg.phase_id != prov.phase_id
                 or pg.attempt != prov.attempt
+                or pg.next_phase_allowed is not True
+                or pg.repair_required is not False
+                or pg.human_intervention_required is not False
+                or len(pg.failed_criteria) != 0
+                or len(pg.required_fixes) != 0
             ):
                 raise ValueError(
                     "PASS gate_outcome requires PhaseGateDecision matching review and provenance"
@@ -309,8 +330,24 @@ class SubscriptionReviewerGateDecision(CanonicalRecord):
                 or audit.reviewer_binding_id == audit.worker_agent_id
                 or audit.reviewer_provider_id == audit.worker_agent_id
                 or audit.reviewer_session_id in (audit.worker_session_id, audit.planner_session_id)
+                or audit.rejection_code is not None
+                or audit.rejection_reason is not None
             ):
                 raise ValueError("PASS gate_outcome failed SessionIsolationAuditReceipt validation")
+            if audit.independence_level == "cross_provider" and (
+                audit.reduced_independence is not False
+                or audit.reviewer_provider_family == audit.worker_provider_family
+            ):
+                raise ValueError(
+                    "PASS gate_outcome cross_provider audit requires distinct provider families"
+                )
+            if (
+                audit.independence_level == "reduced_independence"
+                and audit.reduced_independence is not True
+            ):
+                raise ValueError(
+                    "PASS gate_outcome reduced_independence requires reduced_independence=True"
+                )
             if self.session_audit.high_risk_escalation_required:
                 raise ValueError(
                     "High-risk same-provider review requires HUMAN_REVIEW_REQUIRED escalation"

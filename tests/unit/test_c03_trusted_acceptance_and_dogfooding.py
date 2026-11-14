@@ -16,6 +16,7 @@ from aipc.controller.self_dev_runner import (
 )
 from aipc.domain.enums import ChangeType, CriterionStatus, ReviewVerdict
 from aipc.domain.models import CriterionResult, FileChange, ReviewResult, TestSummary
+from aipc.review.context import digest
 from aipc.review.models import BoundReview, GateAction, PhaseGateDecision, ReviewProvenance
 from aipc.review.subscription_reviewer_gate import (
     SessionIsolationAuditReceipt,
@@ -96,6 +97,7 @@ def _setup_candidate_workspace(tmp_path: Path) -> tuple[Path, Path, TrustedHarne
     (stable_root / "src" / "aipc" / "__init__.py").write_text("", encoding="utf-8")
     _init_git_repo(stable_root)
     (candidate_root / "src" / "aipc" / "review").mkdir(parents=True)
+    (candidate_root / "src" / "aipc" / "__init__.py").write_text("", encoding="utf-8")
     (candidate_root / "tests" / "trusted").mkdir(parents=True)
     (candidate_root / "tests" / "unit").mkdir(parents=True)
 
@@ -113,6 +115,8 @@ def _setup_candidate_workspace(tmp_path: Path) -> tuple[Path, Path, TrustedHarne
         "def test_feature_behavior() -> None:\n    result = 10 * 2\n    assert result == 20\n",
         encoding="utf-8",
     )
+
+    _init_git_repo(candidate_root)
 
     manifest = build_trusted_harness_manifest(
         project_id="aipc",
@@ -331,7 +335,7 @@ def _make_valid_gate_decision(
     bound_review = BoundReview(
         review=review_result,
         context_digest=digest_zero,
-        review_digest=digest_zero,
+        review_digest=digest(review_result),
         authority="codex",
         provenance=ReviewProvenance(
             project_id="aipc",
@@ -395,11 +399,12 @@ def _make_valid_gate_decision(
 
 def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path: Path) -> None:
     stable_root, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
+    cand_sha = _git_head_sha(candidate_root)
     config = StableCandidateConfig(
         stable_root=str(stable_root),
         candidate_worktree_root=str(candidate_root),
         pinned_stable_sha=_git_head_sha(stable_root),
-        candidate_sha=_CANDIDATE_SHA,
+        candidate_sha=cand_sha,
         verification_isolation="isolated_subprocess",
         allow_auto_promote_stable=False,
     )
@@ -411,7 +416,7 @@ def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path:
         status_code="OK",
     )
     verification_receipt = CandidateVerificationReceipt(
-        candidate_sha=_CANDIDATE_SHA,
+        candidate_sha=cand_sha,
         isolation_mode="isolated_subprocess",
         import_origin_verified=True,
         import_origin_report=import_report,
@@ -435,7 +440,10 @@ def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path:
         verification_receipt=verification_receipt,
         review_verdict=ReviewVerdict.PASS,
         gate_verdict="PASS",
-        reviewer_gate_decision=_make_valid_gate_decision("task-c03-dogfood"),
+        reviewer_gate_decision=_make_valid_gate_decision(
+            "task-c03-dogfood",
+            candidate_sha=cand_sha,
+        ),
     )
 
     assert bundle.dogfooding_passed is True
@@ -633,10 +641,35 @@ def test_missing_declared_test_file_fails_closed(tmp_path: Path) -> None:
     assert any(f.rule_id == "MISSING_DECLARED_TEST_FILE" for f in evaluation.findings)
 
 
+def _make_valid_verification_receipt(
+    candidate_root: Path,
+    candidate_sha: str,
+) -> CandidateVerificationReceipt:
+    import_report = CandidateImportOriginReport(
+        verified=True,
+        expected_candidate_src=str(candidate_root / "src" / "aipc"),
+        actual_imported_file=str(candidate_root / "src" / "aipc" / "__init__.py"),
+        leaked_stable_paths=(),
+        status_code="OK",
+    )
+    return CandidateVerificationReceipt(
+        candidate_sha=candidate_sha,
+        isolation_mode="isolated_subprocess",
+        import_origin_verified=True,
+        import_origin_report=import_report,
+        sanitized_env_verified=True,
+        exit_code=0,
+        passed=True,
+        status_code="OK",
+        summary="Isolated candidate tests passed",
+    )
+
+
 def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
     _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
     manifest = base_manifest.model_copy(update={"required_criterion_ids": ("AC-01", "AC-02")})
     validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
 
     eval_missing = validator.evaluate_candidate(
         manifest=manifest,
@@ -648,6 +681,7 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
         ),
         tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
         criterion_results={"AC-01": True},
+        verification_receipt=receipt,
     )
     assert eval_missing.passed is False
     assert eval_missing.rejection_code == REWARD_HACKING_DETECTED
@@ -676,10 +710,43 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
                 notes="failed",
             ),
         ),
+        verification_receipt=receipt,
     )
     assert eval_failed.passed is False
     assert eval_failed.rejection_code == REWARD_HACKING_DETECTED
     assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in eval_failed.findings)
+
+
+def test_required_criterion_without_verification_receipt_fails_closed(tmp_path: Path) -> None:
+    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
+    manifest = base_manifest.model_copy(update={"required_criterion_ids": ("AC-01",)})
+    validator = TrustedAcceptanceHarnessValidator()
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-crit-no-receipt",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=[f"pytest:{_CANDIDATE_SHA}"],
+                notes="passed",
+            ),
+        ),
+        verification_receipt=None,
+    )
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(
+        f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" and f.file_path == "verification_receipt"
+        for f in evaluation.findings
+    )
 
 
 def _make_clean_dogfood_inputs(
@@ -691,11 +758,12 @@ def _make_clean_dogfood_inputs(
     CandidateVerificationReceipt,
 ]:
     stable_root, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
+    cand_sha = _git_head_sha(candidate_root)
     config = StableCandidateConfig(
         stable_root=str(stable_root),
         candidate_worktree_root=str(candidate_root),
         pinned_stable_sha=_git_head_sha(stable_root),
-        candidate_sha=_CANDIDATE_SHA,
+        candidate_sha=cand_sha,
         verification_isolation="isolated_subprocess",
         allow_auto_promote_stable=False,
     )
@@ -707,7 +775,7 @@ def _make_clean_dogfood_inputs(
         status_code="OK",
     )
     verification_receipt = CandidateVerificationReceipt(
-        candidate_sha=_CANDIDATE_SHA,
+        candidate_sha=cand_sha,
         isolation_mode="isolated_subprocess",
         import_origin_verified=True,
         import_origin_report=import_report,
@@ -756,7 +824,7 @@ def test_dogfooding_rejects_import_origin_from_other_workspace(tmp_path: Path) -
         status_code="OK",
     )
     other_receipt = CandidateVerificationReceipt(
-        candidate_sha=_CANDIDATE_SHA,
+        candidate_sha=config.candidate_sha,
         isolation_mode="isolated_subprocess",
         import_origin_verified=True,
         import_origin_report=other_import_report,
@@ -840,7 +908,7 @@ def test_dogfooding_rejects_mismatched_reviewer_gate_decision(tmp_path: Path) ->
     bound_review = BoundReview(
         review=review_result,
         context_digest=digest_zero,
-        review_digest=digest_zero,
+        review_digest=digest(review_result),
         authority="codex",
         provenance=ReviewProvenance(
             project_id="aipc",
@@ -963,6 +1031,7 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
     tmp_path: Path,
 ) -> None:
     config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    cand_sha = config.candidate_sha
     digest_zero = "0" * 64
     task_id = "task-c03-dogfood"
     review_result = ReviewResult(
@@ -980,7 +1049,7 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
     bound_review = BoundReview(
         review=review_result,
         context_digest=digest_zero,
-        review_digest=digest_zero,
+        review_digest=digest(review_result),
         authority="codex",
         provenance=ReviewProvenance(
             project_id="aipc",
@@ -989,7 +1058,7 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
             attempt=1,
             task_id=task_id,
             attempt_checkpoint_id="cp-1",
-            git_commit=_CANDIDATE_SHA,
+            git_commit=cand_sha,
             agent_result_digest=digest_zero,
             evidence_digest=digest_zero,
         ),
@@ -1014,15 +1083,15 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
         SubscriptionReviewerGateDecision(
             gate_outcome="PASS",
             task_id=task_id,
-            candidate_commit_sha=_CANDIDATE_SHA,
-            reviewed_commit_sha=_CANDIDATE_SHA,
+            candidate_commit_sha=cand_sha,
+            reviewed_commit_sha=cand_sha,
             review_result=review_result,
             bound_review=bound_review,
             phase_gate_decision=phase_gate,
             session_audit=SessionIsolationAuditReceipt(
                 audit_id="audit-1",
                 task_id=task_id,
-                candidate_commit_sha=_CANDIDATE_SHA,
+                candidate_commit_sha=cand_sha,
                 worker_agent_id="worker-1",
                 worker_provider_family="google_antigravity",
                 reviewer_binding_id="rev-bind-1",
@@ -1044,15 +1113,15 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
     gate_decision = SubscriptionReviewerGateDecision.model_construct(
         gate_outcome="PASS",
         task_id=task_id,
-        candidate_commit_sha=_CANDIDATE_SHA,
-        reviewed_commit_sha=_CANDIDATE_SHA,
+        candidate_commit_sha=cand_sha,
+        reviewed_commit_sha=cand_sha,
         review_result=review_result,
         bound_review=bound_review,
         phase_gate_decision=phase_gate,
         session_audit=SessionIsolationAuditReceipt(
             audit_id="audit-1",
             task_id=task_id,
-            candidate_commit_sha=_CANDIDATE_SHA,
+            candidate_commit_sha=cand_sha,
             worker_agent_id="worker-1",
             worker_provider_family="google_antigravity",
             reviewer_binding_id="rev-bind-1",
@@ -1144,7 +1213,10 @@ def test_dogfooding_rejects_forged_verification_receipt_invariants(
         verification_receipt=forged_receipt,
         review_verdict=ReviewVerdict.PASS,
         gate_verdict="PASS",
-        reviewer_gate_decision=_make_valid_gate_decision("task-c03-forged-receipt"),
+        reviewer_gate_decision=_make_valid_gate_decision(
+            "task-c03-forged-receipt",
+            candidate_sha=config.candidate_sha,
+        ),
     )
 
     assert bundle.dogfooding_passed is False
@@ -1167,7 +1239,7 @@ def test_dogfooding_rejects_actual_imported_file_outside_candidate_src_aipc(
         status_code="OK",
     )
     receipt = CandidateVerificationReceipt(
-        candidate_sha=_CANDIDATE_SHA,
+        candidate_sha=config.candidate_sha,
         isolation_mode="isolated_subprocess",
         import_origin_verified=True,
         import_origin_report=bad_import_report,
@@ -1191,7 +1263,10 @@ def test_dogfooding_rejects_actual_imported_file_outside_candidate_src_aipc(
         verification_receipt=receipt,
         review_verdict=ReviewVerdict.PASS,
         gate_verdict="PASS",
-        reviewer_gate_decision=_make_valid_gate_decision("task-c03-bad-pkg-root"),
+        reviewer_gate_decision=_make_valid_gate_decision(
+            "task-c03-bad-pkg-root",
+            candidate_sha=config.candidate_sha,
+        ),
     )
 
     assert bundle.dogfooding_passed is False
@@ -1215,6 +1290,37 @@ def test_dogfooding_rejects_actual_imported_file_outside_candidate_src_aipc(
             "    except Exception:\n"
             "        return\n"
             "    assert 1 + 1 == 2\n"
+        ),
+        (
+            "def test_after_for_else_return() -> None:\n"
+            "    for _ in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        return\n"
+            "    assert 1 + 1 == 2\n"
+        ),
+        (
+            "def test_after_while_false_else_return() -> None:\n"
+            "    while False:\n"
+            "        pass\n"
+            "    else:\n"
+            "        return\n"
+            "    assert 1 + 1 == 2\n"
+        ),
+        (
+            "def test_after_while_true_return() -> None:\n"
+            "    while True:\n"
+            "        return\n"
+            "    assert 1 + 1 == 2\n"
+        ),
+        (
+            "def test_dead_narrow_except_after_broad() -> None:\n"
+            "    try:\n"
+            "        return\n"
+            "    except Exception:\n"
+            "        return\n"
+            "    except ValueError:\n"
+            "        assert 1 + 1 == 2\n"
         ),
     ],
 )
@@ -1247,6 +1353,7 @@ def test_required_criterion_pass_without_evidence_fails_closed(tmp_path: Path) -
     _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
     manifest = base_manifest.model_copy(update={"required_criterion_ids": ("AC-01",)})
     validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
 
     evaluation = validator.evaluate_candidate(
         manifest=manifest,
@@ -1265,8 +1372,83 @@ def test_required_criterion_pass_without_evidence_fails_closed(tmp_path: Path) -
                 notes="claimed pass without evidence",
             ),
         ),
+        verification_receipt=receipt,
     )
 
     assert evaluation.passed is False
     assert evaluation.rejection_code == REWARD_HACKING_DETECTED
     assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+@pytest.mark.parametrize("failure_mode", ["missing_git", "dirty_worktree", "sha_mismatch"])
+def test_dogfooding_candidate_git_integrity_fails_closed(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    cand_path = Path(config.candidate_worktree_root)
+    if failure_mode == "missing_git":
+        no_git_cand = tmp_path / "candidate_without_git"
+        (no_git_cand / "src" / "aipc" / "review").mkdir(parents=True)
+        (no_git_cand / "src" / "aipc" / "__init__.py").write_text("", encoding="utf-8")
+        (no_git_cand / "tests" / "trusted").mkdir(parents=True)
+        (no_git_cand / "tests" / "unit").mkdir(parents=True)
+        (no_git_cand / "src" / "aipc" / "review" / "gate.py").write_text(
+            "def evaluate_gate() -> bool:\n    return True\n",
+            encoding="utf-8",
+        )
+        (no_git_cand / "tests" / "trusted" / "test_contract.py").write_text(
+            "def test_trusted_contract() -> None:\n    assert 2 + 2 == 4\n",
+            encoding="utf-8",
+        )
+        (no_git_cand / "tests" / "unit" / "test_feature.py").write_text(
+            "def test_feature_behavior() -> None:\n    result = 10 * 2\n    assert result == 20\n",
+            encoding="utf-8",
+        )
+        manifest = build_trusted_harness_manifest(
+            project_id="aipc",
+            milestone_id="milestone-c",
+            workspace=no_git_cand,
+            protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+            manifest_id="manifest-c03-nogit",
+        )
+        import_report = CandidateImportOriginReport(
+            verified=True,
+            expected_candidate_src=str(no_git_cand / "src" / "aipc"),
+            actual_imported_file=str(no_git_cand / "src" / "aipc" / "__init__.py"),
+            leaked_stable_paths=(),
+            status_code="OK",
+        )
+        verification_receipt = verification_receipt.model_copy(
+            update={"import_origin_report": import_report}
+        )
+        config = config.model_copy(update={"candidate_worktree_root": str(no_git_cand)})
+    elif failure_mode == "dirty_worktree":
+        (cand_path / "untracked.txt").write_text("dirty", encoding="utf-8")
+    else:
+        wrong_sha = "f" * 40
+        config = config.model_copy(update={"candidate_sha": wrong_sha})
+        verification_receipt = verification_receipt.model_copy(update={"candidate_sha": wrong_sha})
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-cand-git-fail",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=_make_valid_gate_decision(
+            "task-c03-cand-git-fail",
+            candidate_sha=config.candidate_sha,
+        ),
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH" in bundle.blockers

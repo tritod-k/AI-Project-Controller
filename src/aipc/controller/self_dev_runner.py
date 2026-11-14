@@ -267,14 +267,15 @@ def verify_candidate_import_origin(
         except OSError:
             continue
 
+    c_aipc = (c_root / "src" / "aipc").resolve()
     if (
         _is_stable_source_entry(actual_file, s_root)
-        or not actual_file.is_relative_to(c_src)
+        or not actual_file.is_relative_to(c_aipc)
         or leaked
     ):
         raise ControllerError(
             f"{IMPORT_ORIGIN_MISMATCH}: imported aipc from '{actual_file}' "
-            f"(expected under '{c_src}', leaked_stable_paths={leaked})"
+            f"(expected under '{c_aipc}', leaked_stable_paths={leaked})"
         )
 
     return CandidateImportOriginReport(
@@ -413,6 +414,8 @@ class SafeSelfDevelopmentRunner:
             "-q",
             "-o",
             "cache_dir=/tmp/.pytest_cache",
+            "-o",
+            "pythonpath=/workspace/src",
             *pytest_targets,
         ]
         assert_argv_no_credentials(argv)

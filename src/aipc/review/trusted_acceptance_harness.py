@@ -119,6 +119,7 @@ class TrustedHarnessManifest(CanonicalRecord):
     milestone_id: NonBlank
     protected_harness_globs: tuple[NonBlank, ...] = _DEFAULT_PROTECTED_HARNESS_GLOBS
     pinned_file_sha256: dict[str, Digest] = Field(default_factory=dict)
+    pre_workspace_snapshot: dict[str, Digest] = Field(default_factory=dict)
     required_criterion_ids: tuple[NonBlank, ...] = ()
     require_behavioral_assertions: StrictBool = True
     forbid_test_deletion: StrictBool = True
@@ -132,6 +133,25 @@ class TrustedHarnessManifest(CanonicalRecord):
             )
         assert_no_secrets(self.model_dump(mode="json"))
         return self
+
+
+_SNAPSHOT_IGNORED_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv"})
+
+
+def _snapshot_workspace_files(workspace_root: Path) -> dict[str, str]:
+    """Capture normalized relative path -> SHA-256 hex digest for all workspace files."""
+    snapshot: dict[str, str] = {}
+    if not workspace_root.exists() or not workspace_root.is_dir():
+        return snapshot
+    for path in sorted(workspace_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(workspace_root)
+        if any(part in _SNAPSHOT_IGNORED_DIRS for part in rel.parts):
+            continue
+        norm_rel = _normalize_rel_path(rel.as_posix())
+        snapshot[norm_rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return snapshot
 
 
 def build_trusted_harness_manifest(
@@ -155,11 +175,13 @@ def build_trusted_harness_manifest(
             raise FileNotFoundError(f"Protected file not found in workspace: {norm_rel}")
         pinned[norm_rel] = hashlib.sha256(target.read_bytes()).hexdigest()
 
+    pre_snap = _snapshot_workspace_files(workspace_root)
     return TrustedHarnessManifest(
         manifest_id=manifest_id or f"manifest-{uuid4().hex[:12]}",
         project_id=project_id,
         milestone_id=milestone_id,
         pinned_file_sha256=pinned,
+        pre_workspace_snapshot=pre_snap,
     )
 
 
@@ -439,6 +461,41 @@ def _inspect_function_assertions(
                 else:
                     has_real = True
 
+    def _stmt_contains_break(stmts: list[ast.stmt]) -> bool:
+        for s in stmts:
+            if isinstance(s, ast.Break):
+                return True
+            if isinstance(
+                s,
+                (
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                ),
+            ):
+                continue
+            if isinstance(s, ast.If):
+                if _stmt_contains_break(s.body) or _stmt_contains_break(s.orelse):
+                    return True
+            elif isinstance(s, (ast.With, ast.AsyncWith)):
+                if _stmt_contains_break(s.body):
+                    return True
+            elif isinstance(s, ast.Try):
+                if (
+                    _stmt_contains_break(s.body)
+                    or any(_stmt_contains_break(h.body) for h in s.handlers)
+                    or _stmt_contains_break(s.orelse)
+                    or _stmt_contains_break(s.finalbody)
+                ):
+                    return True
+            elif isinstance(s, ast.Match):
+                if any(_stmt_contains_break(c.body) for c in s.cases):
+                    return True
+        return False
+
     def _walk_stmts(stmts: list[ast.stmt], reachable: bool) -> bool:
         nonlocal has_real, has_trivial, has_unreachable
         terminated = False
@@ -466,15 +523,38 @@ def _inspect_function_assertions(
                         terminated = True
             elif isinstance(stmt, ast.While):
                 _scan_expr(stmt.test, stmt_reachable)
-                is_const, const_val = _eval_static_constant(stmt.test)
-                dead_while = is_const and not bool(const_val)
-                _walk_stmts(stmt.body, stmt_reachable and not dead_while)
-                _walk_stmts(stmt.orelse, stmt_reachable)
+                w_const, w_val = _eval_static_constant(stmt.test)
+                if w_const and not bool(w_val):
+                    _walk_stmts(stmt.body, False)
+                    else_term = _walk_stmts(stmt.orelse, stmt_reachable) if stmt.orelse else False
+                    if else_term:
+                        terminated = True
+                elif w_const and bool(w_val):
+                    body_term = _walk_stmts(stmt.body, stmt_reachable)
+                    has_brk = _stmt_contains_break(stmt.body)
+                    else_term = (
+                        _walk_stmts(stmt.orelse, stmt_reachable and has_brk)
+                        if stmt.orelse
+                        else False
+                    )
+                    if not has_brk or (body_term and else_term):
+                        terminated = True
+                else:
+                    body_term = _walk_stmts(stmt.body, stmt_reachable)
+                    else_term = _walk_stmts(stmt.orelse, stmt_reachable) if stmt.orelse else False
+                    if body_term and else_term and not _stmt_contains_break(stmt.body):
+                        terminated = True
             elif isinstance(stmt, (ast.For, ast.AsyncFor)):
                 _scan_expr(stmt.iter, stmt_reachable)
-                body_reach = stmt_reachable and not _is_empty_static_iterable(stmt.iter)
-                _walk_stmts(stmt.body, body_reach)
-                _walk_stmts(stmt.orelse, stmt_reachable)
+                is_empty = _is_empty_static_iterable(stmt.iter)
+                body_term = _walk_stmts(stmt.body, stmt_reachable and not is_empty)
+                else_term = _walk_stmts(stmt.orelse, stmt_reachable) if stmt.orelse else False
+                if is_empty and else_term:
+                    terminated = True
+                elif (
+                    not is_empty and body_term and else_term and not _stmt_contains_break(stmt.body)
+                ):
+                    terminated = True
             elif isinstance(stmt, (ast.With, ast.AsyncWith)):
                 for item in stmt.items:
                     _scan_expr(item.context_expr, stmt_reachable)
@@ -482,7 +562,18 @@ def _inspect_function_assertions(
                     terminated = True
             elif isinstance(stmt, ast.Try):
                 body_term = _walk_stmts(stmt.body, stmt_reachable)
-                handlers_term = [_walk_stmts(h.body, stmt_reachable) for h in stmt.handlers]
+                handlers_term: list[bool] = []
+                broad_seen = False
+                for h in stmt.handlers:
+                    h_reachable = stmt_reachable and not broad_seen
+                    h_term = _walk_stmts(h.body, h_reachable)
+                    if h_reachable:
+                        handlers_term.append(h_term)
+                    is_broad = h.type is None or (
+                        isinstance(h.type, ast.Name) and h.type.id in ("Exception", "BaseException")
+                    )
+                    if is_broad:
+                        broad_seen = True
                 else_term = (
                     _walk_stmts(stmt.orelse, stmt_reachable and not body_term)
                     if stmt.orelse
@@ -491,7 +582,7 @@ def _inspect_function_assertions(
                 final_term = (
                     _walk_stmts(stmt.finalbody, stmt_reachable) if stmt.finalbody else False
                 )
-                if final_term or ((body_term or else_term) and all(handlers_term)):
+                if final_term or ((body_term or else_term) and broad_seen and all(handlers_term)):
                     terminated = True
             elif isinstance(stmt, ast.Match):
                 case_terms = [_walk_stmts(c.body, stmt_reachable) for c in stmt.cases]
@@ -717,6 +808,37 @@ class TrustedAcceptanceHarnessValidator:
                 )
                 tamper_detected = True
 
+        if manifest.pre_workspace_snapshot:
+            current_snap = _snapshot_workspace_files(workspace_root)
+            declared_set = {_normalize_rel_path(fc.path) for fc in changed_files}
+            for rel_path, cur_digest in current_snap.items():
+                prev_digest = manifest.pre_workspace_snapshot.get(rel_path)
+                if prev_digest != cur_digest and rel_path not in declared_set:
+                    findings.append(
+                        RewardHackingFinding(
+                            rule_id="UNDECLARED_WORKSPACE_MODIFICATION",
+                            file_path=rel_path,
+                            description=(
+                                f"Workspace file '{rel_path}' modified or added outside "
+                                "declared changed_files"
+                            ),
+                        )
+                    )
+                    reward_hacking_detected = True
+            for rel_path in manifest.pre_workspace_snapshot:
+                if rel_path not in current_snap and rel_path not in declared_set:
+                    findings.append(
+                        RewardHackingFinding(
+                            rule_id="UNDECLARED_WORKSPACE_MODIFICATION",
+                            file_path=rel_path,
+                            description=(
+                                f"Workspace file '{rel_path}' deleted outside "
+                                "declared changed_files"
+                            ),
+                        )
+                    )
+                    reward_hacking_detected = True
+
         tests_ok = (
             tests_summary is not None and tests_summary.passed > 0 and tests_summary.failed == 0
         )
@@ -748,14 +870,42 @@ class TrustedAcceptanceHarnessValidator:
             reward_hacking_detected = True
 
         if manifest.required_criterion_ids or criterion_results is not None:
+            if manifest.required_criterion_ids and (
+                verification_receipt is None
+                or not verification_receipt.passed
+                or verification_receipt.exit_code != 0
+                or verification_receipt.candidate_sha != candidate_sha
+            ):
+                findings.append(
+                    RewardHackingFinding(
+                        rule_id="REQUIRED_CRITERION_UNVERIFIED",
+                        file_path="verification_receipt",
+                        description=(
+                            "Required criteria demand a verified "
+                            "CandidateVerificationReceipt bound to candidate_sha"
+                        ),
+                    )
+                )
+                reward_hacking_detected = True
+
             criterion_map: dict[str, bool] = {}
             if isinstance(criterion_results, dict):
                 criterion_map = {str(k): bool(v) for k, v in criterion_results.items()}
             elif criterion_results is not None:
                 for cr in criterion_results:
                     if cr.criterion_id in manifest.required_criterion_ids:
+                        has_provenance = any(
+                            candidate_sha in ev
+                            or cr.criterion_id in ev
+                            or "pytest" in ev
+                            or "test" in ev
+                            or "ok" in ev
+                            for ev in cr.evidence
+                        )
                         criterion_map[cr.criterion_id] = (
-                            cr.status == CriterionStatus.PASS and len(cr.evidence) > 0
+                            cr.status == CriterionStatus.PASS
+                            and len(cr.evidence) > 0
+                            and has_provenance
                         )
                     else:
                         criterion_map[cr.criterion_id] = cr.status == CriterionStatus.PASS
@@ -835,6 +985,7 @@ class DogfoodingAuditBundle(CanonicalRecord):
     trusted_acceptance: TrustedAcceptanceEvaluation
     review_verdict: ReviewVerdict
     gate_verdict: Literal["PASS", "REVISE", "BLOCKED"]
+    reviewer_gate_decision: SubscriptionReviewerGateDecision | None = None
     dogfooding_passed: StrictBool
     stable_worktree_mutated: StrictBool = False
     auto_promote_stable_performed: Literal[False] = False
@@ -846,20 +997,30 @@ class DogfoodingAuditBundle(CanonicalRecord):
     def validate_bundle(self) -> Self:
         assert_milestone_c_scope_authorized(self.milestone_id, task_id=self.task_id)
         cand_root = Path(self.candidate_worktree_root).resolve()
+        cand_pkg_root = (cand_root / "src" / "aipc").resolve()
         expected_src = Path(self.import_origin_report.expected_candidate_src).resolve()
+        actual_file_raw = self.import_origin_report.actual_imported_file.strip()
+        actual_imported_ok = bool(actual_file_raw) and (
+            Path(actual_file_raw).resolve().is_relative_to(cand_pkg_root)
+        )
         if self.dogfooding_passed and (
             not self.import_origin_report.verified
             or not self.verification_receipt.passed
             or not self.trusted_acceptance.passed
             or self.review_verdict != ReviewVerdict.PASS
             or self.gate_verdict != "PASS"
+            or self.reviewer_gate_decision is None
+            or self.reviewer_gate_decision.gate_outcome != "PASS"
+            or self.reviewer_gate_decision.candidate_commit_sha != self.candidate_sha
+            or self.reviewer_gate_decision.task_id != self.task_id
             or self.next_authorized_action != "HUMAN_MERGE_REVIEW"
             or self.stable_worktree_mutated
             or self.verification_receipt.candidate_sha != self.candidate_sha
             or self.trusted_acceptance.candidate_sha != self.candidate_sha
             or not self.verification_receipt.import_origin_verified
             or bool(self.import_origin_report.leaked_stable_paths)
-            or not expected_src.is_relative_to(cand_root)
+            or expected_src != cand_pkg_root
+            or not actual_imported_ok
         ):
             raise ValueError(
                 "DogfoodingAuditBundle.dogfooding_passed cannot be True unless all "
@@ -868,6 +1029,55 @@ class DogfoodingAuditBundle(CanonicalRecord):
             )
         assert_no_secrets(self.model_dump(mode="json"))
         return self
+
+
+def _check_candidate_git_integrity(
+    c_root: Path,
+    expected_candidate_sha: str,
+) -> tuple[bool, tuple[str, ...]]:
+    """Verify candidate checkout is a clean git repository at expected_candidate_sha."""
+    if not c_root.exists() or not c_root.is_dir() or not (c_root / ".git").exists():
+        return False, ()
+    env = build_sanitized_child_env()
+    try:
+        top_res = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(c_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        top_raw = (top_res.stdout or "").strip()
+        if top_res.returncode != 0 or not top_raw or Path(top_raw).resolve() != c_root.resolve():
+            return False, ()
+        head_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(c_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        actual_head = (head_res.stdout or "").strip().lower()
+        if head_res.returncode != 0 or actual_head != expected_candidate_sha.strip().lower():
+            return False, ()
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain", "-uall"],
+            cwd=str(c_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        if status_res.returncode != 0 or bool((status_res.stdout or "").strip()):
+            return False, ()
+    except OSError:
+        return False, ()
+    return True, ()
 
 
 def _check_stable_git_integrity(s_root: Path, pinned_stable_sha: str) -> bool:
@@ -984,7 +1194,6 @@ class SelfDevelopmentDogfoodingCoordinator:
 
         expected_cand_src = Path(import_origin_report.expected_candidate_src).resolve()
         expected_pkg_root = (c_root / "src" / "aipc").resolve()
-        expected_src_root = (c_root / "src").resolve()
         actual_file_raw = import_origin_report.actual_imported_file.strip()
         actual_imported_ok = bool(actual_file_raw) and (
             Path(actual_file_raw).resolve().is_relative_to(expected_pkg_root)
@@ -992,11 +1201,18 @@ class SelfDevelopmentDogfoodingCoordinator:
         if (
             not verification_receipt.import_origin_verified
             or verification_receipt.import_origin_report != import_origin_report
-            or expected_cand_src not in (expected_pkg_root, expected_src_root)
+            or expected_cand_src != expected_pkg_root
             or not actual_imported_ok
             or len(import_origin_report.leaked_stable_paths) > 0
         ):
             blockers.append("IMPORT_ORIGIN_WORKSPACE_MISMATCH")
+
+        cand_git_ok, _ = _check_candidate_git_integrity(
+            c_root,
+            stable_candidate_config.candidate_sha,
+        )
+        if not cand_git_ok:
+            blockers.append("CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH")
 
         stable_mutated = any(
             (Path(fc.path).is_absolute() and Path(fc.path).resolve().is_relative_to(s_root))
@@ -1066,6 +1282,7 @@ class SelfDevelopmentDogfoodingCoordinator:
         hard_blockers = {
             "VERIFICATION_RECEIPT_SHA_MISMATCH",
             "IMPORT_ORIGIN_WORKSPACE_MISMATCH",
+            "CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH",
             "STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH",
             "REVIEW_GATE_DECISION_MISMATCH",
             "MISSING_REVIEWER_GATE_DECISION",
@@ -1100,6 +1317,11 @@ class SelfDevelopmentDogfoodingCoordinator:
             trusted_acceptance=trusted_acceptance,
             review_verdict=review_verdict,
             gate_verdict=gate_verdict,
+            reviewer_gate_decision=(
+                reviewer_gate_decision
+                if reviewer_gate_decision is not None and not decision_mismatch
+                else None
+            ),
             dogfooding_passed=dogfooding_passed,
             stable_worktree_mutated=stable_mutated,
             auto_promote_stable_performed=False,

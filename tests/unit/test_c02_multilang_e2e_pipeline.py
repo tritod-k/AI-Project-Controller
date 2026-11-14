@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -43,14 +45,16 @@ from aipc.hardening.errors import SecretExposureError
 from aipc.project.models import AcceptanceCriterion, PhaseDefinition
 from aipc.project.state_models import ProjectState, ProjectStatus
 from aipc.project.universal_profiles import OnboardedProjectBundle, onboard_universal_project
+from aipc.review.context import review_provenance
+from aipc.review.gate import PhaseGate
 from aipc.review.models import (
     BoundReview,
-    GateAction,
+    CriterionRule,
     PhaseGateDecision,
     PhaseReviewStage,
     ReviewContext,
-    ReviewProvenance,
 )
+from aipc.review.reviewer import bind_review
 from aipc.review.subscription_reviewer_gate import (
     SessionIsolationAuditReceipt,
     SubscriptionReviewerGateDecision,
@@ -178,10 +182,13 @@ def _make_onboarded_static_project(tmp_path: Path) -> tuple[OnboardedProjectBund
 
 
 def _make_review_context(bundle: OnboardedProjectBundle, candidate_sha: str) -> ReviewContext:
-    now = datetime.now(UTC)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     pid = bundle.project_definition.project.id
     task_id = "task-01"
     phase_id = "phase-01"
+    ws_path = Path(bundle.workspace_root).resolve()
+    ev_root = ws_path.parent / f"{ws_path.name}_aipc_test_evidence"
+    ev_root.mkdir(parents=True, exist_ok=True)
     state = ProjectState(
         schema_version="1.0",
         project_id=pid,
@@ -245,19 +252,51 @@ def _make_review_context(bundle: OnboardedProjectBundle, candidate_sha: str) -> 
         ("terminal_log", "terminal.log"),
         ("raw_output", "raw_output.txt"),
     )
-    items = tuple(
-        EvidenceItem(evidence_id=eid, kind=eid, status="collected", path=path, source="test")
-        for eid, path in required_ids
-    )
-    artifacts = tuple(
+    file_payloads: dict[str, bytes] = {
+        "task.json": task.model_dump_json(indent=2).encode("utf-8"),
+        "agent_result.json": agent_result.model_dump_json(indent=2).encode("utf-8"),
+        "commands.json": json.dumps({"source": "agent_result", "commands": []}, indent=2).encode(
+            "utf-8"
+        ),
+        "git_status.txt": b"",
+        "git_diff.patch": b"",
+        "git_summary.txt": b"clean\n",
+        "test.log": b"1 passed in 0.01s\n",
+        "terminal.log": b"pytest -q\n",
+        "raw_output.txt": b"1 passed in 0.01s\n",
+    }
+    artifacts_list: list[ArtifactRecord] = []
+    for eid, rel_path in required_ids:
+        if eid == "artifact_index":
+            continue
+        data = file_payloads[rel_path]
+        (ev_root / rel_path).write_bytes(data)
+        artifacts_list.append(
+            ArtifactRecord(
+                artifact_id=f"art-{eid}",
+                path=rel_path,
+                kind=eid,
+                size=len(data),
+                sha256=hashlib.sha256(data).hexdigest(),
+                source="test",
+            )
+        )
+    index_bytes = json.dumps(
+        {"artifacts": [a.model_dump(mode="json") for a in artifacts_list]}, indent=2
+    ).encode("utf-8")
+    (ev_root / "artifact_index.json").write_bytes(index_bytes)
+    artifacts_list.append(
         ArtifactRecord(
-            artifact_id=f"art-{eid}",
-            path=path,
-            kind=eid,
-            size=10,
-            sha256=_SHA256_DUMMY,
+            artifact_id="art-artifact_index",
+            path="artifact_index.json",
+            kind="artifact_index",
+            size=len(index_bytes),
+            sha256=hashlib.sha256(index_bytes).hexdigest(),
             source="test",
         )
+    )
+    items = tuple(
+        EvidenceItem(evidence_id=eid, kind=eid, status="collected", path=path, source="test")
         for eid, path in required_ids
     )
     evidence = EvidenceBundle(
@@ -283,8 +322,9 @@ def _make_review_context(bundle: OnboardedProjectBundle, candidate_sha: str) -> 
         ),
         commands=(),
         items=items,
-        artifacts=artifacts,
+        artifacts=tuple(artifacts_list),
     )
+    (ev_root / "manifest.json").write_bytes(evidence.model_dump_json(indent=2).encode("utf-8"))
     checkpoint = CheckpointMetadata(
         checkpoint_id="phase-phase-01-attempt-01",
         checkpoint_type=CheckpointType.ATTEMPT,
@@ -303,9 +343,10 @@ def _make_review_context(bundle: OnboardedProjectBundle, candidate_sha: str) -> 
         task=task,
         agent_result=agent_result,
         evidence=evidence,
-        evidence_root=bundle.workspace_root,
+        evidence_root=str(ev_root),
         checkpoint=checkpoint,
         phase_stage=PhaseReviewStage.AWAITING_REVIEW,
+        rules=(CriterionRule(criterion_id="AC-01", kind="tests", minimum_passed=1),),
     )
 
 
@@ -315,8 +356,9 @@ def _make_gate_decision(
     candidate_sha: str,
     verdict: ReviewVerdict,
     gate_outcome: str,
+    review_ctx: ReviewContext | None = None,
 ) -> SubscriptionReviewerGateDecision:
-    pid = bundle.project_definition.project.id
+    ctx = review_ctx or _make_review_context(bundle, candidate_sha)
     review_result = ReviewResult(
         schema_version="1.0",
         review_id="rev-01",
@@ -338,47 +380,17 @@ def _make_gate_decision(
         risks=[],
         next_phase_allowed=(verdict == ReviewVerdict.PASS),
     )
-    bound_review = (
-        BoundReview(
-            review=review_result,
-            context_digest=_SHA256_DUMMY,
-            review_digest=_SHA256_DUMMY,
+    if gate_outcome == "PASS":
+        bound_review: BoundReview | None = bind_review(
+            ctx,
+            review_result,
             authority="codex-reviewer",
-            provenance=ReviewProvenance(
-                project_id=pid,
-                run_id="run-01",
-                phase_id="phase-01",
-                attempt=1,
-                task_id="task-01",
-                attempt_checkpoint_id="phase-phase-01-attempt-01",
-                git_commit=candidate_sha,
-                agent_result_digest=_SHA256_DUMMY,
-                evidence_digest=_SHA256_DUMMY,
-            ),
+            reviewed=review_provenance(ctx),
         )
-        if gate_outcome == "PASS"
-        else None
-    )
-    phase_gate = (
-        PhaseGateDecision(
-            verdict=verdict,
-            project_id=pid,
-            phase_id="phase-01",
-            attempt=1,
-            task_id="task-01",
-            review_id="rev-01",
-            actions=(GateAction.MARK_PHASE_PASS,),
-            next_phase_allowed=True,
-            stable_checkpoint_allowed=True,
-            repair_required=False,
-            human_intervention_required=False,
-            reasons=("All criteria passed",),
-            failed_criteria=(),
-            required_fixes=(),
-        )
-        if gate_outcome == "PASS"
-        else None
-    )
+        phase_gate: PhaseGateDecision | None = PhaseGate().evaluate(bound_review, ctx)
+    else:
+        bound_review = None
+        phase_gate = None
     session_audit = SessionIsolationAuditReceipt(
         audit_id="audit-01",
         task_id="task-01",
@@ -1493,6 +1505,110 @@ def test_e2e_pipeline_rejects_mismatched_phase_gate_or_nested_provenance(
         start=1,
     ):
         q = _setup_queue(tmp_path / f"q_nested_{idx}", bundle.project_definition.project.id)
+        res = pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q,
+            worker_step=worker_step,
+            worker_binding=worker_binding,
+            review_callback=lambda _dec=bad_dec, **kw: _dec,
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+        assert res.pr_ready is False
+        assert res.gate_verdict == "BLOCKED"
+        assert res.blockers == ("REVIEW_PROVENANCE_MISMATCH",)
+
+
+def test_isolated_subprocess_popen_empty_env_still_inherits_guard(tmp_path: Path) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+    outside = (tmp_path / "outside_escape.txt").resolve()
+    child_code = (
+        "import subprocess, sys; "
+        f"tgt = {str(outside)!r}; "
+        "p = subprocess.Popen([sys.executable, '-c', f'open({tgt!r}, \"w\")'], env={}); "
+        "sys.exit(0 if p.wait() == 0 else 1)"
+    )
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", child_code),
+    )
+    assert receipt.passed is False
+    assert not outside.exists()
+
+
+def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+    fd_code = (
+        "import os; "
+        "blocked = False\n"
+        "try:\n"
+        "    os.chmod(1, 0o600)\n"
+        "except PermissionError:\n"
+        "    blocked = True\n"
+        "assert blocked\n"
+        "dir_blocked = False\n"
+        "try:\n"
+        "    os.open('x.txt', os.O_RDONLY, dir_fd=0)\n"
+        "except PermissionError:\n"
+        "    dir_blocked = True\n"
+        "assert dir_blocked\n"
+        "print('1 passed')"
+    )
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", fd_code),
+    )
+    assert receipt.passed is True
+
+
+def test_e2e_pipeline_rejects_forged_context_or_agent_result_digest(tmp_path: Path) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, head_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    valid = _make_gate_decision(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        verdict=ReviewVerdict.PASS,
+        gate_outcome="PASS",
+        review_ctx=review_ctx,
+    )
+    assert valid.bound_review is not None
+
+    forged_ctx_digest = valid.bound_review.model_copy(update={"context_digest": "f" * 64})
+    dec_forged_ctx = valid.model_copy(update={"bound_review": forged_ctx_digest})
+
+    forged_prov = valid.bound_review.provenance.model_copy(update={"agent_result_digest": "e" * 64})
+    forged_prov_bound = valid.bound_review.model_copy(update={"provenance": forged_prov})
+    dec_forged_prov = valid.model_copy(update={"bound_review": forged_prov_bound})
+
+    for idx, bad_dec in enumerate((dec_forged_ctx, dec_forged_prov), start=1):
+        q = _setup_queue(tmp_path / f"q_forged_{idx}", bundle.project_definition.project.id)
         res = pipeline.run_e2e_cycle(
             bundle=bundle,
             task_queue=q,

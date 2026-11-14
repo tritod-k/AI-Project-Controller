@@ -810,6 +810,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
     """Verify run_cli_worker_job enforces all nested review, provenance, gate, and audit IDs."""
     from aipc.domain.enums import ReviewVerdict
     from aipc.domain.models import ReviewResult
+    from aipc.review.context import digest
     from aipc.review.models import BoundReview, GateAction, PhaseGateDecision, ReviewProvenance
     from aipc.review.subscription_reviewer_gate import (
         SessionIsolationAuditReceipt,
@@ -858,7 +859,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         bound = BoundReview(
             review=review,
             context_digest="c" * 64,
-            review_digest="d" * 64,
+            review_digest=digest(review),
             authority="milestone-b-independent-subscription-reviewer",
             provenance=provenance,
         )
@@ -983,11 +984,36 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
     bad_bound = BoundReview.model_construct(
         **{**dict(base_decision.bound_review), "review": bad_review}
     )
+    forged_digest_bound = BoundReview.model_construct(
+        **{**dict(base_decision.bound_review), "review_digest": "f" * 64}
+    )
     neg_cases: list[tuple[str, SubscriptionReviewerGateDecision]] = [
         (
             "bound_revise",
             SubscriptionReviewerGateDecision.model_construct(
                 **{**dict(base_decision), "bound_review": bad_bound}
+            ),
+        ),
+        (
+            "forged_review_digest",
+            SubscriptionReviewerGateDecision.model_construct(
+                **{**dict(base_decision), "bound_review": forged_digest_bound}
+            ),
+        ),
+        (
+            "same_family_cross_provider",
+            SubscriptionReviewerGateDecision.model_construct(
+                **{
+                    **dict(base_decision),
+                    "session_audit": SessionIsolationAuditReceipt.model_construct(
+                        **{
+                            **dict(base_decision.session_audit),
+                            "independence_level": "cross_provider",
+                            "worker_provider_family": "google_antigravity",
+                            "reviewer_provider_family": "google_antigravity",
+                        }
+                    ),
+                }
             ),
         ),
         (
