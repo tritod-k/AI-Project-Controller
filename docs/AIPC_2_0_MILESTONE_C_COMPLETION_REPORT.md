@@ -7,13 +7,13 @@
 
 ## 2. Status
 - **Implementation & Full CI Regression Verification**: `PASS` (`READY FOR COMMANDER MERGE REVIEW`)
-  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`32 passed`**
+  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`32 passed`** (`0c5b5c8`)
   - **Workstream C01** (`test_c01_universal_project_profiles.py`): **`17 passed`** (`2df59c7`, `1115726`)
-  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`22 passed`** (`2c0a84b`, `3d757c2`)
-  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`63 passed`** (`eae7689`, `c8b532f`)
-  - **Milestone B/C Focused Suite**: **`135 passed`**
-  - **Full CI Regression**: **`1209 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites
-  - **Static Analysis & Schemas**: `ruff check` clean, `ruff format --check` clean, domain and project JSON schemas verified
+  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`23 passed`** (`2c0a84b`, `0c5b5c8`)
+  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`68 passed`** (`eae7689`, `0c5b5c8`)
+  - **Self-Development Runner** (`test_self_dev_runner.py`): **`7 passed`** (`0c5b5c8`)
+  - **Full CI Regression**: **`1213 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites
+  - **Static Analysis & Schemas**: `ruff check .` clean, `ruff format --check .` clean (`319 files already formatted`), domain and project JSON schemas verified
 
 ## 3. Summary
 Completed AIPC 2.0 Milestone C (`C01`–`C03`) and Gemini 4 Hydrogen subscription worker integration on `gemini/aipc-2.0-milestone-c` under 100% Subscription-Only runtime rules (`operating_profile="subscription_only"`) and mandatory child environment sanitation (`tools.sanitized_exec`). Adopted the targeted 2-tier inline Python execution policy (`f997783`), qualified `agy 1.5.8` with `gemini-4-hydrogen-medium` as primary subscription worker (`4c1aab3`, `4db2134`), and delivered universal project onboarding profiles (`C01`), multi-language isolated verification & end-to-end orchestration (`C02`), and the trusted acceptance harness & self-development dogfooding gate (`C03`).
