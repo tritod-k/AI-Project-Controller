@@ -970,6 +970,48 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         assert bad_receipt.passed is False
         assert bad_receipt.failure_reason == "ISOLATED_SUBPROCESS_COMMAND_GUARD_BYPASS_REJECTED"
 
+    closure_probe = (
+        "import sitecustomize\n"
+        "assert not hasattr(sitecustomize, '_orig_open')\n"
+        "assert not hasattr(sitecustomize, '_orig_os_open')\n"
+        "assert not hasattr(sitecustomize, '_orig_popen_init')\n"
+        "assert not hasattr(sitecustomize, '_WS_ROOT')\n"
+        "print('1 passed')\n"
+    )
+    closure_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", closure_probe),
+    )
+    assert closure_receipt.passed is True
+
+    os_system_probe = (
+        "import os\n"
+        "try:\n"
+        "    os.system('echo hi')\n"
+        "except PermissionError:\n"
+        "    print('1 passed')\n"
+    )
+    os_system_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", os_system_probe),
+    )
+    assert os_system_receipt.passed is True
+
+    ctypes_probe = (
+        "try:\n    import ctypes\nexcept (ImportError, PermissionError):\n    print('1 passed')\n"
+    )
+    ctypes_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", ctypes_probe),
+    )
+    assert ctypes_receipt.passed is True
+
 
 def test_wrong_head_or_dirty_worktree_and_lint_failure_fail_closed(tmp_path: Path) -> None:
     bundle, head_sha = _make_onboarded_python_project(tmp_path)
@@ -1307,3 +1349,159 @@ def test_e2e_pipeline_rejects_non_callable_reviewer_and_marks_post_dispatch_erro
             runner=ok_runner,
         )
     assert q_rec_err.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+
+def test_e2e_pipeline_enforces_candidate_import_origin_with_stable_root(
+    tmp_path: Path,
+) -> None:
+    stable_root = tmp_path / "stable-aipc"
+    (stable_root / "src" / "aipc").mkdir(parents=True, exist_ok=True)
+    (stable_root / "src" / "aipc" / "__init__.py").write_text(
+        "__version__ = 'stable'\n", encoding="utf-8"
+    )
+
+    cand_ws = tmp_path / "cand-aipc"
+    cand_ws.mkdir(parents=True, exist_ok=True)
+    _git(cand_ws, "init")
+    (cand_ws / "pyproject.toml").write_text("[project]\nname='cand-aipc'\n", encoding="utf-8")
+    (cand_ws / "src" / "aipc").mkdir(parents=True, exist_ok=True)
+    (cand_ws / "src" / "aipc" / "__init__.py").write_text(
+        "__version__ = 'candidate'\n", encoding="utf-8"
+    )
+    (cand_ws / "tests").mkdir(exist_ok=True)
+    (cand_ws / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    cand_sha = _commit_all_clean(cand_ws, "add candidate aipc")
+    cand_bundle = onboard_universal_project(
+        workspace=cand_ws,
+        project_id="cand-aipc",
+        project_name="Candidate AIPC",
+        phases=_make_phases(),
+    )
+
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(cand_bundle, cand_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=cand_sha,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    q_ok = _setup_queue(tmp_path / "q_origin_ok", cand_bundle.project_definition.project.id)
+    valid = _make_gate_decision(
+        bundle=cand_bundle,
+        candidate_sha=cand_sha,
+        verdict=ReviewVerdict.PASS,
+        gate_outcome="PASS",
+    )
+    res_ok = pipeline.run_e2e_cycle(
+        bundle=cand_bundle,
+        task_queue=q_ok,
+        worker_step=worker_step,
+        worker_binding=worker_binding,
+        review_callback=lambda **kw: valid,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+        stable_root=stable_root,
+    )
+    assert res_ok.pr_ready is True
+    assert res_ok.verification_receipt.import_origin_verified is True
+    assert res_ok.verification_receipt.import_origin_report is not None
+
+    # Missing candidate src/aipc/__init__.py with stable_root provided -> IMPORT_ORIGIN_MISMATCH
+    plain_bundle, plain_sha = _make_onboarded_python_project(tmp_path / "plain")
+    plain_ctx = _make_review_context(plain_bundle, plain_sha)
+    q_missing = _setup_queue(
+        tmp_path / "q_origin_missing", plain_bundle.project_definition.project.id
+    )
+    res_missing = pipeline.run_e2e_cycle(
+        bundle=plain_bundle,
+        task_queue=q_missing,
+        worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
+            candidate_sha=plain_sha,
+            verification_passed=True,
+            review_context=plain_ctx,
+        ),
+        worker_binding=worker_binding,
+        review_callback=lambda **kw: _make_gate_decision(
+            bundle=plain_bundle,
+            candidate_sha=plain_sha,
+            verdict=ReviewVerdict.PASS,
+            gate_outcome="PASS",
+        ),
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+        stable_root=stable_root,
+    )
+    assert res_missing.pr_ready is False
+    assert res_missing.gate_verdict == "BLOCKED"
+    assert res_missing.blockers == ("IMPORT_ORIGIN_MISMATCH",)
+
+
+def test_e2e_pipeline_rejects_mismatched_phase_gate_or_nested_provenance(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, head_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=review_ctx,
+            worker_session_id="sess-worker-01",
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    valid = _make_gate_decision(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        verdict=ReviewVerdict.PASS,
+        gate_outcome="PASS",
+    )
+    assert valid.bound_review is not None
+
+    bad_rev_review = valid.bound_review.review.model_copy(update={"verdict": ReviewVerdict.REVISE})
+    bad_bound_review = valid.bound_review.model_copy(update={"review": bad_rev_review})
+    dec_bad_nested_verdict = valid.model_copy(update={"bound_review": bad_bound_review})
+
+    bad_audit_sandbox = valid.session_audit.model_copy(update={"read_only_sandbox_enforced": False})
+    dec_bad_sandbox = valid.model_copy(update={"session_audit": bad_audit_sandbox})
+
+    bad_audit_session = valid.session_audit.model_copy(
+        update={"reviewer_session_id": "sess-worker-01"}
+    )
+    dec_same_session = valid.model_copy(update={"session_audit": bad_audit_session})
+
+    for idx, bad_dec in enumerate(
+        (dec_bad_nested_verdict, dec_bad_sandbox, dec_same_session),
+        start=1,
+    ):
+        q = _setup_queue(tmp_path / f"q_nested_{idx}", bundle.project_definition.project.id)
+        res = pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q,
+            worker_step=worker_step,
+            worker_binding=worker_binding,
+            review_callback=lambda _dec=bad_dec, **kw: _dec,
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+        assert res.pr_ready is False
+        assert res.gate_verdict == "BLOCKED"
+        assert res.blockers == ("REVIEW_PROVENANCE_MISMATCH",)

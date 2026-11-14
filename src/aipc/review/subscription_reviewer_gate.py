@@ -263,13 +263,54 @@ class SubscriptionReviewerGateDecision(CanonicalRecord):
         if self.gate_outcome == "PASS":
             if self.bound_review is None or self.phase_gate_decision is None:
                 raise ValueError("PASS gate_outcome requires bound_review and phase_gate_decision")
-            if self.phase_gate_decision.verdict != "PASS":
-                raise ValueError("PASS gate_outcome requires PhaseGateDecision.verdict == 'PASS'")
+            if self.reviewed_commit_sha != self.candidate_commit_sha:
+                raise ValueError(
+                    "PASS gate_outcome requires reviewed_commit_sha == candidate_commit_sha"
+                )
             if (
-                self.session_audit.workspace_mutated
-                or not self.session_audit.fresh_isolated_session
+                self.review_result.verdict != ReviewVerdict.PASS
+                or self.review_result.task_id != self.task_id
             ):
-                raise ValueError("PASS gate_outcome forbids workspace mutation or shared session")
+                raise ValueError("PASS gate_outcome requires review_result PASS matching task_id")
+            if (
+                self.bound_review.review != self.review_result
+                or self.bound_review.review.verdict != ReviewVerdict.PASS
+            ):
+                raise ValueError(
+                    "PASS gate_outcome requires bound_review.review == review_result with PASS"
+                )
+            prov = self.bound_review.provenance
+            if prov.task_id != self.task_id or prov.git_commit != self.candidate_commit_sha:
+                raise ValueError(
+                    "PASS gate_outcome requires bound_review.provenance matching task and commit"
+                )
+            pg = self.phase_gate_decision
+            if (
+                pg.verdict != ReviewVerdict.PASS
+                or pg.task_id != self.task_id
+                or pg.review_id != self.review_result.review_id
+                or pg.project_id != prov.project_id
+                or pg.phase_id != prov.phase_id
+                or pg.attempt != prov.attempt
+            ):
+                raise ValueError(
+                    "PASS gate_outcome requires PhaseGateDecision matching review and provenance"
+                )
+            audit = self.session_audit
+            if (
+                audit.task_id != self.task_id
+                or audit.candidate_commit_sha != self.candidate_commit_sha
+                or audit.read_only_sandbox_enforced is not True
+                or audit.inherited_chat_history is not False
+                or audit.fresh_isolated_session is not True
+                or audit.workspace_mutated is not False
+                or audit.workspace_snapshot_before_sha256 != audit.workspace_snapshot_after_sha256
+                or audit.independence_level not in ("cross_provider", "reduced_independence")
+                or audit.reviewer_binding_id == audit.worker_agent_id
+                or audit.reviewer_provider_id == audit.worker_agent_id
+                or audit.reviewer_session_id in (audit.worker_session_id, audit.planner_session_id)
+            ):
+                raise ValueError("PASS gate_outcome failed SessionIsolationAuditReceipt validation")
             if self.session_audit.high_risk_escalation_required:
                 raise ValueError(
                     "High-risk same-provider review requires HUMAN_REVIEW_REQUIRED escalation"

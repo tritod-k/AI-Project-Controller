@@ -167,10 +167,10 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 - **Milestone C & Hydrogen Worker Suites (`gemini/aipc-2.0-milestone-c`)**:
   - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `30 passed`.
   - `tests/unit/test_c01_universal_project_profiles.py`: `17 passed` (`2df59c7`, `1115726`).
-  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `15 passed` (`2c0a84b`, `3d757c2`).
-  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `34 passed` (`eae7689`, `c8b532f`).
-  - **Milestone B/C Focused Suite**: `97 passed`.
-  - **Full CI Regression**: `1169 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
+  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `17 passed` (`2c0a84b`, `3d757c2`).
+  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `44 passed` (`eae7689`, `c8b532f`).
+  - **Milestone B/C Focused Suite**: `109 passed`.
+  - **Full CI Regression**: `1181 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
   - `ruff check` and `ruff format --check`: clean (`0 errors`).
   - Domain and project JSON schemas: verified (`Checked 4 canonical schemas`, `Checked 2 project schemas`).
 

@@ -48,7 +48,7 @@
 ### Workstream C02 — Multi-Language Isolated Verification & End-to-End Pipeline (`2c0a84b`, `3d757c2`)
 - **Commits**: `2c0a84b`, `3d757c2`
 - **Implementation**: `src/aipc/controller/milestone_c_pipeline.py`
-- **Tests**: `tests/unit/test_c02_multilang_e2e_pipeline.py` (**`15 passed`**)
+- **Tests**: `tests/unit/test_c02_multilang_e2e_pipeline.py` (**`17 passed`**)
 - **Capabilities Verified**:
   - Multi-language isolated verification (`blocked`, `container`, `isolated_subprocess`) across Python, Node.js/JS/TS, Static Web, and Google Apps Script offline mock stacks.
   - Enforces fail-closed `ContainerResourceLimits` (`network_mode="none"`, `read_only_root_fs=True`, `non_root_user="65534:65534"`, `cap_drop=("ALL",)`, `no_new_privileges=True`).
@@ -58,7 +58,7 @@
 ### Workstream C03 — Trusted Acceptance Harness & Self-Development Dogfooding (`eae7689`, `c8b532f`)
 - **Commits**: `eae7689`, `c8b532f`
 - **Implementation**: `src/aipc/review/trusted_acceptance_harness.py`
-- **Tests**: `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (**`34 passed`**)
+- **Tests**: `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (**`44 passed`**)
 - **Capabilities Verified**:
   - Enforces Milestone C scope boundary via `assert_milestone_c_scope_authorized` (`UNAUTHORIZED_MILESTONE_D_BLOCKED` for any `milestone-d`, `d01`, `d02`, or `d03` target).
   - Enforces protected harness tamper detection (`TRUSTED_HARNESS_TAMPER_DETECTED` across `tests/acceptance/**`, `tests/trusted/**`, `src/aipc/review/gate.py`, `src/aipc/review/trusted_acceptance_harness.py`, `src/aipc/controller/task_queue.py`, and `src/aipc/approvals/**`), including full pre/post workspace SHA-256 snapshot and `git status`/`git diff` verification (**R6**).
@@ -78,7 +78,7 @@
 ## Part 4: Full CI Regression, Linter & Schema Verification Summary
 
 - **Full CI Regression Suite**:
-  - **`1169 passed`** across `unit`, `contract`, `gemini`, `CLI`, `routing`, `consensus`, `observability`, `dashboard`, `MCP`, `hardening`, `controller`, `review`, `plugins`, and `E2E` suites (`97 passed` in Milestone B/C focused suite).
+  - **`1181 passed`** across `unit`, `contract`, `gemini`, `CLI`, `routing`, `consensus`, `observability`, `dashboard`, `MCP`, `hardening`, `controller`, `review`, `plugins`, and `E2E` suites (`109 passed` in Milestone B/C focused suite).
 - **Ruff Linter & Formatter**:
   - `ruff check src tests tools`: clean (`0 errors`).
   - `ruff format --check src tests tools`: clean (`319 files already formatted`).

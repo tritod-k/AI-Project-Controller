@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -357,6 +358,29 @@ def select_preferred_worker_model(
     raise ProviderInterruption(ProviderCondition.UNAVAILABLE, pre_start_clean=True)
 
 
+def _terminate_worker_process_tree(
+    proc: asyncio.subprocess.Process,
+    env: Mapping[str, str],
+) -> None:
+    if proc.pid is not None and os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                env=dict(env),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 async def invoke_antigravity_cli_worker(
     task: TaskRequest,
     config: SubscriptionWorkerConfig,
@@ -404,9 +428,8 @@ async def invoke_antigravity_cli_worker(
             timeout=float(max(1, int(task.timeout_seconds))),
         )
     except (asyncio.CancelledError, TimeoutError):
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
+        _terminate_worker_process_tree(proc, env)
+        await proc.wait()
         raise
     stdout_text = stdout_b.decode("utf-8", errors="replace")
     stderr_text = stderr_b.decode("utf-8", errors="replace")
@@ -1332,6 +1355,7 @@ def run_cli_worker_job(
                     and gate_dec.review_result.verdict == ReviewVerdict.PASS
                     and gate_dec.review_result.task_id == tid
                     and gate_dec.bound_review is not None
+                    and gate_dec.bound_review.review == gate_dec.review_result
                     and gate_dec.bound_review.review.review_id == gate_dec.review_result.review_id
                     and gate_dec.bound_review.review.task_id == tid
                     and gate_dec.bound_review.provenance.task_id == tid
@@ -1348,8 +1372,26 @@ def run_cli_worker_job(
                     and (gate_dec.phase_gate_decision.review_id == gate_dec.review_result.review_id)
                     and gate_dec.session_audit.task_id == tid
                     and gate_dec.session_audit.candidate_commit_sha == sha
+                    and gate_dec.session_audit.read_only_sandbox_enforced
+                    and not gate_dec.session_audit.inherited_chat_history
+                    and (
+                        gate_dec.session_audit.independence_level
+                        in ("cross_provider", "reduced_independence")
+                    )
                     and not gate_dec.session_audit.workspace_mutated
+                    and (
+                        gate_dec.session_audit.workspace_snapshot_before_sha256
+                        == gate_dec.session_audit.workspace_snapshot_after_sha256
+                    )
                     and gate_dec.session_audit.fresh_isolated_session
+                    and (
+                        gate_dec.session_audit.reviewer_binding_id
+                        != gate_dec.session_audit.worker_agent_id
+                    )
+                    and (
+                        out.receipt.session_id
+                        not in (None, gate_dec.session_audit.reviewer_session_id)
+                    )
                 )
                 if not verified_pass:
                     raise ControllerError(

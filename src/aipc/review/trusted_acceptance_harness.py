@@ -478,16 +478,29 @@ def _inspect_function_assertions(
             elif isinstance(stmt, (ast.With, ast.AsyncWith)):
                 for item in stmt.items:
                     _scan_expr(item.context_expr, stmt_reachable)
-                _walk_stmts(stmt.body, stmt_reachable)
+                if _walk_stmts(stmt.body, stmt_reachable):
+                    terminated = True
             elif isinstance(stmt, ast.Try):
-                _walk_stmts(stmt.body, stmt_reachable)
-                for handler in stmt.handlers:
-                    _walk_stmts(handler.body, stmt_reachable)
-                _walk_stmts(stmt.orelse, stmt_reachable)
-                _walk_stmts(stmt.finalbody, stmt_reachable)
+                body_term = _walk_stmts(stmt.body, stmt_reachable)
+                handlers_term = [_walk_stmts(h.body, stmt_reachable) for h in stmt.handlers]
+                else_term = (
+                    _walk_stmts(stmt.orelse, stmt_reachable and not body_term)
+                    if stmt.orelse
+                    else False
+                )
+                final_term = (
+                    _walk_stmts(stmt.finalbody, stmt_reachable) if stmt.finalbody else False
+                )
+                if final_term or ((body_term or else_term) and all(handlers_term)):
+                    terminated = True
             elif isinstance(stmt, ast.Match):
-                for case in stmt.cases:
-                    _walk_stmts(case.body, stmt_reachable)
+                case_terms = [_walk_stmts(c.body, stmt_reachable) for c in stmt.cases]
+                has_wildcard = any(
+                    isinstance(c.pattern, ast.MatchAs) and c.pattern.pattern is None
+                    for c in stmt.cases
+                )
+                if case_terms and all(case_terms) and has_wildcard:
+                    terminated = True
             else:
                 for sub in ast.walk(stmt):
                     if isinstance(sub, ast.Assert):
@@ -613,6 +626,7 @@ class TrustedAcceptanceHarnessValidator:
         changed_files: tuple[FileChange, ...],
         tests_summary: TestSummary | None,
         criterion_results: tuple[CriterionResult, ...] | dict[str, bool] | None = None,
+        verification_receipt: CandidateVerificationReceipt | None = None,
     ) -> TrustedAcceptanceEvaluation:
         """Evaluate candidate changes and test evidence against TrustedHarnessManifest."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -717,13 +731,34 @@ class TrustedAcceptanceHarnessValidator:
                     )
                 )
 
+        if verification_receipt is not None and (
+            not verification_receipt.passed
+            or verification_receipt.exit_code != 0
+            or verification_receipt.isolation_mode == "blocked"
+            or not verification_receipt.sanitized_env_verified
+            or verification_receipt.candidate_sha != candidate_sha
+        ):
+            findings.append(
+                RewardHackingFinding(
+                    rule_id="UNVERIFIED_EXECUTION_RECEIPT",
+                    file_path="verification_receipt",
+                    description="CandidateVerificationReceipt failed integrity/execution checks",
+                )
+            )
+            reward_hacking_detected = True
+
         if manifest.required_criterion_ids or criterion_results is not None:
             criterion_map: dict[str, bool] = {}
             if isinstance(criterion_results, dict):
                 criterion_map = {str(k): bool(v) for k, v in criterion_results.items()}
             elif criterion_results is not None:
                 for cr in criterion_results:
-                    criterion_map[cr.criterion_id] = cr.status == CriterionStatus.PASS
+                    if cr.criterion_id in manifest.required_criterion_ids:
+                        criterion_map[cr.criterion_id] = (
+                            cr.status == CriterionStatus.PASS and len(cr.evidence) > 0
+                        )
+                    else:
+                        criterion_map[cr.criterion_id] = cr.status == CriterionStatus.PASS
 
             if manifest.required_criterion_ids and criterion_results is None:
                 findings.append(
@@ -901,6 +936,7 @@ class SelfDevelopmentDogfoodingCoordinator:
         gate_verdict: Literal["PASS", "REVISE", "BLOCKED"],
         reviewer_gate_decision: SubscriptionReviewerGateDecision | None = None,
         verify_stable_git_integrity: bool = True,
+        criterion_results: tuple[CriterionResult, ...] | dict[str, bool] | None = None,
     ) -> DogfoodingAuditBundle:
         """Run trusted acceptance & isolation audit for a self-development candidate."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -911,6 +947,15 @@ class SelfDevelopmentDogfoodingCoordinator:
         if stable_candidate_config.allow_auto_promote_stable is not False:
             raise ValueError("allow_auto_promote_stable must be False")
 
+        effective_criterion_results = criterion_results
+        if (
+            effective_criterion_results is None
+            and manifest.required_criterion_ids
+            and reviewer_gate_decision is not None
+            and gate_verdict == "PASS"
+        ):
+            effective_criterion_results = tuple(reviewer_gate_decision.review_result.criteria)
+
         trusted_acceptance = self._validator.evaluate_candidate(
             manifest=manifest,
             workspace=c_root,
@@ -918,25 +963,36 @@ class SelfDevelopmentDogfoodingCoordinator:
             candidate_sha=stable_candidate_config.candidate_sha,
             changed_files=changed_files,
             tests_summary=tests_summary,
+            criterion_results=effective_criterion_results,
+            verification_receipt=verification_receipt,
         )
 
         blockers: list[str] = []
         if not import_origin_report.verified:
             blockers.append(f"IMPORT_ORIGIN_UNVERIFIED:{import_origin_report.status_code}")
-        if not verification_receipt.passed:
-            blockers.append(f"VERIFICATION_FAILED:{verification_receipt.status_code}")
+        if (
+            not verification_receipt.passed
+            or verification_receipt.exit_code != 0
+            or verification_receipt.isolation_mode == "blocked"
+            or not verification_receipt.sanitized_env_verified
+        ):
+            verif_blocker = f"VERIFICATION_FAILED:{verification_receipt.status_code}"
+            if verif_blocker not in blockers:
+                blockers.append(verif_blocker)
         if verification_receipt.candidate_sha != stable_candidate_config.candidate_sha:
             blockers.append("VERIFICATION_RECEIPT_SHA_MISMATCH")
 
         expected_cand_src = Path(import_origin_report.expected_candidate_src).resolve()
+        expected_pkg_root = (c_root / "src" / "aipc").resolve()
+        expected_src_root = (c_root / "src").resolve()
         actual_file_raw = import_origin_report.actual_imported_file.strip()
         actual_imported_ok = bool(actual_file_raw) and (
-            Path(actual_file_raw).resolve().is_relative_to(c_root)
+            Path(actual_file_raw).resolve().is_relative_to(expected_pkg_root)
         )
         if (
             not verification_receipt.import_origin_verified
             or verification_receipt.import_origin_report != import_origin_report
-            or not expected_cand_src.is_relative_to(c_root)
+            or expected_cand_src not in (expected_pkg_root, expected_src_root)
             or not actual_imported_ok
             or len(import_origin_report.leaked_stable_paths) > 0
         ):
@@ -955,7 +1011,10 @@ class SelfDevelopmentDogfoodingCoordinator:
         if stable_mutated:
             blockers.append("STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH")
 
-        if reviewer_gate_decision is not None:
+        if reviewer_gate_decision is None:
+            if review_verdict == ReviewVerdict.PASS or gate_verdict == "PASS":
+                blockers.append("MISSING_REVIEWER_GATE_DECISION")
+        else:
             cand_sha = stable_candidate_config.candidate_sha
             decision_mismatch = (
                 reviewer_gate_decision.task_id != task_id
@@ -972,6 +1031,7 @@ class SelfDevelopmentDogfoodingCoordinator:
                 nested_ok = (
                     reviewer_gate_decision.review_result.task_id == task_id
                     and bound_rev is not None
+                    and bound_rev.review == reviewer_gate_decision.review_result
                     and bound_rev.review.review_id == rev_id
                     and bound_rev.review.task_id == task_id
                     and bound_rev.provenance.task_id == task_id
@@ -984,6 +1044,11 @@ class SelfDevelopmentDogfoodingCoordinator:
                     and sess.candidate_commit_sha == cand_sha
                     and not sess.workspace_mutated
                     and sess.fresh_isolated_session
+                    and sess.read_only_sandbox_enforced
+                    and not sess.inherited_chat_history
+                    and sess.independence_level in ("cross_provider", "reduced_independence")
+                    and sess.workspace_snapshot_before_sha256
+                    == sess.workspace_snapshot_after_sha256
                 )
                 if not nested_ok:
                     decision_mismatch = True
@@ -1003,6 +1068,7 @@ class SelfDevelopmentDogfoodingCoordinator:
             "IMPORT_ORIGIN_WORKSPACE_MISMATCH",
             "STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH",
             "REVIEW_GATE_DECISION_MISMATCH",
+            "MISSING_REVIEWER_GATE_DECISION",
         }
         if dogfooding_passed:
             next_action: HandoffNextAuthorizedAction = "HUMAN_MERGE_REVIEW"

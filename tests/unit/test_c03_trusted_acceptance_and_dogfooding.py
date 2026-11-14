@@ -311,6 +311,88 @@ def test_unauthorized_milestone_d_scope_blocked() -> None:
         )
 
 
+def _make_valid_gate_decision(
+    task_id: str,
+    candidate_sha: str = _CANDIDATE_SHA,
+) -> SubscriptionReviewerGateDecision:
+    digest_zero = "0" * 64
+    review_result = ReviewResult(
+        schema_version="1.0",
+        review_id=f"rev-{task_id}",
+        task_id=task_id,
+        verdict=ReviewVerdict.PASS,
+        confidence=0.95,
+        criteria=[],
+        failed_criteria=[],
+        required_fixes=[],
+        risks=[],
+        next_phase_allowed=True,
+    )
+    bound_review = BoundReview(
+        review=review_result,
+        context_digest=digest_zero,
+        review_digest=digest_zero,
+        authority="codex",
+        provenance=ReviewProvenance(
+            project_id="aipc",
+            run_id="run-1",
+            phase_id="c03",
+            attempt=1,
+            task_id=task_id,
+            attempt_checkpoint_id="cp-1",
+            git_commit=candidate_sha,
+            agent_result_digest=digest_zero,
+            evidence_digest=digest_zero,
+        ),
+    )
+    phase_gate = PhaseGateDecision(
+        verdict=ReviewVerdict.PASS,
+        project_id="aipc",
+        phase_id="c03",
+        attempt=1,
+        task_id=task_id,
+        review_id=review_result.review_id,
+        actions=(GateAction.MARK_PHASE_PASS,),
+        next_phase_allowed=True,
+        stable_checkpoint_allowed=True,
+        repair_required=False,
+        human_intervention_required=False,
+        reasons=("ok",),
+        failed_criteria=(),
+        required_fixes=(),
+    )
+    return SubscriptionReviewerGateDecision(
+        gate_outcome="PASS",
+        task_id=task_id,
+        candidate_commit_sha=candidate_sha,
+        reviewed_commit_sha=candidate_sha,
+        review_result=review_result,
+        bound_review=bound_review,
+        phase_gate_decision=phase_gate,
+        session_audit=SessionIsolationAuditReceipt(
+            audit_id="audit-1",
+            task_id=task_id,
+            candidate_commit_sha=candidate_sha,
+            worker_agent_id="worker-1",
+            worker_provider_family="google_antigravity",
+            reviewer_binding_id="rev-bind-1",
+            reviewer_provider_id="codex",
+            reviewer_provider_family="openai_codex",
+            reviewer_model_id="gpt-5.4",
+            reviewer_session_id="sess-1",
+            fresh_isolated_session=True,
+            inherited_chat_history=False,
+            read_only_sandbox_enforced=True,
+            workspace_snapshot_before_sha256=digest_zero,
+            workspace_snapshot_after_sha256=digest_zero,
+            workspace_mutated=False,
+            independence_level="cross_provider",
+            reduced_independence=False,
+        ),
+        receipt_path="evidence/rev.json",
+    )
+
+
 def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path: Path) -> None:
     stable_root, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
     config = StableCandidateConfig(
@@ -353,6 +435,7 @@ def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path:
         verification_receipt=verification_receipt,
         review_verdict=ReviewVerdict.PASS,
         gate_verdict="PASS",
+        reviewer_gate_decision=_make_valid_gate_decision("task-c03-dogfood"),
     )
 
     assert bundle.dogfooding_passed is True
@@ -927,7 +1010,38 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
         failed_criteria=(),
         required_fixes=(),
     )
-    gate_decision = SubscriptionReviewerGateDecision(
+    with pytest.raises(ValidationError):
+        SubscriptionReviewerGateDecision(
+            gate_outcome="PASS",
+            task_id=task_id,
+            candidate_commit_sha=_CANDIDATE_SHA,
+            reviewed_commit_sha=_CANDIDATE_SHA,
+            review_result=review_result,
+            bound_review=bound_review,
+            phase_gate_decision=phase_gate,
+            session_audit=SessionIsolationAuditReceipt(
+                audit_id="audit-1",
+                task_id=task_id,
+                candidate_commit_sha=_CANDIDATE_SHA,
+                worker_agent_id="worker-1",
+                worker_provider_family="google_antigravity",
+                reviewer_binding_id="rev-bind-1",
+                reviewer_provider_id="codex",
+                reviewer_provider_family="openai_codex",
+                reviewer_model_id="gpt-5.4",
+                reviewer_session_id="sess-1",
+                fresh_isolated_session=True,
+                inherited_chat_history=False,
+                read_only_sandbox_enforced=True,
+                workspace_snapshot_before_sha256=digest_zero,
+                workspace_snapshot_after_sha256=digest_zero,
+                workspace_mutated=False,
+                independence_level="cross_provider",
+                reduced_independence=False,
+            ),
+            receipt_path="evidence/rev.json",
+        )
+    gate_decision = SubscriptionReviewerGateDecision.model_construct(
         gate_outcome="PASS",
         task_id=task_id,
         candidate_commit_sha=_CANDIDATE_SHA,
@@ -956,6 +1070,7 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
             reduced_independence=False,
         ),
         receipt_path="evidence/rev.json",
+        reasons=(),
     )
 
     coordinator = SelfDevelopmentDogfoodingCoordinator()
@@ -977,3 +1092,181 @@ def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
     assert bundle.dogfooding_passed is False
     assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
     assert "REVIEW_GATE_DECISION_MISMATCH" in bundle.blockers
+
+
+def test_dogfooding_requires_reviewer_gate_decision_on_pass(tmp_path: Path) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-missing-gate",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=None,
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "MISSING_REVIEWER_GATE_DECISION" in bundle.blockers
+
+
+@pytest.mark.parametrize(
+    "receipt_override",
+    [
+        {"exit_code": 1},
+        {"isolation_mode": "blocked"},
+        {"sanitized_env_verified": False},
+    ],
+)
+def test_dogfooding_rejects_forged_verification_receipt_invariants(
+    tmp_path: Path,
+    receipt_override: dict[str, object],
+) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    forged_receipt = verification_receipt.model_copy(update=receipt_override)
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-forged-receipt",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=forged_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=_make_valid_gate_decision("task-c03-forged-receipt"),
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert any(b.startswith("VERIFICATION_FAILED:") for b in bundle.blockers)
+    assert REWARD_HACKING_DETECTED in bundle.blockers
+
+
+def test_dogfooding_rejects_actual_imported_file_outside_candidate_src_aipc(
+    tmp_path: Path,
+) -> None:
+    config, manifest, _, _ = _make_clean_dogfood_inputs(tmp_path)
+    candidate_root = Path(config.candidate_worktree_root)
+    (candidate_root / "other").mkdir(parents=True, exist_ok=True)
+    bad_import_report = CandidateImportOriginReport(
+        verified=True,
+        expected_candidate_src=str(candidate_root / "src" / "aipc"),
+        actual_imported_file=str(candidate_root / "other" / "aipc.py"),
+        leaked_stable_paths=(),
+        status_code="OK",
+    )
+    receipt = CandidateVerificationReceipt(
+        candidate_sha=_CANDIDATE_SHA,
+        isolation_mode="isolated_subprocess",
+        import_origin_verified=True,
+        import_origin_report=bad_import_report,
+        sanitized_env_verified=True,
+        exit_code=0,
+        passed=True,
+        status_code="OK",
+        summary="Imported outside src/aipc",
+    )
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-bad-pkg-root",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=bad_import_report,
+        verification_receipt=receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=_make_valid_gate_decision("task-c03-bad-pkg-root"),
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "IMPORT_ORIGIN_WORKSPACE_MISMATCH" in bundle.blockers
+
+
+@pytest.mark.parametrize(
+    "test_body",
+    [
+        (
+            "def test_after_with_return(ctx: object) -> None:\n"
+            "    with ctx:\n"
+            "        return\n"
+            "    assert 1 + 1 == 2\n"
+        ),
+        (
+            "def test_after_try_except_return() -> None:\n"
+            "    try:\n"
+            "        return\n"
+            "    except Exception:\n"
+            "        return\n"
+            "    assert 1 + 1 == 2\n"
+        ),
+    ],
+)
+def test_unreachable_assertion_after_with_or_try_return_fails_closed(
+    tmp_path: Path,
+    test_body: str,
+) -> None:
+    _, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
+    dead_test = candidate_root / "tests" / "unit" / "test_dead_ctrl.py"
+    dead_test.write_text(test_body, encoding="utf-8")
+
+    validator = TrustedAcceptanceHarnessValidator()
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-dead-ctrl",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_dead_ctrl.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "UNREACHABLE_ASSERTION" for f in evaluation.findings)
+
+
+def test_required_criterion_pass_without_evidence_fails_closed(tmp_path: Path) -> None:
+    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
+    manifest = base_manifest.model_copy(update={"required_criterion_ids": ("AC-01",)})
+    validator = TrustedAcceptanceHarnessValidator()
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-crit-no-ev",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=[],
+                notes="claimed pass without evidence",
+            ),
+        ),
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)

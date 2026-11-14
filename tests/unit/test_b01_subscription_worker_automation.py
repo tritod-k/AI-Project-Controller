@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -709,11 +710,33 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
     real_exec = asyncio.create_subprocess_exec
     spawned: list[asyncio.subprocess.Process] = []
 
+    def _pid_alive(pid: int) -> bool:
+        if os.name == "nt":
+            res = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return str(pid) in res.stdout
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
     async def slow_subprocess_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        pid_file = tmp_path / f"grandchild_{len(spawned)}.pid"
+        child_code = (
+            "import subprocess, sys, time; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(p.pid)); "
+            "time.sleep(30)"
+        )
         proc = await real_exec(
             sys.executable,
             "-c",
-            "import time; time.sleep(30)",
+            child_code,
             cwd=kwargs["cwd"],
             env=kwargs["env"],
             stdin=kwargs["stdin"],
@@ -736,6 +759,10 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
         )
     assert len(spawned) == 1
     assert spawned[0].returncode is not None
+    gpid_file = tmp_path / "grandchild_0.pid"
+    assert gpid_file.exists()
+    gpid = int(gpid_file.read_text(encoding="utf-8"))
+    assert not _pid_alive(gpid)
 
     async def _cancel_runner() -> None:
         t = asyncio.create_task(
@@ -799,12 +826,12 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         resolved_model: str,
     ) -> WorkerInvocationResponse:
         return WorkerInvocationResponse(
-            session_id="agy-session-nested",
+            session_id="sess-1",
             model_used=resolved_model,
             summary="Noop.",
         )
 
-    def _build_gate_payload(gate_path: Path) -> dict[str, object]:
+    def _build_gate_decision(gate_path: Path) -> SubscriptionReviewerGateDecision:
         review = ReviewResult(
             schema_version="1.0",
             review_id="rev-001",
@@ -857,6 +884,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             candidate_commit_sha=sha,
             worker_agent_id="aipc-implementation-worker",
             worker_provider_family="google",
+            worker_session_id="sess-1",
             reviewer_binding_id="codex-review-strict",
             reviewer_provider_id="codex_subscription",
             reviewer_provider_family="openai",
@@ -872,7 +900,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             reduced_independence=False,
             high_risk_escalation_required=False,
         )
-        decision = SubscriptionReviewerGateDecision(
+        return SubscriptionReviewerGateDecision(
             gate_outcome="PASS",
             task_id="task-b01-1",
             candidate_commit_sha=sha,
@@ -883,7 +911,6 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             session_audit=audit,
             receipt_path=str(gate_path),
         )
-        return decision.model_dump(mode="json")
 
     def _prepare_case(name: str, payload: dict[str, object]) -> tuple[PersistentTaskQueue, Path]:
         case_dir = tmp_path / name
@@ -914,7 +941,8 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         job_path.write_text(json.dumps(job_payload), encoding="utf-8")
         return q, job_path
 
-    valid_payload = _build_gate_payload(tmp_path / "valid" / "gate.json")
+    base_decision = _build_gate_decision(tmp_path / "valid" / "gate.json")
+    valid_payload = base_decision.model_dump(mode="json")
     q_ok, job_ok = _prepare_case("valid", valid_payload)
     rc = run_cli_worker_job(
         job_ok,
@@ -940,10 +968,71 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             target = target[key]  # type: ignore[assignment]
         target[path_keys[-1]] = bad_val
         q_bad, job_bad = _prepare_case(f"bad_{name}", mutated)
-        with pytest.raises(ControllerError, match="not a verified PASS"):
+        with pytest.raises((ControllerError, ValueError)):
             run_cli_worker_job(
                 job_bad,
                 qualification_report=_qualified_report(),
                 worker_invoker=noop_invoker,
             )
         assert q_bad.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+    assert base_decision.bound_review is not None
+    bad_review = base_decision.bound_review.review.model_copy(
+        update={"verdict": ReviewVerdict.REVISE}
+    )
+    bad_bound = BoundReview.model_construct(
+        **{**dict(base_decision.bound_review), "review": bad_review}
+    )
+    neg_cases: list[tuple[str, SubscriptionReviewerGateDecision]] = [
+        (
+            "bound_revise",
+            SubscriptionReviewerGateDecision.model_construct(
+                **{**dict(base_decision), "bound_review": bad_bound}
+            ),
+        ),
+        (
+            "no_ro_sandbox",
+            SubscriptionReviewerGateDecision.model_construct(
+                **{
+                    **dict(base_decision),
+                    "session_audit": SessionIsolationAuditReceipt.model_construct(
+                        **{**dict(base_decision.session_audit), "read_only_sandbox_enforced": False}
+                    ),
+                }
+            ),
+        ),
+        (
+            "inherited_chat",
+            SubscriptionReviewerGateDecision.model_construct(
+                **{
+                    **dict(base_decision),
+                    "session_audit": SessionIsolationAuditReceipt.model_construct(
+                        **{**dict(base_decision.session_audit), "inherited_chat_history": True}
+                    ),
+                }
+            ),
+        ),
+        (
+            "shared_worker_session",
+            SubscriptionReviewerGateDecision.model_construct(
+                **{
+                    **dict(base_decision),
+                    "session_audit": SessionIsolationAuditReceipt.model_construct(
+                        **{**dict(base_decision.session_audit), "reviewer_session_id": "sess-1"}
+                    ),
+                }
+            ),
+        ),
+    ]
+    for name, neg_decision in neg_cases:
+        neg_payload = neg_decision.model_dump(mode="json")
+        with pytest.raises(ValueError):
+            SubscriptionReviewerGateDecision.model_validate(neg_payload)
+        q_neg, job_neg = _prepare_case(f"neg_{name}", neg_payload)
+        with pytest.raises((ControllerError, ValueError)):
+            run_cli_worker_job(
+                job_neg,
+                qualification_report=_qualified_report(),
+                worker_invoker=noop_invoker,
+            )
+        assert q_neg.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
