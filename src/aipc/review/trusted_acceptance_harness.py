@@ -7,7 +7,7 @@ import fnmatch
 import hashlib
 import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from uuid import uuid4
 
@@ -415,6 +415,89 @@ class CriterionExecutionReceipt(CanonicalRecord):
     passed: StrictBool
     exit_code: StrictInt
     log_sha256: Digest | None = None
+
+
+def record_trusted_criterion_execution(
+    manifest: TrustedHarnessManifest,
+    *,
+    criterion_id: str,
+    candidate_sha: str,
+    test_node_id: str,
+    passed: bool,
+    exit_code: int,
+    execution_log: str,
+) -> tuple[CriterionExecutionReceipt, Path]:
+    """Persist a trusted criterion execution record and log outside candidate worktree."""
+    if manifest.trusted_manifest_path is None or manifest.manifest_digest is None:
+        raise ValueError("manifest.trusted_manifest_path and manifest.manifest_digest are required")
+    if (
+        not criterion_id.strip()
+        or "/" in criterion_id
+        or "\\" in criterion_id
+        or ".." in criterion_id
+    ):
+        raise ValueError(f"Invalid criterion_id for execution record: {criterion_id!r}")
+    log_sha256 = hashlib.sha256(execution_log.encode("utf-8")).hexdigest()
+    receipt = CriterionExecutionReceipt(
+        criterion_id=criterion_id,
+        candidate_sha=candidate_sha,
+        manifest_digest=manifest.manifest_digest,
+        test_node_id=test_node_id,
+        passed=passed,
+        exit_code=exit_code,
+        log_sha256=log_sha256,
+    )
+    record_path = (
+        Path(manifest.trusted_manifest_path).resolve().parent
+        / f"exec_{criterion_id}_{candidate_sha[:12]}.json"
+    )
+    payload = {
+        "receipt": receipt.model_dump(mode="json"),
+        "execution_log": execution_log,
+    }
+    assert_no_secrets(payload)
+    record_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return receipt, record_path
+
+
+def _test_function_exists_in_source(source: str, func_name: str) -> bool:
+    """Return True if func_name is defined as a FunctionDef or AsyncFunctionDef in source."""
+    if not func_name or not func_name.startswith("test_"):
+        return False
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+            return True
+    return False
+
+
+def _verify_candidate_imported_file(
+    actual_file_raw: str,
+    cand_root: Path,
+    isolation_mode: str,
+) -> bool:
+    """Verify imported aipc file resolves inside Candidate src/aipc (with container mapping)."""
+    stripped = actual_file_raw.strip()
+    if not stripped:
+        return False
+    posix_str = stripped.replace("\\", "/")
+    if ".." in PurePosixPath(posix_str).parts:
+        return False
+    cand_pkg_root = (cand_root / "src" / "aipc").resolve()
+    if isolation_mode == "container" and (
+        posix_str == "/workspace/src/aipc/__init__.py"
+        or posix_str.startswith("/workspace/src/aipc/")
+    ):
+        rel_subpath = posix_str[len("/workspace/") :]
+        mapped_host_file = (cand_root / rel_subpath).resolve()
+        return mapped_host_file.is_relative_to(cand_pkg_root) and mapped_host_file.is_file()
+    if posix_str == "/workspace" or posix_str.startswith("/workspace/"):
+        return False
+    resolved_host = Path(stripped).resolve()
+    return resolved_host.is_relative_to(cand_pkg_root) and resolved_host.is_file()
 
 
 class RewardHackingFinding(CanonicalRecord):
@@ -1196,8 +1279,32 @@ class TrustedAcceptanceHarnessValidator:
                 and (not rec.passed or rec.exit_code != 0)
             }
 
+            def _verify_test_node(test_node_id: str) -> str | None:
+                parts = test_node_id.split("::")
+                if len(parts) < 2:
+                    return None
+                func_name = parts[-1].split("[")[0]
+                if not func_name.startswith("test_"):
+                    return None
+                norm_test_file = _normalize_rel_path(parts[0])
+                if (
+                    Path(norm_test_file).is_absolute()
+                    or not norm_test_file.startswith("tests/")
+                    or not norm_test_file.endswith(".py")
+                ):
+                    return None
+                test_path = (workspace_root / norm_test_file).resolve()
+                if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
+                    return None
+                source = test_path.read_text(encoding="utf-8")
+                if not _test_function_exists_in_source(source, func_name):
+                    return None
+                if len(self.inspect_python_test_source(norm_test_file, source)) != 0:
+                    return None
+                return norm_test_file
+
             def _is_verified_context_artifact_for_criterion(ev: str, cid: str) -> bool:
-                if review_context is None:
+                if review_context is None or manifest.manifest_digest is None:
                     return False
                 ev_root = Path(review_context.evidence_root).resolve()
                 artifacts_by_path = {art.path: art for art in review_context.evidence.artifacts}
@@ -1216,7 +1323,34 @@ class TrustedAcceptanceHarnessValidator:
                     if hashlib.sha256(raw_bytes).hexdigest() != art.sha256:
                         return False
                     content = raw_bytes.decode("utf-8", errors="replace")
-                    return cid in content and candidate_sha in content and "PASS" in content
+                    try:
+                        parsed = json.loads(content)
+                    except ValueError:
+                        return False
+                    records = (
+                        [parsed]
+                        if isinstance(parsed, dict)
+                        else parsed
+                        if isinstance(parsed, list)
+                        else []
+                    )
+                    for rec in records:
+                        if not isinstance(rec, dict):
+                            continue
+                        exit_code = rec.get("exit_code")
+                        test_node_id = rec.get("test_node_id")
+                        if (
+                            rec.get("criterion_id") == cid
+                            and rec.get("candidate_sha") == candidate_sha
+                            and rec.get("manifest_digest") == manifest.manifest_digest
+                            and rec.get("status") == "PASS"
+                            and type(exit_code) is int
+                            and exit_code == 0
+                            and isinstance(test_node_id, str)
+                            and _verify_test_node(test_node_id) is not None
+                        ):
+                            return True
+                    return False
                 return False
 
             def _valid_criterion_evidence(ev: str, cid: str) -> bool:
@@ -1230,11 +1364,29 @@ class TrustedAcceptanceHarnessValidator:
                     or verification_receipt.exit_code != 0
                     or verification_receipt.candidate_sha != candidate_sha
                     or manifest.manifest_digest is None
+                    or manifest.trusted_manifest_path is None
                 ):
                     return False
                 expected_ev = (
                     f"receipt:{verification_receipt.candidate_sha}:{cid}:{manifest.manifest_digest}"
                 )
+                exec_record_path = (
+                    Path(manifest.trusted_manifest_path).resolve().parent
+                    / f"exec_{cid}_{candidate_sha[:12]}.json"
+                )
+                if not exec_record_path.is_file():
+                    return False
+                try:
+                    retained = json.loads(exec_record_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    return False
+                if not isinstance(retained, dict):
+                    return False
+                retained_receipt = retained.get("receipt")
+                retained_log = retained.get("execution_log")
+                if not isinstance(retained_receipt, dict) or not isinstance(retained_log, str):
+                    return False
+                retained_log_sha = hashlib.sha256(retained_log.encode("utf-8")).hexdigest()
                 for exec_rec in all_exec_receipts:
                     if (
                         exec_rec.criterion_id != cid
@@ -1242,23 +1394,18 @@ class TrustedAcceptanceHarnessValidator:
                         or exec_rec.manifest_digest != manifest.manifest_digest
                         or not exec_rec.passed
                         or exec_rec.exit_code != 0
+                        or exec_rec.log_sha256 is None
                     ):
                         continue
-                    parts = exec_rec.test_node_id.split("::")
-                    if len(parts) < 2 or not parts[-1].startswith("test_"):
+                    norm_test_file = _verify_test_node(exec_rec.test_node_id)
+                    if norm_test_file is None:
                         continue
-                    norm_test_file = _normalize_rel_path(parts[0])
                     if (
-                        Path(norm_test_file).is_absolute()
-                        or not norm_test_file.startswith("tests/")
-                        or not norm_test_file.endswith(".py")
+                        retained_receipt != exec_rec.model_dump(mode="json")
+                        or retained_log_sha != exec_rec.log_sha256
+                        or exec_rec.test_node_id not in retained_log
+                        or "PASSED" not in retained_log
                     ):
-                        continue
-                    test_path = (workspace_root / norm_test_file).resolve()
-                    if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
-                        continue
-                    source = test_path.read_text(encoding="utf-8")
-                    if len(self.inspect_python_test_source(norm_test_file, source)) != 0:
                         continue
                     if ev in (exec_rec.test_node_id, norm_test_file, expected_ev):
                         return True
@@ -1385,9 +1532,10 @@ class DogfoodingAuditBundle(CanonicalRecord):
         cand_src_root = (cand_root / "src").resolve()
         cand_pkg_root = (cand_root / "src" / "aipc").resolve()
         expected_src = Path(self.import_origin_report.expected_candidate_src).resolve()
-        actual_file_raw = self.import_origin_report.actual_imported_file.strip()
-        actual_imported_ok = bool(actual_file_raw) and (
-            Path(actual_file_raw).resolve().is_relative_to(cand_pkg_root)
+        actual_imported_ok = _verify_candidate_imported_file(
+            self.import_origin_report.actual_imported_file,
+            cand_root,
+            self.verification_receipt.isolation_mode,
         )
         if self.dogfooding_passed and (
             not self.import_origin_report.verified
@@ -1593,9 +1741,10 @@ class SelfDevelopmentDogfoodingCoordinator:
         cand_src_root = (c_root / "src").resolve()
         expected_pkg_root = (c_root / "src" / "aipc").resolve()
         expected_cand_src = Path(import_origin_report.expected_candidate_src).resolve()
-        actual_file_raw = import_origin_report.actual_imported_file.strip()
-        actual_imported_ok = bool(actual_file_raw) and (
-            Path(actual_file_raw).resolve().is_relative_to(expected_pkg_root)
+        actual_imported_ok = _verify_candidate_imported_file(
+            import_origin_report.actual_imported_file,
+            c_root,
+            verification_receipt.isolation_mode,
         )
         if (
             not verification_receipt.import_origin_verified

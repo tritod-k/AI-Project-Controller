@@ -138,10 +138,19 @@ def test_container_and_subprocess_verification_use_sanitized_env_without_api_key
         cwd: Path,
     ) -> subprocess.CompletedProcess[str]:
         observed_calls.append((list(argv), dict(env), cwd))
+        nonce = ""
+        for item in argv:
+            if item.startswith("AIPC_ORIGIN_NONCE="):
+                nonce = item.split("=", 1)[1]
+                break
         return subprocess.CompletedProcess(
             argv,
             0,
-            stdout='{"aipc_import_origin": "/workspace/src/aipc/__init__.py"}\n1 passed in 0.05s',
+            stdout=(
+                f"AIPC_CONTAINER_ORIGIN_{nonce}:"
+                '{"file": "/workspace/src/aipc/__init__.py", '
+                '"path": ["/workspace/src"]}\n1 passed in 0.05s'
+            ),
             stderr="",
         )
 
@@ -191,3 +200,82 @@ def test_stable_process_rejects_loaded_candidate_module(
 
     with pytest.raises(ControllerError, match=IMPORT_ORIGIN_MISMATCH):
         assert_stable_process_free_of_candidate_imports(candidate_root)
+
+
+def test_container_verification_rejects_candidate_spoofed_origin_without_nonce(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="container",
+    )
+
+    def spoofed_json_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"aipc_import_origin": "/workspace/src/aipc/__init__.py"}\n1 passed',
+            stderr="",
+        )
+
+    runner_spoof = SafeSelfDevelopmentRunner(cfg, subprocess_runner=spoofed_json_runner)
+    with pytest.raises(ControllerError, match=IMPORT_ORIGIN_MISMATCH):
+        runner_spoof.run_candidate_verification(pytest_targets=("tests/test_candidate_smoke.py",))
+
+    def wrong_nonce_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=(
+                "AIPC_CONTAINER_ORIGIN_wrong:"
+                '{"file": "/workspace/src/aipc/__init__.py", "path": ["/workspace/src"]}\n'
+                "1 passed"
+            ),
+            stderr="",
+        )
+
+    runner_wrong_nonce = SafeSelfDevelopmentRunner(cfg, subprocess_runner=wrong_nonce_runner)
+    with pytest.raises(ControllerError, match=IMPORT_ORIGIN_MISMATCH):
+        runner_wrong_nonce.run_candidate_verification(
+            pytest_targets=("tests/test_candidate_smoke.py",),
+        )
+
+    def traversal_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        nonce = ""
+        for item in argv:
+            if item.startswith("AIPC_ORIGIN_NONCE="):
+                nonce = item.split("=", 1)[1]
+                break
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=(
+                f"AIPC_CONTAINER_ORIGIN_{nonce}:"
+                '{"file": "/workspace/src/aipc/../../other/aipc/__init__.py", '
+                '"path": ["/workspace/src"]}\n1 passed'
+            ),
+            stderr="",
+        )
+
+    runner_traversal = SafeSelfDevelopmentRunner(cfg, subprocess_runner=traversal_runner)
+    with pytest.raises(ControllerError, match=IMPORT_ORIGIN_MISMATCH):
+        runner_traversal.run_candidate_verification(
+            pytest_targets=("tests/test_candidate_smoke.py",),
+        )

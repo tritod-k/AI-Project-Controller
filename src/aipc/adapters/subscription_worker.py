@@ -344,6 +344,9 @@ def _pid_exists(pid: int, env: Mapping[str, str] | None = None) -> bool:
     return True
 
 
+_CREATE_SUSPENDED = 0x00000004
+
+
 class _JobObjectBasicAccountingInformation(ctypes.Structure):
     _fields_ = [
         ("TotalUserTime", ctypes.c_int64),
@@ -447,7 +450,7 @@ class _WindowsKillOnCloseJob:
             k32.CloseHandle(h_job)
             raise
 
-    def assign(self, pid: int | None) -> None:
+    def assign(self, pid: int | None, *, resume_suspended: bool = False) -> None:
         if os.name != "nt":
             return
         if self._handle is None or pid is None:
@@ -466,6 +469,13 @@ class _WindowsKillOnCloseJob:
                     raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
                 return
             self.enrolled = True
+            if resume_suspended:
+                ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
+                ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+                ntdll.NtResumeProcess.restype = ctypes.c_int32
+                status = ntdll.NtResumeProcess(h_proc)
+                if status != 0 and self._strict:
+                    raise ControllerError(f"NtResumeProcess failed (status={status}) for PID {pid}")
         finally:
             k32.CloseHandle(h_proc)
 
@@ -576,18 +586,41 @@ def _default_validation_command_runner(
         else token
         for token in argv
     ]
-    job_obj = _WindowsKillOnCloseJob(strict=False)
-    proc = subprocess.Popen(
-        cleaned_argv,
-        cwd=str(worktree),
-        env=dict(env),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=(os.name != "nt"),
-    )
-    job_obj.assign(proc.pid)
+    job_obj = _WindowsKillOnCloseJob(strict=(os.name == "nt"))
+    try:
+        proc = subprocess.Popen(
+            cleaned_argv,
+            cwd=str(worktree),
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=(os.name != "nt"),
+            creationflags=_CREATE_SUSPENDED if os.name == "nt" else 0,
+        )
+    except Exception:
+        job_obj.close()
+        raise
+    try:
+        job_obj.assign(proc.pid, resume_suspended=(os.name == "nt"))
+    except Exception:
+        try:
+            _terminate_pid_tree(proc.pid, env, require_tree_kill=False, job_obj=job_obj)
+        finally:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                job_obj.close()
+            except ControllerError:
+                pass
+        raise
     try:
         stdout_text, stderr_text = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -675,38 +708,48 @@ async def invoke_antigravity_cli_worker(
         task.prompt,
     ]
     job_obj = _WindowsKillOnCloseJob(strict=(os.name == "nt"))
+    exec_kwargs: dict[str, Any] = {
+        "cwd": str(Path(config.candidate_worktree).resolve()),
+        "env": dict(env),
+        "stdin": asyncio.subprocess.DEVNULL,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+        "start_new_session": (os.name != "nt"),
+    }
+    if os.name == "nt":
+        exec_kwargs["creationflags"] = _CREATE_SUSPENDED
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(Path(config.candidate_worktree).resolve()),
-            env=dict(env),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=(os.name != "nt"),
-        )
+        proc = await asyncio.create_subprocess_exec(*argv, **exec_kwargs)
     except Exception:
         job_obj.close()
         raise
     try:
-        job_obj.assign(proc.pid)
+        job_obj.assign(proc.pid, resume_suspended=(os.name == "nt"))
     except Exception as exc:
         try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2.0)
-        except TimeoutError:
-            pass
+            _terminate_pid_tree(
+                proc.pid,
+                env,
+                require_tree_kill=False,
+                job_obj=job_obj,
+            )
         finally:
-            transport = getattr(proc, "_transport", None)
-            if transport is not None and hasattr(transport, "close"):
-                transport.close()
             try:
-                job_obj.close()
-            except ControllerError:
+                proc.kill()
+            except ProcessLookupError:
                 pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+            finally:
+                transport = getattr(proc, "_transport", None)
+                if transport is not None and hasattr(transport, "close"):
+                    transport.close()
+                try:
+                    job_obj.close()
+                except ControllerError:
+                    pass
         if isinstance(exc, ControllerError):
             raise
         raise ControllerError(str(exc)) from exc

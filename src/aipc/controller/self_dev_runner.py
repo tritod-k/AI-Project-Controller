@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -187,37 +188,74 @@ def _write_candidate_isolation_bootstrap(
     script = nl.join(
         [
             "def _install_aipc_boot_guard():",
-            "    import os, socket, subprocess, sys, tempfile",
-            "    from pathlib import Path",
+            "    import os, socket, stat, subprocess, sys, tempfile",
             "    if sys.flags.no_site or sys.flags.isolated or sys.flags.ignore_environment:",
             "        raise RuntimeError('ISOLATED_GUARD_DISABLED')",
-            f"    _STABLE = Path({stable_str!r}).resolve()",
-            "    _STABLE_VENV = (_STABLE / '.venv').resolve()",
-            f"    _CAND_SRC = Path({cand_src_str!r}).resolve()",
-            "    _CAND_ROOT = _CAND_SRC.parent.resolve()",
-            "    _SELF_FILE = Path(__file__).resolve()",
-            "    _BOOT_DIR = _SELF_FILE.parent",
-            "    _SCRATCH_DIR = _BOOT_DIR / 'scratch'",
-            "    _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)",
-            "    _TMP_ROOT = _SCRATCH_DIR.resolve()",
-            "    os.environ['TMPDIR'] = str(_TMP_ROOT)",
-            "    os.environ['TEMP'] = str(_TMP_ROOT)",
-            "    os.environ['TMP'] = str(_TMP_ROOT)",
-            "    tempfile.tempdir = str(_TMP_ROOT)",
+            "    _c_realpath = os.path.realpath",
+            "    _c_normcase = os.path.normcase",
+            "    _c_normpath = os.path.normpath",
+            "    _c_fsdecode = os.fsdecode",
+            "    _c_lstat = os.lstat",
+            "    _c_getcwd = os.getcwd",
+            "    _c_join = os.path.join",
+            "    _c_dirname = os.path.dirname",
+            "    _c_basename = os.path.basename",
+            "    _c_isabs = os.path.isabs",
+            "    _c_pathlike = os.PathLike",
+            "    _sep = os.sep",
+            "    _s_islnk = stat.S_ISLNK",
+            "    _reparse_flag = getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)",
+            "    _nulls = (_c_normcase(os.devnull), r'\\\\.\\nul', '/dev/null', 'nul')",
+            "    def _in_tree(_norm_p, _root_norm, _root_prefix):",
+            "        return _norm_p == _root_norm or _norm_p.startswith(_root_prefix)",
+            "    _in_tree.__defaults__ = None",
+            "    _in_tree.__kwdefaults__ = None",
+            f"    _stable_norm = _c_normcase(_c_realpath({stable_str!r}))",
+            "    _stable_prefix = (",
+            "        _stable_norm if _stable_norm.endswith(_sep) else _stable_norm + _sep",
+            "    )",
+            "    _stable_venv_norm = _c_normcase(_c_realpath(_c_join(_stable_norm, '.venv')))",
+            "    _stable_venv_prefix = (",
+            "        _stable_venv_norm",
+            "        if _stable_venv_norm.endswith(_sep)",
+            "        else _stable_venv_norm + _sep",
+            "    )",
+            f"    _cand_src_real = _c_realpath({cand_src_str!r})",
+            "    _cand_root_norm = _c_normcase(_c_dirname(_cand_src_real))",
+            "    _cand_root_prefix = (",
+            "        _cand_root_norm",
+            "        if _cand_root_norm.endswith(_sep)",
+            "        else _cand_root_norm + _sep",
+            "    )",
+            "    _self_norm = _c_normcase(_c_realpath(__file__))",
+            "    _BOOT_DIR = _c_dirname(_c_realpath(__file__))",
+            "    _boot_norm = _c_normcase(_BOOT_DIR)",
+            "    _boot_prefix = (",
+            "        _boot_norm if _boot_norm.endswith(_sep) else _boot_norm + _sep",
+            "    )",
+            "    _SCRATCH_DIR = _c_join(_BOOT_DIR, 'scratch')",
+            "    os.makedirs(_SCRATCH_DIR, exist_ok=True)",
+            "    _tmp_real = _c_realpath(_SCRATCH_DIR)",
+            "    _tmp_norm = _c_normcase(_tmp_real)",
+            "    _tmp_prefix = _tmp_norm if _tmp_norm.endswith(_sep) else _tmp_norm + _sep",
+            "    os.environ['TMPDIR'] = _tmp_real",
+            "    os.environ['TEMP'] = _tmp_real",
+            "    os.environ['TMP'] = _tmp_real",
+            "    tempfile.tempdir = _tmp_real",
             "    _cleaned = []",
             "    for _entry in list(sys.path):",
             "        if not _entry:",
             "            continue",
             "        try:",
-            "            _p = Path(_entry).resolve()",
-            "            if not _p.is_relative_to(_STABLE_VENV) and (",
-            "                _p == _STABLE or _p.is_relative_to(_STABLE)",
+            "            _p = _c_normcase(_c_realpath(_entry))",
+            "            if not _in_tree(_p, _stable_venv_norm, _stable_venv_prefix) and _in_tree(",
+            "                _p, _stable_norm, _stable_prefix",
             "            ):",
             "                continue",
             "        except OSError:",
             "            pass",
             "        _cleaned.append(_entry)",
-            "    sys.path[:] = [str(_CAND_SRC)] + _cleaned",
+            "    sys.path[:] = [_cand_src_real] + _cleaned",
             "    def _is_loopback_addr(_addr):",
             "        if isinstance(_addr, tuple) and len(_addr) >= 1:",
             "            return str(_addr[0]) in ('127.0.0.1', '::1', 'localhost', '')",
@@ -327,10 +365,10 @@ def _write_candidate_isolation_bootstrap(
             "        if _ev in ('ctypes.dlopen', 'ctypes.dlsym'):",
             "            raise PermissionError(f'CTYPES_SANDBOX_BLOCKED: {_ev}')",
             "        if _ev == 'subprocess.Popen' and len(_args) >= 2:",
-            "            _exe = str(_args[0] or '')",
+            "            _exe = _c_fsdecode(_args[0]) if _args[0] is not None else ''",
             "            _av = list(_args[1]) if isinstance(_args[1], (list, tuple)) else []",
-            "            _c0 = _exe or (str(_av[0]) if _av else '')",
-            "            _nm = Path(_c0).name.lower().removesuffix('.exe') if _c0 else ''",
+            "            _c0 = _exe or (_c_fsdecode(_av[0]) if _av else '')",
+            "            _nm = _c_basename(_c0).lower().removesuffix('.exe') if _c0 else ''",
             "            if not _nm.startswith('python'):",
             "                raise PermissionError('SUBPROCESS_SANDBOX_BYPASS_BLOCKED: Popen')",
             "            for _tok in _av[1:]:",
@@ -372,18 +410,59 @@ def _write_candidate_isolation_bootstrap(
             "        ):",
             "            if len(_args) >= 2:",
             "                _paths = (_args[0], _args[1])",
-            "        _nulls = (os.devnull.lower(), r'\\\\.\\nul', '/dev/null')",
             "        for _raw in _paths:",
-            "            if not isinstance(_raw, (str, bytes, os.PathLike)):",
+            "            if isinstance(_raw, int):",
             "                raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
-            "            _tp = Path(os.fsdecode(_raw)).resolve()",
-            "            if str(_tp).lower() in _nulls:",
+            "            if not isinstance(_raw, (str, bytes, _c_pathlike)):",
+            "                raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
+            "            _raw_str = _c_fsdecode(_raw)",
+            "            _abs_path = _c_normpath(",
+            "                _raw_str if _c_isabs(_raw_str) else _c_join(_c_getcwd(), _raw_str)",
+            "            )",
+            "            _comp = _abs_path",
+            "            while _comp:",
+            "                try:",
+            "                    _st = _c_lstat(_comp)",
+            "                except OSError:",
+            "                    _st = None",
+            "                if _st is not None:",
+            "                    _is_link = _s_islnk(_st.st_mode) or bool(",
+            "                        getattr(_st, 'st_file_attributes', 0) & _reparse_flag",
+            "                    )",
+            "                    if _is_link:",
+            "                        _rc = _c_normcase(_c_realpath(_comp))",
+            "                        _rc_ok = (",
+            "                            _rc != _self_norm",
+            "                            and not (",
+            "                                _in_tree(_rc, _boot_norm, _boot_prefix)",
+            "                                and not _in_tree(_rc, _tmp_norm, _tmp_prefix)",
+            "                            )",
+            "                            and (",
+            "                                _rc in _nulls",
+            "                                or _in_tree(_rc, _cand_root_norm, _cand_root_prefix)",
+            "                                or _in_tree(_rc, _tmp_norm, _tmp_prefix)",
+            "                            )",
+            "                        )",
+            "                        if not _rc_ok:",
+            "                            raise PermissionError(",
+            "                                f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_comp}'",
+            "                            )",
+            "                _parent = _c_dirname(_comp)",
+            "                if _parent == _comp:",
+            "                    break",
+            "                _comp = _parent",
+            "            _tp = _c_normcase(_c_realpath(_raw_str))",
+            "            if _tp in _nulls:",
             "                continue",
-            "            if _tp == _SELF_FILE or (",
-            "                _tp.is_relative_to(_BOOT_DIR) and not _tp.is_relative_to(_TMP_ROOT)",
+            "            if _tp == _self_norm or (",
+            "                _in_tree(_tp, _boot_norm, _boot_prefix)",
+            "                and not _in_tree(_tp, _tmp_norm, _tmp_prefix)",
             "            ):",
             "                raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_tp}')",
-            "            if not (_tp.is_relative_to(_CAND_ROOT) or _tp.is_relative_to(_TMP_ROOT)):",
+            "            if not (",
+            "                _in_tree(_tp, _cand_root_norm, _cand_root_prefix)",
+            "                or _in_tree(_tp, _tmp_norm, _tmp_prefix)",
+            "            ):",
             "                raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_tp}')",
             "    _aipc_boot_audit.__defaults__ = None",
             "    _aipc_boot_audit.__kwdefaults__ = None",
@@ -606,6 +685,15 @@ class SafeSelfDevelopmentRunner:
                 f"{candidate_src}"
             )
 
+        probe_nonce = uuid.uuid4().hex
+        probe_code = (
+            "import json, os, pathlib, sys, aipc, pytest; "
+            "_f = str(pathlib.Path(aipc.__file__).resolve()); "
+            "_n = os.environ.get('AIPC_ORIGIN_NONCE', ''); "
+            "print(f'AIPC_CONTAINER_ORIGIN_{_n}:' + "
+            "json.dumps({'file': _f, 'path': list(sys.path)}), flush=True); "
+            "raise SystemExit(pytest.main(sys.argv[1:]))"
+        )
         argv = [
             "docker",
             "run",
@@ -633,14 +721,16 @@ class SafeSelfDevelopmentRunner:
             "PYTHONDONTWRITEBYTECODE=1",
             "-e",
             "PYTHONPATH=/workspace/src",
+            "-e",
+            f"AIPC_ORIGIN_NONCE={probe_nonce}",
             "-v",
             f"{candidate_root}:/workspace:ro",
             "-w",
             "/workspace",
             self.config.container_image,
             "python3",
-            "-m",
-            "pytest",
+            "-c",
+            probe_code,
             "-q",
             "-o",
             "cache_dir=/tmp/.pytest_cache",
@@ -657,18 +747,24 @@ class SafeSelfDevelopmentRunner:
         origin_report: CandidateImportOriginReport | None = None
         import_origin_verified = False
         if passed:
+            expected_prefix = f"AIPC_CONTAINER_ORIGIN_{probe_nonce}:"
             detected_origin: str | None = None
+            detected_sys_path: list[str] = []
             for line in (proc.stdout or "").splitlines():
                 line_s = line.strip()
-                if line_s.startswith("{") and "aipc_import_origin" in line_s:
+                if line_s.startswith(expected_prefix):
+                    payload = line_s[len(expected_prefix) :]
                     try:
-                        parsed = json.loads(line_s)
-                        val = parsed.get("aipc_import_origin")
-                        if isinstance(val, str) and val:
-                            detected_origin = val
-                            break
+                        parsed = json.loads(payload)
                     except json.JSONDecodeError:
-                        pass
+                        continue
+                    val = parsed.get("file") if isinstance(parsed, dict) else None
+                    if isinstance(val, str) and val:
+                        detected_origin = val
+                        raw_paths = parsed.get("path", [])
+                        if isinstance(raw_paths, list):
+                            detected_sys_path = [str(p) for p in raw_paths]
+                        break
             if detected_origin is None:
                 raise ControllerError(
                     f"{IMPORT_ORIGIN_MISMATCH}: container output missing verified "
@@ -687,6 +783,11 @@ class SafeSelfDevelopmentRunner:
             ):
                 raise ControllerError(
                     f"{IMPORT_ORIGIN_MISMATCH}: container imported aipc from '{detected_origin}'"
+                )
+            stable_str = str(Path(self.config.stable_root).resolve()).replace("\\", "/")
+            if any(p.replace("\\", "/").startswith(stable_str) for p in detected_sys_path):
+                raise ControllerError(
+                    f"{IMPORT_ORIGIN_MISMATCH}: container sys.path leaked stable_root"
                 )
             origin_report = CandidateImportOriginReport(
                 verified=True,

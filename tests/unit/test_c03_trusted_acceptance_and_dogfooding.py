@@ -73,6 +73,7 @@ from aipc.review.trusted_acceptance_harness import (
     TrustedHarnessManifest,
     assert_milestone_c_scope_authorized,
     build_trusted_harness_manifest,
+    record_trusted_criterion_execution,
 )
 from aipc.version.models import CheckpointMetadata, CheckpointType
 
@@ -1107,24 +1108,25 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
     assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in eval_weak_ev.findings)
 
     assert manifest.manifest_digest is not None
-    exec_receipts = (
-        CriterionExecutionReceipt(
-            criterion_id="AC-01",
-            candidate_sha=_CANDIDATE_SHA,
-            manifest_digest=manifest.manifest_digest,
-            test_node_id="tests/unit/test_feature.py::test_feature_behavior",
-            passed=True,
-            exit_code=0,
-        ),
-        CriterionExecutionReceipt(
-            criterion_id="AC-02",
-            candidate_sha=_CANDIDATE_SHA,
-            manifest_digest=manifest.manifest_digest,
-            test_node_id="tests/unit/test_feature.py::test_feature_behavior",
-            passed=True,
-            exit_code=0,
-        ),
+    rec_ac01, _ = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+        passed=True,
+        exit_code=0,
+        execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
     )
+    rec_ac02, _ = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-02",
+        candidate_sha=_CANDIDATE_SHA,
+        test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+        passed=True,
+        exit_code=0,
+        execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
+    )
+    exec_receipts = (rec_ac01, rec_ac02)
     eval_valid = validator.evaluate_candidate(
         manifest=manifest,
         workspace=candidate_root,
@@ -2162,13 +2164,14 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
         assert bad_eval.rejection_code == REWARD_HACKING_DETECTED
         assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in bad_eval.findings)
 
-    exec_receipt = CriterionExecutionReceipt(
+    exec_receipt, _ = record_trusted_criterion_execution(
+        manifest,
         criterion_id="AC-01",
         candidate_sha=_CANDIDATE_SHA,
-        manifest_digest=manifest.manifest_digest,
         test_node_id="tests/unit/test_feature.py::test_feature_behavior",
         passed=True,
         exit_code=0,
+        execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
     )
     for good_ev in (
         f"receipt:{_CANDIDATE_SHA}:AC-01:{manifest.manifest_digest}",
@@ -2342,3 +2345,282 @@ def test_failed_criterion_receipt_rejected_despite_passing_aggregate_summary(
     assert evaluation.passed is False
     assert evaluation.rejection_code == REWARD_HACKING_DETECTED
     assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+def test_in_memory_criterion_execution_receipt_without_retained_record_rejected(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-inmem-rec",
+        required_criterion_ids=("AC-01",),
+    )
+    assert manifest.manifest_digest is not None
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+    fake_log = "tests/unit/test_feature.py::test_feature_behavior PASSED\n"
+    in_memory_exec = CriterionExecutionReceipt(
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        manifest_digest=manifest.manifest_digest,
+        test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+        passed=True,
+        exit_code=0,
+        log_sha256=hashlib.sha256(fake_log.encode("utf-8")).hexdigest(),
+    )
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-inmem-rec",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=["tests/unit/test_feature.py::test_feature_behavior"],
+                notes="in-memory receipt without retained trusted record",
+            ),
+        ),
+        verification_receipt=receipt,
+        criterion_execution_receipts=(in_memory_exec,),
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+def test_criterion_execution_receipt_nonexistent_test_function_rejected(tmp_path: Path) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-missing-fn",
+        required_criterion_ids=("AC-01",),
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+    bad_node = "tests/unit/test_feature.py::test_nonexistent_func"
+    exec_receipt, _ = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        test_node_id=bad_node,
+        passed=True,
+        exit_code=0,
+        execution_log=f"{bad_node} PASSED\n",
+    )
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-missing-fn",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=[bad_node],
+                notes="points to nonexistent test function",
+            ),
+        ),
+        verification_receipt=receipt,
+        criterion_execution_receipts=(exec_receipt,),
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+def test_review_context_artifact_misleading_prose_and_bad_digest_rejected(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-art-schema",
+        required_criterion_ids=("AC-01",),
+    )
+    assert manifest.manifest_digest is not None
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    review_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-art-schema",
+        candidate_sha=_CANDIDATE_SHA,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
+    ev_root = Path(review_ctx.evidence_root)
+    prose_bytes = f"AC-01 {_CANDIDATE_SHA} did NOT PASS".encode()
+    (ev_root / "terminal_log.txt").write_bytes(prose_bytes)
+    bad_json_bytes = json.dumps(
+        {
+            "criterion_id": "AC-01",
+            "candidate_sha": _CANDIDATE_SHA,
+            "manifest_digest": "f" * 64,
+            "status": "PASS",
+            "exit_code": 0,
+            "test_node_id": "tests/unit/test_feature.py::test_feature_behavior",
+        }
+    ).encode("utf-8")
+    (ev_root / "raw_output.txt").write_bytes(bad_json_bytes)
+
+    updated_artifacts = []
+    for art in review_ctx.evidence.artifacts:
+        if art.path == "terminal_log.txt":
+            updated_artifacts.append(
+                art.model_copy(
+                    update={
+                        "size": len(prose_bytes),
+                        "sha256": hashlib.sha256(prose_bytes).hexdigest(),
+                    }
+                )
+            )
+        elif art.path == "raw_output.txt":
+            updated_artifacts.append(
+                art.model_copy(
+                    update={
+                        "size": len(bad_json_bytes),
+                        "sha256": hashlib.sha256(bad_json_bytes).hexdigest(),
+                    }
+                )
+            )
+        else:
+            updated_artifacts.append(art)
+    updated_ctx = review_ctx.model_copy(
+        update={
+            "evidence": review_ctx.evidence.model_copy(
+                update={"artifacts": tuple(updated_artifacts)}
+            )
+        }
+    )
+
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+    for bad_ev in ("terminal_log.txt", "raw_output.txt"):
+        evaluation = validator.evaluate_candidate(
+            manifest=manifest,
+            workspace=candidate_root,
+            task_id="task-c03-art-schema",
+            candidate_sha=_CANDIDATE_SHA,
+            changed_files=changed,
+            tests_summary=tests_sum,
+            criterion_results=(
+                CriterionResult(
+                    criterion_id="AC-01",
+                    status=CriterionStatus.PASS,
+                    evidence=[bad_ev],
+                    notes="unstructured prose or mismatched manifest_digest",
+                ),
+            ),
+            verification_receipt=receipt,
+            review_context=updated_ctx,
+        )
+        assert evaluation.passed is False
+        assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+        assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+def test_dogfooding_accepts_container_import_origin_and_rejects_bad_container_origin(
+    tmp_path: Path,
+) -> None:
+    stable_root, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
+    cand_sha = _git_head_sha(candidate_root)
+    config = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=_git_head_sha(stable_root),
+        candidate_sha=cand_sha,
+        verification_isolation="container",
+        allow_auto_promote_stable=False,
+    )
+    good_import = CandidateImportOriginReport(
+        verified=True,
+        expected_candidate_src=str(candidate_root / "src" / "aipc"),
+        actual_imported_file="/workspace/src/aipc/__init__.py",
+        leaked_stable_paths=(),
+        status_code="OK",
+    )
+    good_receipt = CandidateVerificationReceipt(
+        candidate_sha=cand_sha,
+        isolation_mode="container",
+        import_origin_verified=True,
+        import_origin_report=good_import,
+        sanitized_env_verified=True,
+        exit_code=0,
+        passed=True,
+        status_code="OK",
+        summary="Container candidate tests passed",
+    )
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=2, passed=2, failed=0, skipped=0)
+    review_ctx, gate_decision = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-container-ok",
+        candidate_sha=cand_sha,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    good_bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-container-ok",
+        changed_files=changed,
+        tests_summary=tests_sum,
+        import_origin_report=good_import,
+        verification_receipt=good_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=gate_decision,
+        review_context=review_ctx,
+    )
+    assert good_bundle.dogfooding_passed is True
+    assert good_bundle.next_authorized_action == "HUMAN_MERGE_REVIEW"
+    assert good_bundle.blockers == ()
+
+    for bad_path in (
+        "/usr/local/lib/python3.13/site-packages/aipc/__init__.py",
+        "/workspace/other/aipc.py",
+    ):
+        bad_import = good_import.model_copy(update={"actual_imported_file": bad_path})
+        bad_receipt = good_receipt.model_copy(update={"import_origin_report": bad_import})
+        bad_bundle = coordinator.run_dogfooding_audit(
+            stable_candidate_config=config,
+            manifest=manifest,
+            task_id="task-c03-container-ok",
+            changed_files=changed,
+            tests_summary=tests_sum,
+            import_origin_report=bad_import,
+            verification_receipt=bad_receipt,
+            review_verdict=ReviewVerdict.PASS,
+            gate_verdict="PASS",
+            reviewer_gate_decision=gate_decision,
+            review_context=review_ctx,
+        )
+        assert bad_bundle.dogfooding_passed is False
+        assert bad_bundle.next_authorized_action == "HALT_ON_BLOCKER"
+        assert "IMPORT_ORIGIN_WORKSPACE_MISMATCH" in bad_bundle.blockers

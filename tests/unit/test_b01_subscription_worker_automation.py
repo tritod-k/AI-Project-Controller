@@ -735,6 +735,11 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
             f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(p.pid)); "
             "time.sleep(30)"
         )
+        extra_kw = (
+            {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
+            if os.name == "nt"
+            else {}
+        )
         proc = await real_exec(
             sys.executable,
             "-c",
@@ -744,6 +749,7 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
             stdin=kwargs["stdin"],
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],
+            **extra_kw,
         )
         spawned.append(proc)
         return proc
@@ -808,6 +814,11 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
         )
 
     async def slow_single_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        extra_kw = (
+            {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
+            if os.name == "nt"
+            else {}
+        )
         proc = await real_exec(
             sys.executable,
             "-c",
@@ -817,6 +828,7 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
             stdin=kwargs["stdin"],
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],
+            **extra_kw,
         )
         spawned.append(proc)
         return proc
@@ -860,6 +872,11 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
             "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
             f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(p.pid))"
         )
+        extra_kw = (
+            {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
+            if os.name == "nt"
+            else {}
+        )
         proc = await real_exec(
             sys.executable,
             "-c",
@@ -869,6 +886,7 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
             stdin=kwargs["stdin"],
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],
+            **extra_kw,
         )
         spawned.append(proc)
         return proc
@@ -1477,6 +1495,7 @@ def test_b01_pid_exists_and_job_object_fail_closed(
 ) -> None:
     """Verify NEW_ENV1 sanitized _pid_exists and R3 fail-closed Job Object enforcement."""
     import ctypes
+    import time
 
     captured_envs: list[dict[str, str]] = []
 
@@ -1510,7 +1529,7 @@ def test_b01_pid_exists_and_job_object_fail_closed(
         evidence_output_dir=str(tmp_path / "evidence"),
         in_scope_paths=["src/module.py"],
     )
-    env = build_sanitized_child_env({"PATH": os.environ.get("PATH", "")})
+    env = build_sanitized_child_env()
     monkeypatch.setattr("aipc.adapters.subscription_worker.find_agy_executable", lambda: fake_agy)
     real_exec = asyncio.create_subprocess_exec
     spawned: list[asyncio.subprocess.Process] = []
@@ -1519,6 +1538,11 @@ def test_b01_pid_exists_and_job_object_fail_closed(
         payload_code = (
             "import json; print(json.dumps("
             "{'status':'SUCCESS','conversation_id':'c1','response':'ok'}))"
+        )
+        extra_kw = (
+            {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
+            if os.name == "nt"
+            else {}
         )
         proc = await real_exec(
             sys.executable,
@@ -1529,13 +1553,47 @@ def test_b01_pid_exists_and_job_object_fail_closed(
             stdin=kwargs["stdin"],
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],
+            **extra_kw,
         )
         spawned.append(proc)
         return proc
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fast_exec)
+    assign_fail_gpid = tmp_path / "assign_fail_grandchild.pid"
+    post_cleanup_file = tmp_path / "post_cleanup.txt"
 
-    def fail_assign(self: _WindowsKillOnCloseJob, pid: int | None) -> None:
+    async def spawning_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        g_code = (
+            "import pathlib, time; time.sleep(0.5); "
+            f"pathlib.Path({str(post_cleanup_file)!r}).write_text('leaked', encoding='utf-8')"
+        )
+        root_code = (
+            "import subprocess, sys, time; "
+            f"p = subprocess.Popen([sys.executable, '-c', {g_code!r}]); "
+            f"open({str(assign_fail_gpid)!r}, 'w', encoding='utf-8').write(str(p.pid)); "
+            "time.sleep(30)"
+        )
+        proc = await real_exec(
+            sys.executable,
+            "-c",
+            root_code,
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdin=kwargs["stdin"],
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+        for _ in range(40):
+            if assign_fail_gpid.exists() and assign_fail_gpid.read_text(encoding="utf-8").strip():
+                break
+            await asyncio.sleep(0.05)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawning_exec)
+
+    def fail_assign(
+        self: _WindowsKillOnCloseJob, pid: int | None, *, resume_suspended: bool = False
+    ) -> None:
         raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
 
     monkeypatch.setattr(_WindowsKillOnCloseJob, "assign", fail_assign)
@@ -1550,9 +1608,62 @@ def test_b01_pid_exists_and_job_object_fail_closed(
         )
     assert len(spawned) == 1
     assert spawned[0].returncode is not None
+    assert assign_fail_gpid.exists()
+    gpid = int(assign_fail_gpid.read_text(encoding="utf-8"))
+    assert not _pid_exists(gpid, env)
+    time.sleep(0.6)
+    assert not post_cleanup_file.exists()
 
     monkeypatch.undo()
     monkeypatch.setattr("aipc.adapters.subscription_worker.find_agy_executable", lambda: fake_agy)
+    escaped_file = tmp_path / "escaped.txt"
+    escape_gpid_file = tmp_path / "escape_grandchild.pid"
+
+    async def fast_escape_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        g_code = (
+            "import pathlib, time; time.sleep(0.5); "
+            f"pathlib.Path({str(escaped_file)!r}).write_text('escaped', encoding='utf-8')"
+        )
+        root_code = (
+            "import json, subprocess, sys; "
+            f"p = subprocess.Popen([sys.executable, '-c', {g_code!r}], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+            f"open({str(escape_gpid_file)!r}, 'w', encoding='utf-8').write(str(p.pid)); "
+            "print(json.dumps({'status': 'SUCCESS', 'conversation_id': 'c1', 'response': 'ok'}))"
+        )
+        extra_kw = (
+            {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
+            if os.name == "nt"
+            else {}
+        )
+        return await real_exec(
+            sys.executable,
+            "-c",
+            root_code,
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdin=kwargs["stdin"],
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+            **extra_kw,
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fast_escape_exec)
+    resp = asyncio.run(
+        invoke_antigravity_cli_worker(
+            _task(wt, task_id="task-r3-normal-job-close", timeout=10),
+            cfg,
+            env,
+            "gemini-3.8-flash-medium",
+        )
+    )
+    assert resp.session_id == "c1"
+    assert escape_gpid_file.exists()
+    escape_gpid = int(escape_gpid_file.read_text(encoding="utf-8"))
+    assert not _pid_exists(escape_gpid, env)
+    time.sleep(0.6)
+    assert not escaped_file.exists()
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fast_exec)
     if os.name == "nt":
         k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
