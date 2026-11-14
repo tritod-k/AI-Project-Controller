@@ -849,6 +849,59 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
     assert len(spawned) == 3
     assert spawned[2].returncode is not None
 
+    async def orphan_root_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        pid_file = tmp_path / f"orphan_grandchild_{len(spawned)}.pid"
+        child_code = (
+            "import subprocess, sys; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(p.pid))"
+        )
+        proc = await real_exec(
+            sys.executable,
+            "-c",
+            child_code,
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdin=kwargs["stdin"],
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", orphan_root_exec)
+    if os.name == "nt":
+        monkeypatch.setattr("aipc.adapters.subscription_worker._pid_exists", lambda _pid: False)
+        monkeypatch.setattr(subprocess, "run", failing_taskkill_run)
+        with pytest.raises(ControllerError):
+            asyncio.run(
+                invoke_antigravity_cli_worker(
+                    _task(wt, task_id="task-r3-orphan-killfail", timeout=1),
+                    cfg,
+                    env,
+                    "gemini-3.8-flash-medium",
+                )
+            )
+        assert spawned[-1].returncode is not None
+        monkeypatch.setattr(subprocess, "run", real_run)
+
+    monkeypatch.undo()
+    monkeypatch.setattr("aipc.adapters.subscription_worker.find_agy_executable", lambda: fake_agy)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", orphan_root_exec)
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            invoke_antigravity_cli_worker(
+                _task(wt, task_id="task-r3-orphan-real", timeout=1),
+                cfg,
+                env,
+                "gemini-3.8-flash-medium",
+            )
+        )
+    orphan_pid_file = tmp_path / f"orphan_grandchild_{len(spawned) - 1}.pid"
+    assert orphan_pid_file.exists()
+    orphan_gpid = int(orphan_pid_file.read_text(encoding="utf-8"))
+    assert not _pid_alive(orphan_gpid)
+
 
 def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: Path) -> None:
     """Verify run_cli_worker_job enforces all nested review, provenance, gate, and audit IDs."""
@@ -858,6 +911,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
     from aipc.domain.enums import CriterionStatus, ReviewVerdict
     from aipc.domain.models import (
         AgentResult,
+        CommandResult,
         CriterionResult,
         EvidenceReferences,
         ReviewResult,
@@ -865,6 +919,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
     )
     from aipc.evidence.models import (
         ArtifactRecord,
+        CommandEvidence,
         EvidenceBundle,
         EvidenceItem,
         GitEvidence,
@@ -896,6 +951,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
 
     wt = tmp_path / "candidate_wt"
     sha = _init_git_repo(wt)
+    val_cmd = f'"{sys.executable}" -c "print(\'1 passed in 0.01s\')"'
 
     async def noop_invoker(
         _task: TaskRequest,
@@ -911,9 +967,12 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
 
     def _build_gate_decision(
         gate_path: Path,
+        *,
+        summary_text: str = "Noop.",
+        ev_subdir: str = ".aipc_test_evidence",
     ) -> tuple[SubscriptionReviewerGateDecision, ReviewContext]:
         now = datetime(2026, 1, 1, tzinfo=UTC)
-        ev_root = tmp_path / ".aipc_test_evidence"
+        ev_root = tmp_path / ev_subdir
         ev_root.mkdir(parents=True, exist_ok=True)
         task_req = _task(wt, task_id="task-b01-1")
         project_def = ProjectDefinition(
@@ -953,13 +1012,13 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             schema_version="1.0",
             task_id="task-b01-1",
             agent_id="aipc-implementation-worker",
-            provider="gemini",
+            provider="google",
             status=AgentStatus.COMPLETED,
             started_at=now,
             completed_at=now,
-            summary="Noop.",
+            summary=summary_text,
             files_changed=[],
-            commands=[],
+            commands=[CommandResult(command=val_cmd, exit_code=0)],
             tests=TestSummary(total=1, passed=1, failed=0, skipped=0),
             artifacts=[],
             warnings=[],
@@ -986,11 +1045,17 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             ("terminal_log", "terminal.log"),
             ("raw_output", "raw_output.txt"),
         )
+        cmd_ev = CommandEvidence(
+            command=val_cmd,
+            exit_code=0,
+            terminal_log_ref="terminal.log",
+        )
         file_payloads: dict[str, bytes] = {
             "task.json": task_req.model_dump_json(indent=2).encode("utf-8"),
             "agent_result.json": agent_result.model_dump_json(indent=2).encode("utf-8"),
             "commands.json": json.dumps(
-                {"source": "agent_result", "commands": []}, indent=2
+                {"source": "agent_result", "commands": [cmd_ev.model_dump(mode="json")]},
+                indent=2,
             ).encode("utf-8"),
             "git_status.txt": b"",
             "git_diff.txt": b"",
@@ -1055,7 +1120,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
                 parsed=TestSummary(total=1, passed=1, failed=0, skipped=0),
                 agrees=True,
             ),
-            commands=(),
+            commands=(cmd_ev,),
             items=items,
             artifacts=tuple(artifacts_list),
         )
@@ -1174,6 +1239,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
                 "candidate_worktree": str(wt),
                 "evidence_output_dir": str(case_dir / "evidence"),
                 "in_scope_paths": ["src/module.py"],
+                "validation_commands": [val_cmd],
                 "auto_commit_candidate": False,
                 "require_non_empty_diff": False,
             },
@@ -1317,6 +1383,24 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
                 worker_invoker=noop_invoker,
             )
         assert q_neg.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+    mismatched_decision, mismatched_ctx = _build_gate_decision(
+        tmp_path / "mismatched_agent_result" / "gate.json",
+        summary_text="Different summary",
+        ev_subdir=".aipc_test_evidence_mismatch",
+    )
+    q_mismatch, job_mismatch = _prepare_case(
+        "mismatched_agent_result",
+        mismatched_decision.model_dump(mode="json"),
+        mismatched_ctx,
+    )
+    with pytest.raises(ControllerError):
+        run_cli_worker_job(
+            job_mismatch,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+    assert q_mismatch.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
 
 
 def test_b01_cli_worker_job_invalid_worker_config_leaves_task_eligible(tmp_path: Path) -> None:

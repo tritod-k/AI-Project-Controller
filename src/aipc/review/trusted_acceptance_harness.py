@@ -33,6 +33,7 @@ from aipc.review.context import context_fingerprint, digest, review_provenance
 from aipc.review.errors import PhaseGateError, ReviewContextError
 from aipc.review.gate import PhaseGate
 from aipc.review.models import Digest, ReviewContext
+from aipc.review.reviewer import bind_review
 from aipc.review.subscription_reviewer_gate import SubscriptionReviewerGateDecision
 from aipc.version.models import Commit
 
@@ -119,16 +120,24 @@ def _compute_manifest_digest(
     manifest_id: str,
     project_id: str,
     milestone_id: str,
+    manifest_authority: Literal["trusted_operator", "stable_controller"],
     pinned_file_sha256: dict[str, str],
     protected_harness_globs: tuple[str, ...] | list[str],
+    required_criterion_ids: tuple[str, ...] | list[str] = (),
+    require_behavioral_assertions: bool = True,
+    forbid_test_deletion: bool = True,
 ) -> str:
-    """Compute canonical SHA-256 digest over TrustedHarnessManifest provenance fields."""
+    """Compute canonical SHA-256 digest over TrustedHarnessManifest policy fields."""
     payload = (
         manifest_id,
         project_id,
         milestone_id,
+        manifest_authority,
         dict(sorted(pinned_file_sha256.items())),
         list(protected_harness_globs),
+        list(required_criterion_ids),
+        bool(require_behavioral_assertions),
+        bool(forbid_test_deletion),
     )
     encoded = json.dumps(
         payload,
@@ -147,6 +156,7 @@ class TrustedHarnessManifest(CanonicalRecord):
     milestone_id: NonBlank
     manifest_authority: Literal["trusted_operator", "stable_controller"] = "trusted_operator"
     manifest_digest: Digest | None = None
+    trusted_manifest_path: str | None = None
     protected_harness_globs: tuple[NonBlank, ...] = _DEFAULT_PROTECTED_HARNESS_GLOBS
     pinned_file_sha256: dict[str, Digest] = Field(default_factory=dict)
     pre_workspace_snapshot: dict[str, Digest] = Field(default_factory=dict)
@@ -166,8 +176,12 @@ class TrustedHarnessManifest(CanonicalRecord):
                 self.manifest_id,
                 self.project_id,
                 self.milestone_id,
+                self.manifest_authority,
                 self.pinned_file_sha256,
                 self.protected_harness_globs,
+                self.required_criterion_ids,
+                self.require_behavioral_assertions,
+                self.forbid_test_deletion,
             )
             if self.manifest_digest != expected_digest:
                 raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: manifest_digest mismatch")
@@ -201,6 +215,12 @@ def build_trusted_harness_manifest(
     workspace: Path,
     protected_rel_paths: tuple[str, ...],
     manifest_id: str | None = None,
+    manifest_authority: Literal["trusted_operator", "stable_controller"] = "trusted_operator",
+    protected_harness_globs: tuple[str, ...] = _DEFAULT_PROTECTED_HARNESS_GLOBS,
+    required_criterion_ids: tuple[str, ...] = (),
+    require_behavioral_assertions: bool = True,
+    forbid_test_deletion: bool = True,
+    trusted_manifest_file: Path | None = None,
 ) -> TrustedHarnessManifest:
     """Build a TrustedHarnessManifest with SHA-256 digests of protected files in workspace."""
     assert_milestone_c_scope_authorized(milestone_id)
@@ -215,23 +235,136 @@ def build_trusted_harness_manifest(
             raise FileNotFoundError(f"Protected file not found in workspace: {norm_rel}")
         pinned[norm_rel] = hashlib.sha256(target.read_bytes()).hexdigest()
 
+    trusted_path_str: str | None = None
+    if trusted_manifest_file is not None:
+        resolved_manifest = Path(trusted_manifest_file).resolve()
+        if resolved_manifest.is_relative_to(workspace_root):
+            raise ValueError(
+                f"{TRUSTED_HARNESS_TAMPER_DETECTED}: trusted_manifest_file "
+                "must not reside inside candidate workspace"
+            )
+        trusted_path_str = str(resolved_manifest)
+
     pre_snap = _snapshot_workspace_files(workspace_root)
     resolved_manifest_id = manifest_id or f"manifest-{uuid4().hex[:12]}"
     manifest_digest_val = _compute_manifest_digest(
         resolved_manifest_id,
         project_id,
         milestone_id,
+        manifest_authority,
         pinned,
-        _DEFAULT_PROTECTED_HARNESS_GLOBS,
+        protected_harness_globs,
+        required_criterion_ids,
+        require_behavioral_assertions,
+        forbid_test_deletion,
     )
-    return TrustedHarnessManifest(
+    manifest = TrustedHarnessManifest(
         manifest_id=resolved_manifest_id,
         project_id=project_id,
         milestone_id=milestone_id,
+        manifest_authority=manifest_authority,
         manifest_digest=manifest_digest_val,
+        trusted_manifest_path=trusted_path_str,
+        protected_harness_globs=protected_harness_globs,
         pinned_file_sha256=pinned,
         pre_workspace_snapshot=pre_snap,
+        required_criterion_ids=required_criterion_ids,
+        require_behavioral_assertions=require_behavioral_assertions,
+        forbid_test_deletion=forbid_test_deletion,
     )
+    if trusted_manifest_file is not None and trusted_path_str is not None:
+        out_path = Path(trusted_path_str)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    return manifest
+
+
+def _verify_manifest_integrity(
+    manifest: TrustedHarnessManifest,
+    workspace_root: Path,
+    trusted_manifest_file: Path | None = None,
+) -> list[RewardHackingFinding]:
+    """Verify manifest policy digest and trusted manifest storage boundary."""
+    findings: list[RewardHackingFinding] = []
+    expected_digest = _compute_manifest_digest(
+        manifest.manifest_id,
+        manifest.project_id,
+        manifest.milestone_id,
+        manifest.manifest_authority,
+        manifest.pinned_file_sha256,
+        manifest.protected_harness_globs,
+        manifest.required_criterion_ids,
+        manifest.require_behavioral_assertions,
+        manifest.forbid_test_deletion,
+    )
+    if manifest.manifest_digest is None or manifest.manifest_digest != expected_digest:
+        findings.append(
+            RewardHackingFinding(
+                rule_id="MANIFEST_DIGEST_MISMATCH",
+                file_path="manifest",
+                description=(
+                    f"{TRUSTED_HARNESS_TAMPER_DETECTED}: manifest_digest missing or "
+                    "mismatched against policy fields"
+                ),
+            )
+        )
+
+    manifest_path_str = (
+        str(trusted_manifest_file)
+        if trusted_manifest_file is not None
+        else manifest.trusted_manifest_path
+    )
+    if manifest_path_str is not None:
+        resolved_manifest_path = Path(manifest_path_str).resolve()
+        if resolved_manifest_path.is_relative_to(workspace_root):
+            findings.append(
+                RewardHackingFinding(
+                    rule_id="MANIFEST_INSIDE_CANDIDATE_WORKTREE",
+                    file_path=str(resolved_manifest_path),
+                    description=(
+                        f"{TRUSTED_HARNESS_TAMPER_DETECTED}: trusted manifest path "
+                        "must not reside inside candidate workspace"
+                    ),
+                )
+            )
+        elif not resolved_manifest_path.is_file():
+            findings.append(
+                RewardHackingFinding(
+                    rule_id="TRUSTED_MANIFEST_MISSING",
+                    file_path=str(resolved_manifest_path),
+                    description=(
+                        f"{TRUSTED_HARNESS_TAMPER_DETECTED}: trusted manifest file "
+                        "not found on disk"
+                    ),
+                )
+            )
+        else:
+            try:
+                disk_data = json.loads(resolved_manifest_path.read_text(encoding="utf-8"))
+                disk_manifest = TrustedHarnessManifest.model_validate(disk_data)
+                if disk_manifest.model_dump(mode="json") != manifest.model_dump(mode="json"):
+                    findings.append(
+                        RewardHackingFinding(
+                            rule_id="TRUSTED_MANIFEST_DISK_MISMATCH",
+                            file_path=str(resolved_manifest_path),
+                            description=(
+                                f"{TRUSTED_HARNESS_TAMPER_DETECTED}: on-disk trusted "
+                                "manifest does not match supplied manifest"
+                            ),
+                        )
+                    )
+            except (OSError, ValueError) as exc:
+                findings.append(
+                    RewardHackingFinding(
+                        rule_id="TRUSTED_MANIFEST_UNREADABLE",
+                        file_path=str(resolved_manifest_path),
+                        description=(
+                            f"{TRUSTED_HARNESS_TAMPER_DETECTED}: failed to load trusted "
+                            f"manifest from disk ({exc})"
+                        ),
+                    )
+                )
+    return findings
 
 
 class RewardHackingFinding(CanonicalRecord):
@@ -767,6 +900,8 @@ class TrustedAcceptanceHarnessValidator:
         tests_summary: TestSummary | None,
         criterion_results: tuple[CriterionResult, ...] | dict[str, bool] | None = None,
         verification_receipt: CandidateVerificationReceipt | None = None,
+        review_context: ReviewContext | None = None,
+        trusted_manifest_file: Path | None = None,
     ) -> TrustedAcceptanceEvaluation:
         """Evaluate candidate changes and test evidence against TrustedHarnessManifest."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -774,6 +909,15 @@ class TrustedAcceptanceHarnessValidator:
         findings: list[RewardHackingFinding] = []
         tamper_detected = False
         reward_hacking_detected = False
+
+        manifest_findings = _verify_manifest_integrity(
+            manifest,
+            workspace_root,
+            trusted_manifest_file=trusted_manifest_file,
+        )
+        if manifest_findings:
+            findings.extend(manifest_findings)
+            tamper_detected = True
 
         for fc in changed_files:
             norm_path = _normalize_rel_path(fc.path)
@@ -950,15 +1094,58 @@ class TrustedAcceptanceHarnessValidator:
                 )
                 reward_hacking_detected = True
 
+            def _is_verified_context_artifact(ev: str) -> bool:
+                if review_context is None:
+                    return False
+                ev_root = Path(review_context.evidence_root).resolve()
+                artifacts_by_path = {art.path: art for art in review_context.evidence.artifacts}
+                for item in review_context.evidence.items:
+                    if item.status != "collected" or item.path is None:
+                        continue
+                    if ev not in (item.evidence_id, item.path):
+                        continue
+                    art = artifacts_by_path.get(item.path)
+                    if art is None:
+                        return False
+                    art_file = (ev_root / item.path).resolve()
+                    if not art_file.is_relative_to(ev_root) or not art_file.is_file():
+                        return False
+                    return hashlib.sha256(art_file.read_bytes()).hexdigest() == art.sha256
+                return False
+
             def _valid_criterion_evidence(ev: str, cid: str) -> bool:
-                if candidate_sha in ev and cid in ev:
+                if _is_verified_context_artifact(ev):
                     return True
-                return (
-                    ev in {"pytest_log", "git_diff", "git_status", "terminal_log"}
-                    and verification_receipt is not None
-                    and verification_receipt.passed
-                    and verification_receipt.candidate_sha == candidate_sha
-                )
+                if (
+                    verification_receipt is None
+                    or not verification_receipt.passed
+                    or verification_receipt.exit_code != 0
+                    or verification_receipt.candidate_sha != candidate_sha
+                ):
+                    return False
+                if (
+                    cid not in verification_receipt.summary
+                    and "passed" not in verification_receipt.summary
+                ):
+                    return False
+                if manifest.manifest_digest is not None:
+                    expected_ev = (
+                        f"receipt:{verification_receipt.candidate_sha}"
+                        f":{cid}:{manifest.manifest_digest}"
+                    )
+                    if ev == expected_ev:
+                        return True
+                norm_ev = _normalize_rel_path(ev)
+                if (
+                    not Path(norm_ev).is_absolute()
+                    and norm_ev.startswith("tests/")
+                    and norm_ev.endswith(".py")
+                ):
+                    test_path = (workspace_root / norm_ev).resolve()
+                    if test_path.is_relative_to(workspace_root) and test_path.is_file():
+                        source = test_path.read_text(encoding="utf-8")
+                        return len(self.inspect_python_test_source(norm_ev, source)) == 0
+                return False
 
             criterion_map: dict[str, bool] = {}
             if isinstance(criterion_results, dict):
@@ -1249,6 +1436,16 @@ class SelfDevelopmentDogfoodingCoordinator:
         ):
             effective_criterion_results = tuple(reviewer_gate_decision.review_result.criteria)
 
+        gate_ctx: ReviewContext | None = None
+        if review_context is not None:
+            gate_ctx = (
+                review_context
+                if review_context.state.last_review is None
+                else review_context.model_copy(
+                    update={"state": review_context.state.model_copy(update={"last_review": None})}
+                )
+            )
+
         trusted_acceptance = self._validator.evaluate_candidate(
             manifest=manifest,
             workspace=c_root,
@@ -1258,6 +1455,7 @@ class SelfDevelopmentDogfoodingCoordinator:
             tests_summary=tests_summary,
             criterion_results=effective_criterion_results,
             verification_receipt=verification_receipt,
+            review_context=gate_ctx,
         )
 
         blockers: list[str] = []
@@ -1313,6 +1511,12 @@ class SelfDevelopmentDogfoodingCoordinator:
         if stable_mutated:
             blockers.append("STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH")
 
+        if review_context is None and (
+            review_verdict == ReviewVerdict.PASS or gate_verdict == "PASS"
+        ):
+            blockers.append("MISSING_REVIEW_CONTEXT")
+
+        decision_mismatch = False
         if reviewer_gate_decision is None:
             if review_verdict == ReviewVerdict.PASS or gate_verdict == "PASS":
                 blockers.append("MISSING_REVIEWER_GATE_DECISION")
@@ -1356,15 +1560,35 @@ class SelfDevelopmentDogfoodingCoordinator:
                     decision_mismatch = True
                 elif bound_rev.review_digest != digest(reviewer_gate_decision.review_result):
                     decision_mismatch = True
-                elif review_context is not None:
+                elif gate_ctx is not None:
                     try:
+                        SubscriptionReviewerGateDecision.model_validate(
+                            reviewer_gate_decision.model_dump(mode="json")
+                        )
+                        rebound = bind_review(
+                            gate_ctx,
+                            reviewer_gate_decision.review_result,
+                            authority=bound_rev.authority,
+                            reviewed=bound_rev.provenance,
+                        )
                         if (
-                            bound_rev.context_digest != context_fingerprint(review_context)
-                            or bound_rev.provenance != review_provenance(review_context)
-                            or PhaseGate().evaluate(bound_rev, review_context) != gate_dec
+                            gate_ctx.task.task_id != task_id
+                            or gate_ctx.checkpoint.git_commit != cand_sha
+                            or gate_ctx.agent_result.task_id != task_id
+                            or gate_ctx.agent_result.tests != tests_summary
+                            or gate_ctx.evidence.git.head != cand_sha
+                            or bound_rev.context_digest != context_fingerprint(gate_ctx)
+                            or bound_rev.review_digest
+                            != digest(reviewer_gate_decision.review_result)
+                            or bound_rev.provenance != review_provenance(gate_ctx)
+                            or bound_rev.provenance.agent_result_digest
+                            != digest(gate_ctx.agent_result)
+                            or bound_rev.provenance.evidence_digest != digest(gate_ctx.evidence)
+                            or rebound != bound_rev
+                            or PhaseGate().evaluate(bound_rev, gate_ctx) != gate_dec
                         ):
                             decision_mismatch = True
-                    except (ReviewContextError, PhaseGateError):
+                    except (ReviewContextError, PhaseGateError, ValueError):
                         decision_mismatch = True
             if decision_mismatch:
                 blockers.append("REVIEW_GATE_DECISION_MISMATCH")
@@ -1385,6 +1609,7 @@ class SelfDevelopmentDogfoodingCoordinator:
             "STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH",
             "REVIEW_GATE_DECISION_MISMATCH",
             "MISSING_REVIEWER_GATE_DECISION",
+            "MISSING_REVIEW_CONTEXT",
         }
         if dogfooding_passed:
             next_action: HandoffNextAuthorizedAction = "HUMAN_MERGE_REVIEW"

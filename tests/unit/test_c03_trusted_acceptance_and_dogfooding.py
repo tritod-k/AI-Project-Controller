@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -15,10 +17,45 @@ from aipc.controller.self_dev_runner import (
     StableCandidateConfig,
     verify_candidate_import_origin,
 )
-from aipc.domain.enums import ChangeType, CriterionStatus, ReviewVerdict
-from aipc.domain.models import CriterionResult, FileChange, ReviewResult, TestSummary
-from aipc.review.context import digest
-from aipc.review.models import BoundReview, GateAction, PhaseGateDecision, ReviewProvenance
+from aipc.domain.enums import AgentStatus, ChangeType, CriterionStatus, ReviewVerdict
+from aipc.domain.models import (
+    AgentResult,
+    CommandResult,
+    CriterionResult,
+    EvidenceReferences,
+    FileChange,
+    ReviewResult,
+    TaskRequest,
+    TestSummary,
+)
+from aipc.evidence.models import (
+    ArtifactRecord,
+    CommandEvidence,
+    EvidenceBundle,
+    EvidenceItem,
+    GitEvidence,
+    TestEvidence,
+)
+from aipc.project.models import (
+    AcceptanceCriterion,
+    AgentAssignments,
+    ControllerConfig,
+    PhaseDefinition,
+    ProjectDefinition,
+    ProjectIdentity,
+)
+from aipc.project.state_models import ProjectState, ProjectStatus
+from aipc.review.context import digest, review_provenance
+from aipc.review.gate import PhaseGate
+from aipc.review.models import (
+    BoundReview,
+    GateAction,
+    PhaseGateDecision,
+    PhaseReviewStage,
+    ReviewContext,
+    ReviewProvenance,
+)
+from aipc.review.reviewer import bind_review
 from aipc.review.subscription_reviewer_gate import (
     SessionIsolationAuditReceipt,
     SubscriptionReviewerGateDecision,
@@ -36,6 +73,7 @@ from aipc.review.trusted_acceptance_harness import (
     assert_milestone_c_scope_authorized,
     build_trusted_harness_manifest,
 )
+from aipc.version.models import CheckpointMetadata, CheckpointType
 
 _STABLE_SHA = "1" * 40
 _CANDIDATE_SHA = "2" * 40
@@ -422,6 +460,274 @@ def _make_valid_gate_decision(
     )
 
 
+def _make_valid_review_context_and_gate_decision(
+    tmp_path: Path,
+    task_id: str,
+    candidate_sha: str,
+    workspace_root: Path,
+    changed_files: tuple[FileChange, ...] | None = None,
+    tests_summary: TestSummary | None = None,
+) -> tuple[ReviewContext, SubscriptionReviewerGateDecision]:
+    if changed_files is None:
+        changed_files = (
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        )
+    if tests_summary is None:
+        tests_summary = TestSummary(total=2, passed=2, failed=0, skipped=0)
+    ev_root = tmp_path / f".ev_{task_id}"
+    ev_root.mkdir(parents=True, exist_ok=True)
+
+    project = ProjectDefinition(
+        schema_version="1.0",
+        project=ProjectIdentity(id="aipc", name="AIPC", workspace=str(workspace_root)),
+        controller=ControllerConfig(),
+        agents=AgentAssignments(planner="codex", worker="agy", reviewer="codex"),
+        phases=(
+            PhaseDefinition(
+                id="c03",
+                name="C03",
+                objective="Trusted acceptance",
+                acceptance_criteria=(
+                    AcceptanceCriterion(
+                        id="AC-01",
+                        statement="Behavioral tests pass",
+                        required=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+    state = ProjectState(
+        schema_version="1.0",
+        project_id="aipc",
+        run_id="run-1",
+        current_phase="c03",
+        current_attempt=1,
+        status=ProjectStatus.RUNNING,
+        completed_phases=(),
+        blocked_phases=(),
+        active_task_id=task_id,
+        last_review=None,
+        updated_at="2026-11-14T12:00:00Z",
+    )
+    task = TaskRequest(
+        schema_version="1.0",
+        task_id=task_id,
+        project_id="aipc",
+        phase_id="c03",
+        attempt=1,
+        task_type="coding",
+        prompt="Implement C03 feature",
+        workspace=str(workspace_root),
+        allowed_tools=["read_file"],
+        forbidden_actions=[],
+        timeout_seconds=60,
+    )
+    agent_result = AgentResult(
+        schema_version="1.0",
+        task_id=task_id,
+        agent_id="worker-1",
+        provider="google_antigravity",
+        status=AgentStatus.COMPLETED,
+        started_at="2026-11-14T11:59:00Z",
+        completed_at="2026-11-14T12:00:00Z",
+        summary="Completed C03 feature",
+        files_changed=list(changed_files),
+        commands=[CommandResult(command="pytest", exit_code=0)],
+        tests=tests_summary,
+        artifacts=[],
+        warnings=[],
+        errors=[],
+        approval_requests=[],
+        worker_claimed_complete=True,
+        evidence=EvidenceReferences(
+            git_diff_path="git_diff.patch",
+            test_log_path="test_log.txt",
+            terminal_log_path="terminal_log.txt",
+            screenshots=[],
+        ),
+        raw_output_ref="raw_output.txt",
+    )
+    checkpoint = CheckpointMetadata(
+        checkpoint_id="phase-c03-attempt-01",
+        checkpoint_type=CheckpointType.ATTEMPT,
+        project_id="aipc",
+        phase_id="c03",
+        attempt=1,
+        git_commit=candidate_sha,
+        git_ref="refs/tags/aipc/aipc/phase-c03/attempt-01",
+        source_branch="main",
+        created_at="2026-11-14T12:00:00Z",
+        parent_checkpoint="phase-c03-pre",
+    )
+    cmd_ev = (CommandEvidence(command="pytest", exit_code=0, terminal_log_ref="terminal_log.txt"),)
+    file_specs: list[tuple[str, str, bytes]] = [
+        ("task", "task.json", task.model_dump_json().encode("utf-8")),
+        ("agent_result", "agent_result.json", agent_result.model_dump_json().encode("utf-8")),
+        (
+            "commands",
+            "commands.json",
+            json.dumps(
+                {
+                    "source": "agent_result",
+                    "commands": [c.model_dump(mode="json") for c in cmd_ev],
+                }
+            ).encode("utf-8"),
+        ),
+        ("git_status", "git_status.txt", b""),
+        ("git_diff", "git_diff.patch", b""),
+        ("git_summary", "git_summary.txt", b"clean"),
+        (
+            "test_log",
+            "test_log.txt",
+            f"=== {tests_summary.passed} passed in 0.12s ===\n".encode(),
+        ),
+        ("terminal_log", "terminal_log.txt", b"ok\n"),
+        ("raw_output", "raw_output.txt", b"ok\n"),
+    ]
+    artifacts: list[ArtifactRecord] = []
+    items: list[EvidenceItem] = []
+    for ev_id, rel_path, data in file_specs:
+        (ev_root / rel_path).write_bytes(data)
+        artifacts.append(
+            ArtifactRecord(
+                artifact_id=f"art-{ev_id}",
+                path=rel_path,
+                kind=ev_id,
+                size=len(data),
+                sha256=hashlib.sha256(data).hexdigest(),
+                source="test",
+            )
+        )
+        items.append(
+            EvidenceItem(
+                evidence_id=ev_id,
+                kind=ev_id,
+                status="collected",
+                path=rel_path,
+                source="test",
+            )
+        )
+    idx_bytes = json.dumps({"artifacts": [a.model_dump(mode="json") for a in artifacts]}).encode(
+        "utf-8"
+    )
+    (ev_root / "artifact_index.json").write_bytes(idx_bytes)
+    artifacts.append(
+        ArtifactRecord(
+            artifact_id="art-artifact_index",
+            path="artifact_index.json",
+            kind="artifact_index",
+            size=len(idx_bytes),
+            sha256=hashlib.sha256(idx_bytes).hexdigest(),
+            source="test",
+        )
+    )
+    items.append(
+        EvidenceItem(
+            evidence_id="artifact_index",
+            kind="artifact_index",
+            status="collected",
+            path="artifact_index.json",
+            source="test",
+        )
+    )
+    bundle = EvidenceBundle(
+        project_id="aipc",
+        run_id="run-1",
+        phase_id="c03",
+        attempt=1,
+        task_id=task_id,
+        status="COMPLETE",
+        git=GitEvidence(
+            status="collected",
+            head=candidate_sha,
+            branch="main",
+            baseline=_STABLE_SHA,
+            changes=changed_files,
+        ),
+        tests=TestEvidence(
+            structured=tests_summary,
+            parsed=tests_summary,
+            parse_status="collected",
+            log_ref="test_log.txt",
+            agrees=True,
+        ),
+        commands=cmd_ev,
+        items=tuple(items),
+        artifacts=tuple(artifacts),
+    )
+    (ev_root / "manifest.json").write_text(bundle.model_dump_json(), encoding="utf-8")
+
+    review_ctx = ReviewContext(
+        project=project,
+        state=state,
+        task=task,
+        agent_result=agent_result,
+        evidence=bundle,
+        evidence_root=str(ev_root),
+        checkpoint=checkpoint,
+        phase_stage=PhaseReviewStage.AWAITING_REVIEW,
+    )
+    review_result = ReviewResult(
+        schema_version="1.0",
+        review_id=f"rev-{task_id}",
+        task_id=task_id,
+        verdict=ReviewVerdict.PASS,
+        confidence=0.95,
+        criteria=[
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=["test_log"],
+                notes="verified",
+            )
+        ],
+        failed_criteria=[],
+        required_fixes=[],
+        risks=[],
+        next_phase_allowed=True,
+    )
+    bound_review = bind_review(
+        review_ctx,
+        review_result,
+        authority="codex",
+        reviewed=review_provenance(review_ctx),
+    )
+    phase_gate = PhaseGate().evaluate(bound_review, review_ctx)
+    digest_zero = "0" * 64
+    gate_decision = SubscriptionReviewerGateDecision(
+        gate_outcome="PASS",
+        task_id=task_id,
+        candidate_commit_sha=candidate_sha,
+        reviewed_commit_sha=candidate_sha,
+        review_result=review_result,
+        bound_review=bound_review,
+        phase_gate_decision=phase_gate,
+        session_audit=SessionIsolationAuditReceipt(
+            audit_id="audit-1",
+            task_id=task_id,
+            candidate_commit_sha=candidate_sha,
+            worker_agent_id="worker-1",
+            worker_provider_family="google_antigravity",
+            reviewer_binding_id="rev-bind-1",
+            reviewer_provider_id="codex",
+            reviewer_provider_family="openai_codex",
+            reviewer_model_id="gpt-5.4",
+            reviewer_session_id="sess-1",
+            fresh_isolated_session=True,
+            inherited_chat_history=False,
+            read_only_sandbox_enforced=True,
+            workspace_snapshot_before_sha256=digest_zero,
+            workspace_snapshot_after_sha256=digest_zero,
+            workspace_mutated=False,
+            independence_level="cross_provider",
+            reduced_independence=False,
+        ),
+        receipt_path="evidence/rev.json",
+    )
+    return review_ctx, gate_decision
+
+
 def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path: Path) -> None:
     stable_root, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
     cand_sha = _git_head_sha(candidate_root)
@@ -451,24 +757,30 @@ def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path:
         status_code="OK",
         summary="Isolated candidate tests passed",
     )
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=2, passed=2, failed=0, skipped=0)
+    review_ctx, gate_decision = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-dogfood",
+        candidate_sha=cand_sha,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
 
     coordinator = SelfDevelopmentDogfoodingCoordinator()
     bundle = coordinator.run_dogfooding_audit(
         stable_candidate_config=config,
         manifest=manifest,
         task_id="task-c03-dogfood",
-        changed_files=(
-            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
-        ),
-        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        changed_files=changed,
+        tests_summary=tests_sum,
         import_origin_report=import_report,
         verification_receipt=verification_receipt,
         review_verdict=ReviewVerdict.PASS,
         gate_verdict="PASS",
-        reviewer_gate_decision=_make_valid_gate_decision(
-            "task-c03-dogfood",
-            candidate_sha=cand_sha,
-        ),
+        reviewer_gate_decision=gate_decision,
+        review_context=review_ctx,
     )
 
     assert bundle.dogfooding_passed is True
@@ -691,8 +1003,15 @@ def _make_valid_verification_receipt(
 
 
 def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
-    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
-    manifest = base_manifest.model_copy(update={"required_criterion_ids": ("AC-01", "AC-02")})
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-crit",
+        required_criterion_ids=("AC-01", "AC-02"),
+    )
     validator = TrustedAcceptanceHarnessValidator()
     receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
 
@@ -799,14 +1118,14 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
             CriterionResult(
                 criterion_id="AC-01",
                 status=CriterionStatus.PASS,
-                evidence=[f"pytest:{_CANDIDATE_SHA}:AC-01"],
-                notes="bound to sha and criterion",
+                evidence=[f"receipt:{_CANDIDATE_SHA}:AC-01:{manifest.manifest_digest}"],
+                notes="bound to sha, criterion, and manifest digest",
             ),
             CriterionResult(
                 criterion_id="AC-02",
                 status=CriterionStatus.PASS,
-                evidence=["pytest_log"],
-                notes="canonical evidence id",
+                evidence=["tests/unit/test_feature.py"],
+                notes="verified behavioral test file path",
             ),
         ),
         verification_receipt=receipt,
@@ -817,8 +1136,15 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
 
 
 def test_required_criterion_without_verification_receipt_fails_closed(tmp_path: Path) -> None:
-    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
-    manifest = base_manifest.model_copy(update={"required_criterion_ids": ("AC-01",)})
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-no-rcpt",
+        required_criterion_ids=("AC-01",),
+    )
     validator = TrustedAcceptanceHarnessValidator()
 
     evaluation = validator.evaluate_candidate(
@@ -1449,8 +1775,15 @@ def test_unreachable_assertion_after_with_or_try_return_fails_closed(
 
 
 def test_required_criterion_pass_without_evidence_fails_closed(tmp_path: Path) -> None:
-    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
-    manifest = base_manifest.model_copy(update={"required_criterion_ids": ("AC-01",)})
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-no-ev",
+        required_criterion_ids=("AC-01",),
+    )
     validator = TrustedAcceptanceHarnessValidator()
     receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
 
@@ -1580,23 +1913,30 @@ def test_dogfooding_accepts_genuine_verify_candidate_import_origin_report(tmp_pa
         summary="Isolated candidate tests passed",
     )
 
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=2, passed=2, failed=0, skipped=0)
+    review_ctx, gate_decision = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-real-origin",
+        candidate_sha=cand_sha,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
+
     coordinator = SelfDevelopmentDogfoodingCoordinator()
     bundle = coordinator.run_dogfooding_audit(
         stable_candidate_config=config,
         manifest=manifest,
         task_id="task-c03-real-origin",
-        changed_files=(
-            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
-        ),
-        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        changed_files=changed,
+        tests_summary=tests_sum,
         import_origin_report=import_report,
         verification_receipt=verification_receipt,
         review_verdict=ReviewVerdict.PASS,
         gate_verdict="PASS",
-        reviewer_gate_decision=_make_valid_gate_decision(
-            "task-c03-real-origin",
-            candidate_sha=cand_sha,
-        ),
+        reviewer_gate_decision=gate_decision,
+        review_context=review_ctx,
     )
 
     assert bundle.dogfooding_passed is True
@@ -1629,3 +1969,195 @@ def test_dogfooding_disabling_stable_git_integrity_blocks_pass(tmp_path: Path) -
     assert bundle.dogfooding_passed is False
     assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
     assert "STABLE_GIT_INTEGRITY_UNVERIFIED" in bundle.blockers
+
+
+def test_dogfooding_requires_review_context_on_pass(tmp_path: Path) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-missing-ctx",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=_make_valid_gate_decision(
+            "task-c03-missing-ctx",
+            candidate_sha=config.candidate_sha,
+        ),
+        review_context=None,
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "MISSING_REVIEW_CONTEXT" in bundle.blockers
+
+
+def test_dogfooding_rejects_placeholder_digests_against_review_context(tmp_path: Path) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=2, passed=2, failed=0, skipped=0)
+    review_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-placeholder",
+        candidate_sha=config.candidate_sha,
+        workspace_root=Path(config.candidate_worktree_root),
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
+    placeholder_gate = _make_valid_gate_decision(
+        "task-c03-placeholder",
+        candidate_sha=config.candidate_sha,
+    )
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-placeholder",
+        changed_files=changed,
+        tests_summary=tests_sum,
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=placeholder_gate,
+        review_context=review_ctx,
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "REVIEW_GATE_DECISION_MISMATCH" in bundle.blockers
+
+
+@pytest.mark.parametrize(
+    "policy_override",
+    [
+        {"required_criterion_ids": ("AC-01",)},
+        {"require_behavioral_assertions": False},
+        {"forbid_test_deletion": False},
+    ],
+)
+def test_manifest_policy_mutation_without_digest_recompute_rejected(
+    tmp_path: Path,
+    policy_override: dict[str, object],
+) -> None:
+    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
+    mutated_manifest = base_manifest.model_copy(update=policy_override)
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+
+    evaluation = validator.evaluate_candidate(
+        manifest=mutated_manifest,
+        workspace=candidate_root,
+        task_id="task-c03-policy-mutate",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        verification_receipt=receipt,
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.harness_intact is False
+    assert evaluation.rejection_code == TRUSTED_HARNESS_TAMPER_DETECTED
+
+
+def test_manifest_inside_candidate_worktree_rejected(tmp_path: Path) -> None:
+    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
+    in_worktree_path = candidate_root / "manifest_inside.json"
+    tampered_manifest = base_manifest.model_copy(
+        update={"trusted_manifest_path": str(in_worktree_path)}
+    )
+    in_worktree_path.write_text(tampered_manifest.model_dump_json(indent=2), encoding="utf-8")
+
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+    evaluation = validator.evaluate_candidate(
+        manifest=tampered_manifest,
+        workspace=candidate_root,
+        task_id="task-c03-in-worktree-manifest",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        verification_receipt=receipt,
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.harness_intact is False
+    assert evaluation.rejection_code == TRUSTED_HARNESS_TAMPER_DETECTED
+
+
+def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_file(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-ev-strict",
+        required_criterion_ids=("AC-01",),
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+
+    for bad_ev in (f"pytest:{_CANDIDATE_SHA}:AC-01", "pytest_log"):
+        bad_eval = validator.evaluate_candidate(
+            manifest=manifest,
+            workspace=candidate_root,
+            task_id="task-c03-bad-ev",
+            candidate_sha=_CANDIDATE_SHA,
+            changed_files=(
+                FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+            ),
+            tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            criterion_results=(
+                CriterionResult(
+                    criterion_id="AC-01",
+                    status=CriterionStatus.PASS,
+                    evidence=[bad_ev],
+                    notes="unverified evidence string",
+                ),
+            ),
+            verification_receipt=receipt,
+        )
+        assert bad_eval.passed is False
+        assert bad_eval.rejection_code == REWARD_HACKING_DETECTED
+        assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in bad_eval.findings)
+
+    for good_ev in (
+        f"receipt:{_CANDIDATE_SHA}:AC-01:{manifest.manifest_digest}",
+        "tests/unit/test_feature.py",
+    ):
+        good_eval = validator.evaluate_candidate(
+            manifest=manifest,
+            workspace=candidate_root,
+            task_id="task-c03-good-ev",
+            candidate_sha=_CANDIDATE_SHA,
+            changed_files=(
+                FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+            ),
+            tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            criterion_results=(
+                CriterionResult(
+                    criterion_id="AC-01",
+                    status=CriterionStatus.PASS,
+                    evidence=[good_ev],
+                    notes="verified evidence",
+                ),
+            ),
+            verification_receipt=receipt,
+        )
+        assert good_eval.passed is True
+        assert good_eval.findings == ()
+        assert good_eval.rejection_code is None

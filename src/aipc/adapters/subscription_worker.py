@@ -12,6 +12,7 @@ and retained verification evidence.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import hashlib
 import json
 import os
@@ -340,6 +341,104 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _WindowsKillOnCloseJob:
+    """Windows Job Object that terminates assigned processes on close."""
+
+    def __init__(self, pid: int | None) -> None:
+        self._handle: int | None = None
+        if os.name != "nt" or pid is None:
+            return
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k32.CreateJobObjectW.restype = ctypes.c_void_p
+        k32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        k32.SetInformationJobObject.restype = ctypes.c_int
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k32.AssignProcessToJobObject.restype = ctypes.c_int
+        k32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.TerminateJobObject.restype = ctypes.c_int
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        k32.CloseHandle.restype = ctypes.c_int
+
+        h_job = k32.CreateJobObjectW(None, None)
+        if not h_job:
+            return
+        try:
+            info = _JobObjectExtendedLimitInformation()
+            info.BasicLimitInformation.LimitFlags = 0x2000
+            if not k32.SetInformationJobObject(h_job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                k32.CloseHandle(h_job)
+                return
+            h_proc = k32.OpenProcess(0x1F0FFF, False, pid)
+            if not h_proc:
+                k32.CloseHandle(h_job)
+                return
+            try:
+                if not k32.AssignProcessToJobObject(h_job, h_proc):
+                    k32.CloseHandle(h_job)
+                    return
+            finally:
+                k32.CloseHandle(h_proc)
+            self._handle = h_job
+        except Exception:
+            k32.CloseHandle(h_job)
+            raise
+
+    def close(self) -> None:
+        if os.name != "nt" or self._handle is None:
+            return
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        h_job = self._handle
+        self._handle = None
+        try:
+            k32.TerminateJobObject(h_job, 1)
+        finally:
+            k32.CloseHandle(h_job)
+
+
 def _terminate_pid_tree(
     pid: int | None,
     env: Mapping[str, str],
@@ -367,10 +466,18 @@ def _terminate_pid_tree(
                 raise ControllerError(
                     f"Failed to terminate worker process tree for PID {pid}: {kill_err}"
                 ) from kill_err
-            if res is not None and res.returncode != 0 and _pid_exists(pid):
-                raise ControllerError(
-                    f"taskkill failed (rc={res.returncode}) and PID {pid} is still alive"
-                )
+            if res is not None and res.returncode != 0:
+                combined_out = f"{res.stdout or ''}{_NL}{res.stderr or ''}".lower()
+                already_gone = (
+                    res.returncode == 128 or "not found" in combined_out
+                ) and not _pid_exists(pid)
+                if not already_gone:
+                    raise ControllerError(
+                        f"taskkill /F /T failed (rc={res.returncode}) for PID {pid}"
+                    )
+            elif _pid_exists(pid):
+                rc = res.returncode if res is not None else "none"
+                raise ControllerError(f"taskkill /F /T failed (rc={rc}) for PID {pid}")
         return
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -405,13 +512,16 @@ def _default_validation_command_runner(
         text=True,
         start_new_session=(os.name != "nt"),
     )
+    job_obj = _WindowsKillOnCloseJob(proc.pid)
     try:
         stdout_text, stderr_text = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
+        job_obj.close()
         _terminate_pid_tree(proc.pid, env)
         proc.communicate()
         raise
     finally:
+        job_obj.close()
         if proc.poll() is None or os.name != "nt":
             _terminate_pid_tree(proc.pid, env)
     elapsed_ms = max(0, int((time.monotonic() - t0) * 1000))
@@ -441,10 +551,14 @@ def select_preferred_worker_model(
 def _terminate_worker_process_tree(
     proc: asyncio.subprocess.Process,
     env: Mapping[str, str],
+    *,
+    job_obj: _WindowsKillOnCloseJob | None = None,
 ) -> None:
     try:
         _terminate_pid_tree(proc.pid, env, require_tree_kill=True)
     finally:
+        if job_obj is not None:
+            job_obj.close()
         if proc.returncode is None:
             try:
                 proc.kill()
@@ -494,6 +608,7 @@ async def invoke_antigravity_cli_worker(
         stderr=asyncio.subprocess.PIPE,
         start_new_session=(os.name != "nt"),
     )
+    job_obj = _WindowsKillOnCloseJob(proc.pid)
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(),
@@ -501,10 +616,19 @@ async def invoke_antigravity_cli_worker(
         )
     except (asyncio.CancelledError, TimeoutError):
         try:
-            _terminate_worker_process_tree(proc, env)
+            _terminate_worker_process_tree(proc, env, job_obj=job_obj)
         finally:
-            await proc.wait()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+            finally:
+                transport = getattr(proc, "_transport", None)
+                if transport is not None and hasattr(transport, "close"):
+                    transport.close()
         raise
+    finally:
+        job_obj.close()
     stdout_text = stdout_b.decode("utf-8", errors="replace")
     stderr_text = stderr_b.decode("utf-8", errors="replace")
     lines = [ln for ln in stdout_text.splitlines() if ln.strip().startswith("{")]
@@ -1342,6 +1466,27 @@ def _verify_clean_worktree_for_recovery(
     return dec_precondition == expected_precondition
 
 
+def _agent_result_matches_worker_output(
+    ctx_res: AgentResult,
+    worker_res: AgentResult,
+) -> bool:
+    return (
+        ctx_res.task_id == worker_res.task_id
+        and ctx_res.agent_id == worker_res.agent_id
+        and ctx_res.provider == worker_res.provider
+        and ctx_res.status == worker_res.status
+        and ctx_res.summary == worker_res.summary
+        and ctx_res.files_changed == worker_res.files_changed
+        and ctx_res.commands == worker_res.commands
+        and ctx_res.tests == worker_res.tests
+        and ctx_res.warnings == worker_res.warnings
+        and ctx_res.errors == worker_res.errors
+        and ctx_res.approval_requests == worker_res.approval_requests
+        and ctx_res.worker_claimed_complete == worker_res.worker_claimed_complete
+        and ctx_res.raw_output_ref == worker_res.raw_output_ref
+    )
+
+
 def run_cli_worker_job(
     job_path: Path,
     *,
@@ -1421,6 +1566,9 @@ def run_cli_worker_job(
                 gate_dec = SubscriptionReviewerGateDecision.model_validate_json(
                     Path(gate_path).read_text(encoding="utf-8")
                 )
+                gate_dec = SubscriptionReviewerGateDecision.model_validate(
+                    gate_dec.model_dump(mode="json")
+                )
                 ctx_path = job.get("review_context_path")
                 if not ctx_path or not Path(ctx_path).is_file():
                     raise ControllerError(
@@ -1456,9 +1604,16 @@ def run_cli_worker_job(
                     and gate_ctx.task.phase_id == expected_phase_id
                     and gate_ctx.task.attempt == expected_attempt
                     and gate_ctx.checkpoint.git_commit == sha
-                    and gate_ctx.agent_result.task_id == tid
-                    and gate_ctx.agent_result.status == out.agent_result.status
-                    and gate_ctx.agent_result.task_id == out.agent_result.task_id
+                    and _agent_result_matches_worker_output(gate_ctx.agent_result, out.agent_result)
+                    and (
+                        not job.get("require_live_worker_agent_result_match")
+                        or digest(gate_ctx.agent_result) == digest(out.agent_result)
+                    )
+                    and gate_ctx.evidence.git.head == sha
+                    and gate_ctx.evidence.git.changes == tuple(out.agent_result.files_changed)
+                    and tuple((c.command, c.exit_code) for c in gate_ctx.evidence.commands)
+                    == tuple((c.command, c.exit_code) for c in out.agent_result.commands)
+                    and gate_ctx.evidence.tests.structured == out.agent_result.tests
                     and bound.context_digest == context_fingerprint(gate_ctx)
                     and bound.provenance == review_provenance(gate_ctx)
                     and bound.provenance.task_id == tid
@@ -1468,10 +1623,6 @@ def run_cli_worker_job(
                     and bound.provenance.git_commit == sha
                     and bound.provenance.agent_result_digest == digest(gate_ctx.agent_result)
                     and bound.provenance.evidence_digest == digest(gate_ctx.evidence)
-                    and (
-                        not job.get("require_live_worker_agent_result_match")
-                        or digest(gate_ctx.agent_result) == digest(out.agent_result)
-                    )
                     and gate_dec.phase_gate_decision is not None
                     and gate_dec.phase_gate_decision.verdict == ReviewVerdict.PASS
                     and gate_dec.phase_gate_decision.next_phase_allowed is True

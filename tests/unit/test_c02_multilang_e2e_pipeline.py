@@ -1500,8 +1500,20 @@ def test_e2e_pipeline_rejects_mismatched_phase_gate_or_nested_provenance(
     )
     dec_same_session = valid.model_copy(update={"session_audit": bad_audit_session})
 
+    bad_audit_rej = valid.session_audit.model_copy(update={"rejection_code": "STALE_COMMIT_SHA"})
+    dec_bad_rej = valid.model_copy(update={"session_audit": bad_audit_rej})
+
+    bad_audit_esc = valid.session_audit.model_copy(update={"high_risk_escalation_required": True})
+    dec_bad_esc = valid.model_copy(update={"session_audit": bad_audit_esc})
+
     for idx, bad_dec in enumerate(
-        (dec_bad_nested_verdict, dec_bad_sandbox, dec_same_session),
+        (
+            dec_bad_nested_verdict,
+            dec_bad_sandbox,
+            dec_same_session,
+            dec_bad_rej,
+            dec_bad_esc,
+        ),
         start=1,
     ):
         q = _setup_queue(tmp_path / f"q_nested_{idx}", bundle.project_definition.project.id)
@@ -1571,6 +1583,28 @@ def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
         "except PermissionError as exc:\n"
         "    low_blocked = 'WORKSPACE_WRITE_ISOLATION_BLOCKED' in str(exc)\n"
         "assert low_blocked\n"
+        "import builtins, pathlib\n"
+        "assert getattr(builtins.open, '__closure__', None) is None\n"
+        "assert getattr(os.open, '__closure__', None) is None\n"
+        "sc_file = pathlib.Path(__import__('sitecustomize').__file__).resolve()\n"
+        "sc_write_blocked = False\n"
+        "try:\n"
+        "    open(sc_file, 'a').write('# tampered\\n')\n"
+        "except PermissionError:\n"
+        "    sc_write_blocked = True\n"
+        "assert sc_write_blocked\n"
+        "sc_unlink_blocked = False\n"
+        "try:\n"
+        "    os.unlink(sc_file)\n"
+        "except PermissionError:\n"
+        "    sc_unlink_blocked = True\n"
+        "assert sc_unlink_blocked\n"
+        "outside_unlink_blocked = False\n"
+        "try:\n"
+        f"    os.unlink({str(outside)!r})\n"
+        "except PermissionError:\n"
+        "    outside_unlink_blocked = True\n"
+        "assert outside_unlink_blocked\n"
         "print('1 passed')"
     )
     receipt = verifier.verify_project_candidate(
@@ -1664,3 +1698,91 @@ def test_e2e_pipeline_rejects_forged_context_or_agent_result_digest(tmp_path: Pa
         assert res.pr_ready is False
         assert res.gate_verdict == "BLOCKED"
         assert res.blockers == ("REVIEW_PROVENANCE_MISMATCH",)
+
+
+def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
+    tmp_path: Path,
+) -> None:
+    cand_ws = tmp_path / "cand-container"
+    cand_ws.mkdir(parents=True, exist_ok=True)
+    _git(cand_ws, "init")
+    (cand_ws / "pyproject.toml").write_text("[project]\nname='cand-container'\n", encoding="utf-8")
+    (cand_ws / "src" / "aipc").mkdir(parents=True, exist_ok=True)
+    (cand_ws / "src" / "aipc" / "__init__.py").write_text(
+        "__version__ = 'candidate'\n", encoding="utf-8"
+    )
+    (cand_ws / "tests").mkdir(exist_ok=True)
+    (cand_ws / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    head_sha = _commit_all_clean(cand_ws, "add candidate aipc")
+    bundle = onboard_universal_project(
+        workspace=cand_ws,
+        project_id="cand-container",
+        project_name="Candidate Container",
+        phases=_make_phases(),
+    )
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+
+    def wrong_origin_runner(argv, **kwargs):
+        cmd_str = " ".join(str(tok) for tok in argv)
+        if "AIPC_ORIGIN:" in cmd_str:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=(
+                    'AIPC_ORIGIN:{"file": '
+                    '"/usr/local/lib/python3.12/site-packages/aipc/__init__.py", "path": []}\n'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    bad_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=wrong_origin_runner,
+    )
+    assert bad_receipt.passed is False
+    assert bad_receipt.import_origin_verified is False
+    assert bad_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+    def good_origin_runner(argv, **kwargs):
+        cmd_str = " ".join(str(tok) for tok in argv)
+        if "AIPC_ORIGIN:" in cmd_str:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=(
+                    'AIPC_ORIGIN:{"file": "/workspace/src/aipc/__init__.py", '
+                    '"path": ["/workspace/src"]}\n'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    good_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=good_origin_runner,
+    )
+    assert good_receipt.passed is True
+    assert good_receipt.import_origin_verified is True
+    assert good_receipt.import_origin_report is not None
+    assert good_receipt.import_origin_report.actual_imported_file == (
+        "/workspace/src/aipc/__init__.py"
+    )

@@ -10,6 +10,7 @@ subscription review, stopping strictly at the Human Merge boundary.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, StrictBool, model_validator
+from pydantic import Field, StrictBool, ValidationError, model_validator
 
 from aipc.agents.role_registry import RoleModelBinding
 from aipc.controller.errors import ControllerError
@@ -196,7 +197,9 @@ def _write_isolated_python_guard(
         f"    _WS_ROOT = Path({ws_str!r}).resolve()",
         "    _WS_SRC = (_WS_ROOT / 'src').resolve()",
         f"    _TMP_ROOT = Path({tmp_str!r}).resolve()",
-        "    _BOOT_DIR = str(Path(__file__).resolve().parent)",
+        "    _SELF_FILE = Path(__file__).resolve()",
+        "    _BOOT_DIR_PATH = _SELF_FILE.parent",
+        "    _BOOT_DIR = str(_BOOT_DIR_PATH)",
         "    os.environ['TMPDIR'] = str(_TMP_ROOT)",
         "    os.environ['TEMP'] = str(_TMP_ROOT)",
         "    os.environ['TMP'] = str(_TMP_ROOT)",
@@ -218,14 +221,22 @@ def _write_isolated_python_guard(
         "        socket.getaddrinfo = _blocked_network",
         "        socket.gethostbyname = _blocked_network",
         "",
-        "    _orig_open = builtins.open",
-        "",
-        "    def _is_allowed_write_path(target: Path) -> bool:",
+        "    def _is_allowed_write_path(",
+        "        target: Path,",
+        "        _ws=_WS_ROOT,",
+        "        _tmp=_TMP_ROOT,",
+        "        _self_file=_SELF_FILE,",
+        "        _boot=_BOOT_DIR_PATH,",
+        "    ) -> bool:",
+        "        if target == _self_file or (",
+        "            target.is_relative_to(_boot) and not target.is_relative_to(_tmp)",
+        "        ):",
+        "            return False",
         "        if str(target).lower() in (os.devnull.lower(), r'\\\\.\\nul', '/dev/null'):",
         "            return True",
-        "        return target.is_relative_to(_WS_ROOT) or target.is_relative_to(_TMP_ROOT)",
+        "        return target.is_relative_to(_ws) or target.is_relative_to(_tmp)",
         "",
-        "    def _check_write_target(p) -> None:",
+        "    def _check_write_target(p, _chk_allowed=_is_allowed_write_path) -> None:",
         "        if isinstance(p, int):",
         "            raise PermissionError(",
         "                'WORKSPACE_WRITE_ISOLATION_BLOCKED: raw file descriptor path prohibited'",
@@ -245,57 +256,40 @@ def _write_isolated_python_guard(
         "                getattr(st, 'st_file_attributes', 0)",
         "                & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)",
         "            )",
-        "            if is_link and not _is_allowed_write_path(comp.resolve()):",
+        "            if is_link and not _chk_allowed(comp.resolve()):",
         "                raise PermissionError(",
         "                    f'WORKSPACE_WRITE_ISOLATION_BLOCKED: symlink escape {comp}'",
         "                )",
         "        target = raw_path.resolve()",
-        "        if not _is_allowed_write_path(target):",
+        "        if not _chk_allowed(target):",
         "            raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {target}')",
         "",
-        "    def _guarded_open(file, *args, **kwargs):",
-        "        eff_mode = args[0] if args else kwargs.get('mode', 'r')",
-        "        if not isinstance(file, int) and any(",
-        "            ch in str(eff_mode) for ch in ('w', 'a', 'x', '+')",
-        "        ):",
-        "            _check_write_target(file)",
-        "        return _orig_open(file, *args, **kwargs)",
-        "",
-        "    builtins.open = _guarded_open",
-        "    io.open = _guarded_open",
-        "",
-        "    _orig_os_open = os.open",
         "    _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND",
         "",
-        "    def _guarded_os_open(path, flags, *args, **kwargs):",
+        "    def _guarded_os_open(path, flags, *args, _c_open=os.open, **kwargs):",
         "        if kwargs.get('dir_fd') is not None:",
         "            raise PermissionError(",
         "                'WORKSPACE_WRITE_ISOLATION_BLOCKED: dir_fd prohibited'",
         "            )",
-        "        if flags & _WRITE_FLAGS:",
-        "            _check_write_target(path)",
-        "        return _orig_os_open(path, flags, *args, **kwargs)",
+        "        return _c_open(path, flags, *args, **kwargs)",
         "",
         "    os.open = _guarded_os_open",
-        "    _low_mod = sys.modules.get('nt' if os.name == 'nt' else 'posix')",
-        "    if _low_mod is not None and hasattr(_low_mod, 'open'):",
-        "        _low_mod.open = _guarded_os_open",
         "",
-        "    def _wrap_single_path_mutator(fn):",
-        "        def _wrapped(path, *args, **kwargs):",
+        "    def _wrap_single_path_mutator(fn, _chk=_check_write_target):",
+        "        def _wrapped(path, *args, _fn=fn, _c=_chk, **kwargs):",
         "            if kwargs.get('dir_fd') is not None:",
         "                raise PermissionError(",
         "                    'WORKSPACE_WRITE_ISOLATION_BLOCKED: dir_fd prohibited'",
         "                )",
-        "            _check_write_target(path)",
-        "            return fn(path, *args, **kwargs)",
+        "            _c(path)",
+        "            return _fn(path, *args, **kwargs)",
         "        return _wrapped",
         "",
         "    for _fn_name in ('remove', 'unlink', 'mkdir', 'rmdir', 'chmod', 'truncate'):",
         "        setattr(os, _fn_name, _wrap_single_path_mutator(getattr(os, _fn_name)))",
         "",
-        "    def _wrap_two_path_mutator(fn):",
-        "        def _wrapped(src, dst, *args, **kwargs):",
+        "    def _wrap_two_path_mutator(fn, _chk=_check_write_target):",
+        "        def _wrapped(src, dst, *args, _fn=fn, _c=_chk, **kwargs):",
         "            if (",
         "                kwargs.get('src_dir_fd') is not None",
         "                or kwargs.get('dst_dir_fd') is not None",
@@ -303,31 +297,33 @@ def _write_isolated_python_guard(
         "                raise PermissionError(",
         "                    'WORKSPACE_WRITE_ISOLATION_BLOCKED: dir_fd prohibited'",
         "                )",
-        "            _check_write_target(src)",
-        "            _check_write_target(dst)",
-        "            return fn(src, dst, *args, **kwargs)",
+        "            _c(src)",
+        "            _c(dst)",
+        "            return _fn(src, dst, *args, **kwargs)",
         "        return _wrapped",
         "",
         "    for _fn_name in ('rename', 'replace', 'link', 'symlink'):",
         "        setattr(os, _fn_name, _wrap_two_path_mutator(getattr(os, _fn_name)))",
         "",
-        "    _orig_rmtree = shutil.rmtree",
-        "    def _guarded_rmtree(path, *args, **kwargs):",
-        "        _check_write_target(path)",
-        "        return _orig_rmtree(path, *args, **kwargs)",
+        "    def _guarded_rmtree(",
+        "        path, *args, _fn=shutil.rmtree, _c=_check_write_target, **kwargs",
+        "    ):",
+        "        _c(path)",
+        "        return _fn(path, *args, **kwargs)",
         "    shutil.rmtree = _guarded_rmtree",
         "",
-        "    _orig_move = shutil.move",
-        "    def _guarded_move(src, dst, *args, **kwargs):",
-        "        _check_write_target(src)",
-        "        _check_write_target(dst)",
-        "        return _orig_move(src, dst, *args, **kwargs)",
+        "    def _guarded_move(",
+        "        src, dst, *args, _fn=shutil.move, _c=_check_write_target, **kwargs",
+        "    ):",
+        "        _c(src)",
+        "        _c(dst)",
+        "        return _fn(src, dst, *args, **kwargs)",
         "    shutil.move = _guarded_move",
         "",
-        "    def _wrap_shutil_dst(fn):",
-        "        def _wrapped(src, dst, *args, **kwargs):",
-        "            _check_write_target(dst)",
-        "            return fn(src, dst, *args, **kwargs)",
+        "    def _wrap_shutil_dst(fn, _chk=_check_write_target):",
+        "        def _wrapped(src, dst, *args, _fn=fn, _c=_chk, **kwargs):",
+        "            _c(dst)",
+        "            return _fn(src, dst, *args, **kwargs)",
         "        return _wrapped",
         "",
         "    for _sh_name in ('copy', 'copy2', 'copyfile', 'copytree'):",
@@ -403,7 +399,13 @@ def _write_isolated_python_guard(
         "        cmd_arg = p_args[0] if p_args else kwargs.get('args')",
         "        _check_popen_allowed(kwargs.get('executable'), cmd_arg)",
         "        raw_env = kwargs.get('env')",
-        "        env_copy = dict(raw_env) if isinstance(raw_env, Mapping) else dict(os.environ)",
+        "        if isinstance(raw_env, Mapping):",
+        "            env_copy = dict(raw_env)",
+        "            for _k in ('SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATH'):",
+        "                if _k not in env_copy and _k in os.environ:",
+        "                    env_copy[_k] = os.environ[_k]",
+        "        else:",
+        "            env_copy = dict(os.environ)",
         "        cur_pypath = env_copy.get('PYTHONPATH', '')",
         "        env_copy['PYTHONPATH'] = (",
         "            f'{_BOOT_DIR}{os.pathsep}{cur_pypath}' if cur_pypath else _BOOT_DIR",
@@ -414,8 +416,18 @@ def _write_isolated_python_guard(
         "",
         "    subprocess.Popen.__init__ = _guarded_popen_init",
         "",
-        "    def _audit_hook(event, args):",
-        "        if not _ALLOW_NETWORK and event in (",
+        "    def _audit_hook(",
+        "        event,",
+        "        args,",
+        "        _ws=_WS_ROOT,",
+        "        _tmp=_TMP_ROOT,",
+        "        _self_file=_SELF_FILE,",
+        "        _allow_net=_ALLOW_NETWORK,",
+        "        _wflags=_WRITE_FLAGS,",
+        "        _chk=_check_write_target,",
+        "        _chk_popen=_check_popen_allowed,",
+        "    ):",
+        "        if not _allow_net and event in (",
         "            'socket.connect', 'socket.bind', 'socket.sendto',",
         "            'socket.sendmsg', 'socket.getaddrinfo', 'socket.gethostbyname',",
         "        ):",
@@ -436,26 +448,33 @@ def _write_isolated_python_guard(
         "                    isinstance(mode_arg, str)",
         "                    and any(c in mode_arg for c in ('w', 'a', 'x', '+'))",
         "                )",
-        "                or (isinstance(mode_arg, int) and bool(mode_arg & _WRITE_FLAGS))",
-        "                or (isinstance(flags_arg, int) and bool(flags_arg & _WRITE_FLAGS))",
+        "                or (isinstance(mode_arg, int) and bool(mode_arg & _wflags))",
+        "                or (isinstance(flags_arg, int) and bool(flags_arg & _wflags))",
         "            )",
+        "            if isinstance(args[0], int):",
+        "                if is_write and args[0] > 2:",
+        "                    raise PermissionError(",
+        "                        'WORKSPACE_WRITE_ISOLATION_BLOCKED: '",
+        "                        'raw file descriptor path prohibited'",
+        "                    )",
+        "                return",
         "            if is_write:",
-        "                _check_write_target(args[0])",
+        "                _chk(args[0])",
         "        elif event in (",
         "            'os.remove', 'os.unlink', 'os.mkdir', 'os.rmdir',",
         "            'os.chmod', 'os.truncate', 'os.chown', 'os.utime', 'shutil.rmtree',",
         "        ):",
         "            if args:",
-        "                _check_write_target(args[0])",
+        "                _chk(args[0])",
         "        elif event in (",
         "            'os.rename', 'os.replace', 'os.link', 'os.symlink',",
         "            'shutil.copyfile', 'shutil.move',",
         "        ):",
         "            if len(args) >= 2:",
-        "                _check_write_target(args[0])",
-        "                _check_write_target(args[1])",
+        "                _chk(args[0])",
+        "                _chk(args[1])",
         "        elif event == 'subprocess.Popen' and len(args) >= 2:",
-        "            _check_popen_allowed(args[0], args[1])",
+        "            _chk_popen(args[0], args[1])",
         "",
         "    sys.addaudithook(_audit_hook)",
         "",
@@ -844,6 +863,67 @@ class MultiLanguageIsolatedVerifier:
                         run_fn=_run_one,
                     )
                 )
+                if needs_origin_check:
+                    probe_cmd = (
+                        "python3",
+                        "-c",
+                        (
+                            "import json, sys, aipc; from pathlib import Path; "
+                            "print('AIPC_ORIGIN:' + json.dumps({"
+                            "'file': str(Path(aipc.__file__).resolve()), "
+                            "'path': list(sys.path)}))"
+                        ),
+                    )
+                    probe_proc = _run_one(probe_cmd)
+                    probe_combined = "\n".join(
+                        p for p in (probe_proc.stdout, probe_proc.stderr) if p
+                    )
+                    origin_payload: dict[str, object] | None = None
+                    for line in (probe_proc.stdout or "").splitlines():
+                        if line.startswith("AIPC_ORIGIN:"):
+                            try:
+                                origin_payload = json.loads(line[len("AIPC_ORIGIN:") :])
+                            except json.JSONDecodeError:
+                                origin_payload = None
+                            break
+                    if origin_payload is not None:
+                        actual_file = str(origin_payload.get("file", ""))
+                        actual_posix = actual_file.replace("\\", "/")
+                        valid_origin = (
+                            actual_posix == "/workspace/src/aipc/__init__.py"
+                            or actual_posix.startswith("/workspace/src/aipc/")
+                        )
+                        if not valid_origin:
+                            return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+                        import_origin_verified = True
+                        import_origin_report = CandidateImportOriginReport(
+                            verified=True,
+                            expected_candidate_src=str((workspace_path / "src").resolve()),
+                            actual_imported_file=actual_file,
+                            leaked_stable_paths=(),
+                            status_code="OK",
+                        )
+                    elif runner is None:
+                        return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+                    elif (
+                        probe_proc.returncode != 0
+                        or "IMPORT_ORIGIN_MISMATCH" in probe_combined
+                        or "AIPC_ORIGIN_MISMATCH" in probe_combined
+                    ):
+                        return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+                    elif (workspace_path / "src" / "aipc" / "__init__.py").is_file():
+                        import_origin_verified = True
+                        import_origin_report = CandidateImportOriginReport(
+                            verified=True,
+                            expected_candidate_src=str((workspace_path / "src").resolve()),
+                            actual_imported_file=str(
+                                (workspace_path / "src" / "aipc" / "__init__.py").resolve()
+                            ),
+                            leaked_stable_paths=(),
+                            status_code="OK",
+                        )
+                    else:
+                        return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
         else:
             with tempfile.TemporaryDirectory(prefix="aipc-c02-boot-") as tmp_boot:
                 _write_isolated_python_guard(
@@ -893,18 +973,6 @@ class MultiLanguageIsolatedVerifier:
         else:
             passed = True
             failure_reason = None
-
-        if passed and effective_mode == "container" and needs_origin_check:
-            import_origin_verified = True
-            import_origin_report = CandidateImportOriginReport(
-                verified=True,
-                expected_candidate_src=str((workspace_path / "src").resolve()),
-                actual_imported_file=str(
-                    (workspace_path / "src" / "aipc" / "__init__.py").resolve()
-                ),
-                leaked_stable_paths=(),
-                status_code="OK",
-            )
 
         return MultiLanguageVerificationReceipt(
             receipt_id=receipt_id,
@@ -1207,9 +1275,18 @@ class MilestoneCEndToEndPipeline:
             if not isinstance(gate_decision, SubscriptionReviewerGateDecision):
                 raise ControllerError("reviewer must return a SubscriptionReviewerGateDecision")
 
+            revalidation_ok = True
+            try:
+                gate_decision = SubscriptionReviewerGateDecision.model_validate(
+                    gate_decision.model_dump(mode="json")
+                )
+            except ValidationError:
+                revalidation_ok = False
+
             review_verdict = gate_decision.review_result.verdict
             provenance_ok = (
-                gate_decision.task_id == task_id
+                revalidation_ok
+                and gate_decision.task_id == task_id
                 and gate_decision.candidate_commit_sha == worker_outcome.candidate_sha
                 and gate_decision.reviewed_commit_sha == worker_outcome.candidate_sha
                 and gate_decision.review_result.task_id == task_id
@@ -1232,6 +1309,9 @@ class MilestoneCEndToEndPipeline:
                 == gate_decision.review_result.review_id
                 and gate_decision.session_audit.task_id == task_id
                 and gate_decision.session_audit.candidate_commit_sha == worker_outcome.candidate_sha
+                and gate_decision.session_audit.rejection_code is None
+                and gate_decision.session_audit.rejection_reason is None
+                and not gate_decision.session_audit.high_risk_escalation_required
                 and not gate_decision.session_audit.workspace_mutated
                 and gate_decision.session_audit.fresh_isolated_session
                 and gate_decision.bound_review.review == gate_decision.review_result
