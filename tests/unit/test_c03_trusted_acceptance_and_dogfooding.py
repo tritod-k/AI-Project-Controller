@@ -13,6 +13,7 @@ from aipc.controller.self_dev_runner import (
     CandidateImportOriginReport,
     CandidateVerificationReceipt,
     StableCandidateConfig,
+    verify_candidate_import_origin,
 )
 from aipc.domain.enums import ChangeType, CriterionStatus, ReviewVerdict
 from aipc.domain.models import CriterionResult, FileChange, ReviewResult, TestSummary
@@ -165,6 +166,7 @@ def test_positive_candidate_evaluation_passes_when_harness_intact(tmp_path: Path
             FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
         ),
         tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        verification_receipt=_make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA),
     )
 
     assert evaluation.passed is True
@@ -172,6 +174,29 @@ def test_positive_candidate_evaluation_passes_when_harness_intact(tmp_path: Path
     assert evaluation.behavioral_tests_verified is True
     assert evaluation.findings == ()
     assert evaluation.rejection_code is None
+
+
+def test_positive_evaluation_requires_verification_receipt(tmp_path: Path) -> None:
+    _, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
+    validator = TrustedAcceptanceHarnessValidator()
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-no-receipt",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="src/aipc/review/feature.py", change_type=ChangeType.ADDED),
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        verification_receipt=None,
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.behavioral_tests_verified is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "UNVERIFIED_EXECUTION_RECEIPT" for f in evaluation.findings)
 
 
 @pytest.mark.parametrize(
@@ -715,6 +740,80 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
     assert eval_failed.passed is False
     assert eval_failed.rejection_code == REWARD_HACKING_DETECTED
     assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in eval_failed.findings)
+
+    eval_bool_dict = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-crit-bool-dict",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        criterion_results={"AC-01": True, "AC-02": True},
+        verification_receipt=receipt,
+    )
+    assert eval_bool_dict.passed is False
+    assert eval_bool_dict.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in eval_bool_dict.findings)
+
+    eval_weak_ev = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-crit-weak-ev",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=["ok"],
+                notes="arbitrary evidence",
+            ),
+            CriterionResult(
+                criterion_id="AC-02",
+                status=CriterionStatus.PASS,
+                evidence=["ok"],
+                notes="arbitrary evidence",
+            ),
+        ),
+        verification_receipt=receipt,
+    )
+    assert eval_weak_ev.passed is False
+    assert eval_weak_ev.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in eval_weak_ev.findings)
+
+    eval_valid = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-crit-valid",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=[f"pytest:{_CANDIDATE_SHA}:AC-01"],
+                notes="bound to sha and criterion",
+            ),
+            CriterionResult(
+                criterion_id="AC-02",
+                status=CriterionStatus.PASS,
+                evidence=["pytest_log"],
+                notes="canonical evidence id",
+            ),
+        ),
+        verification_receipt=receipt,
+    )
+    assert eval_valid.passed is True
+    assert eval_valid.findings == ()
+    assert eval_valid.rejection_code is None
 
 
 def test_required_criterion_without_verification_receipt_fails_closed(tmp_path: Path) -> None:
@@ -1452,3 +1551,81 @@ def test_dogfooding_candidate_git_integrity_fails_closed(
     assert bundle.dogfooding_passed is False
     assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
     assert "CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH" in bundle.blockers
+
+
+def test_dogfooding_accepts_genuine_verify_candidate_import_origin_report(tmp_path: Path) -> None:
+    stable_root, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
+    cand_sha = _git_head_sha(candidate_root)
+    config = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=_git_head_sha(stable_root),
+        candidate_sha=cand_sha,
+        verification_isolation="isolated_subprocess",
+        allow_auto_promote_stable=False,
+    )
+    import_report = verify_candidate_import_origin(
+        stable_root=stable_root,
+        candidate_root=candidate_root,
+    )
+    verification_receipt = CandidateVerificationReceipt(
+        candidate_sha=cand_sha,
+        isolation_mode="isolated_subprocess",
+        import_origin_verified=True,
+        import_origin_report=import_report,
+        sanitized_env_verified=True,
+        exit_code=0,
+        passed=True,
+        status_code="OK",
+        summary="Isolated candidate tests passed",
+    )
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-real-origin",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=_make_valid_gate_decision(
+            "task-c03-real-origin",
+            candidate_sha=cand_sha,
+        ),
+    )
+
+    assert bundle.dogfooding_passed is True
+    assert bundle.next_authorized_action == "HUMAN_MERGE_REVIEW"
+    assert bundle.blockers == ()
+
+
+def test_dogfooding_disabling_stable_git_integrity_blocks_pass(tmp_path: Path) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-skip-stable-git",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=_make_valid_gate_decision(
+            "task-c03-skip-stable-git",
+            candidate_sha=config.candidate_sha,
+        ),
+        verify_stable_git_integrity=False,
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "STABLE_GIT_INTEGRITY_UNVERIFIED" in bundle.blockers

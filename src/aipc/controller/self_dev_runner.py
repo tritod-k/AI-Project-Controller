@@ -143,36 +143,166 @@ def _is_stable_source_entry(entry_path: Path, stable_root: Path) -> bool:
     return entry_path == s_root or entry_path.is_relative_to(s_root)
 
 
+def _git_status_and_head(
+    repo_root: Path,
+    *,
+    parent_env: Mapping[str, str] | None = None,
+) -> tuple[str, str] | None:
+    """Return (HEAD sha, porcelain status) if repo_root is a Git checkout, else None."""
+    if not (repo_root / ".git").exists():
+        return None
+    env = dict(build_sanitized_child_env(parent_env))
+    head_proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    status_proc = subprocess.run(
+        ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (
+        head_proc.stdout.strip() if head_proc.returncode == 0 else "",
+        status_proc.stdout if status_proc.returncode == 0 else "",
+    )
+
+
 def _write_candidate_isolation_bootstrap(
     bootstrap_dir: Path,
     *,
     stable_root: Path,
     candidate_src: Path,
 ) -> Path:
-    """Write a sitecustomize.py that prunes Stable source roots from sys.path (keeping .venv)."""
+    """Write a sitecustomize.py that prunes Stable paths and installs sandbox guards."""
     stable_str = str(Path(stable_root).resolve())
     cand_src_str = str(Path(candidate_src).resolve())
     nl = chr(10)
     script = nl.join(
         [
-            "import os, sys",
+            "import os, socket, sys",
             "from pathlib import Path",
             f"_STABLE = Path({stable_str!r}).resolve()",
             "_STABLE_VENV = (_STABLE / '.venv').resolve()",
             f"_CAND_SRC = Path({cand_src_str!r}).resolve()",
+            "_CAND_ROOT = _CAND_SRC.parent.resolve()",
+            "_TMP_ROOT = Path(__file__).resolve().parent.parent",
+            "import tempfile",
+            "os.environ['TMPDIR'] = str(_TMP_ROOT)",
+            "os.environ['TEMP'] = str(_TMP_ROOT)",
+            "os.environ['TMP'] = str(_TMP_ROOT)",
+            "tempfile.tempdir = str(_TMP_ROOT)",
             "_cleaned = []",
             "for _entry in list(sys.path):",
             "    if not _entry:",
             "        continue",
             "    try:",
             "        _p = Path(_entry).resolve()",
-            "        if not _p.is_relative_to(_STABLE_VENV) and ("
-            "_p == _STABLE or _p.is_relative_to(_STABLE)):",
+            "        if not _p.is_relative_to(_STABLE_VENV) and (",
+            "            _p == _STABLE or _p.is_relative_to(_STABLE)",
+            "        ):",
             "            continue",
             "    except OSError:",
             "        pass",
             "    _cleaned.append(_entry)",
             "sys.path[:] = [str(_CAND_SRC)] + _cleaned",
+            "def _is_loopback_addr(_addr):",
+            "    if isinstance(_addr, tuple) and len(_addr) >= 1:",
+            "        return str(_addr[0]) in ('127.0.0.1', '::1', 'localhost', '')",
+            "    return False",
+            "_orig_connect = socket.socket.connect",
+            "_orig_connect_ex = socket.socket.connect_ex",
+            "_orig_bind = socket.socket.bind",
+            "_orig_getaddrinfo = socket.getaddrinfo",
+            "_orig_gethostbyname = socket.gethostbyname",
+            "def _blocked_network(*_args, **_kwargs):",
+            "    raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "def _guarded_sock_connect(_self, _addr):",
+            "    if not _is_loopback_addr(_addr):",
+            "        raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    return _orig_connect(_self, _addr)",
+            "def _guarded_sock_connect_ex(_self, _addr):",
+            "    if not _is_loopback_addr(_addr):",
+            "        raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    return _orig_connect_ex(_self, _addr)",
+            "def _guarded_sock_bind(_self, _addr):",
+            "    if not _is_loopback_addr(_addr):",
+            "        raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    return _orig_bind(_self, _addr)",
+            "def _guarded_getaddrinfo(_host, *_a, **_kw):",
+            "    if str(_host or '') not in ('127.0.0.1', '::1', 'localhost', ''):",
+            "        raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    return _orig_getaddrinfo(_host, *_a, **_kw)",
+            "def _guarded_gethostbyname(_host):",
+            "    if str(_host or '') not in ('127.0.0.1', '::1', 'localhost', ''):",
+            "        raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    return _orig_gethostbyname(_host)",
+            "socket.socket.connect = _guarded_sock_connect",
+            "socket.socket.connect_ex = _guarded_sock_connect_ex",
+            "socket.socket.sendto = _blocked_network",
+            "if hasattr(socket.socket, 'sendmsg'):",
+            "    socket.socket.sendmsg = _blocked_network",
+            "socket.socket.bind = _guarded_sock_bind",
+            "socket.create_connection = _blocked_network",
+            "socket.getaddrinfo = _guarded_getaddrinfo",
+            "socket.gethostbyname = _guarded_gethostbyname",
+            "_WFLAGS = (",
+            "    os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND",
+            ")",
+            "_orig_os_open = os.open",
+            "def _guarded_os_open(path, flags, *args, **kwargs):",
+            "    if isinstance(path, int) or kwargs.get('dir_fd') is not None:",
+            "        raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
+            "    return _orig_os_open(path, flags, *args, **kwargs)",
+            "os.open = _guarded_os_open",
+            "def _aipc_boot_audit(_ev, _args):",
+            "    if _ev in ('socket.connect', 'socket.bind') and len(_args) >= 2:",
+            "        if not _is_loopback_addr(_args[1]):",
+            "            raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    if _ev in ('socket.getaddrinfo', 'socket.gethostbyname') and _args:",
+            "        if str(_args[0] or '') not in ('127.0.0.1', '::1', 'localhost', ''):",
+            "            raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    if _ev in ('socket.sendto', 'socket.sendmsg'):",
+            "        raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    if _ev in ('os.system', 'os.spawn', 'os.exec', 'os.posix_spawn'):",
+            "        raise PermissionError(f'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: {_ev}')",
+            "    if _ev == 'subprocess.Popen' and len(_args) >= 2:",
+            "        _exe = str(_args[0] or '')",
+            "        _av = list(_args[1]) if isinstance(_args[1], (list, tuple)) else []",
+            "        _c0 = _exe or (str(_av[0]) if _av else '')",
+            "        _nm = Path(_c0).name.lower().removesuffix('.exe') if _c0 else ''",
+            "        if not _nm.startswith('python'):",
+            "            raise PermissionError('SUBPROCESS_SANDBOX_BYPASS_BLOCKED: Popen')",
+            "    if _ev == 'open' and len(_args) >= 2:",
+            "        _m = _args[1]",
+            "        _f = _args[2] if len(_args) >= 3 else 0",
+            "        _is_w = (",
+            "            (isinstance(_m, str) and any(c in _m for c in ('w', 'a', 'x', '+')))",
+            "            or (isinstance(_m, int) and bool(_m & _WFLAGS))",
+            "            or (isinstance(_f, int) and bool(_f & _WFLAGS))",
+            "        )",
+            "        if _is_w:",
+            "            _raw = _args[0]",
+            "            if isinstance(_raw, int):",
+            "                return",
+            "            if not isinstance(_raw, (str, bytes, os.PathLike)):",
+            "                raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
+            "            _tp = Path(os.fsdecode(_raw)).resolve()",
+            "            _nulls = (os.devnull.lower(), r'\\\\.\\nul', '/dev/null')",
+            "            if str(_tp).lower() not in _nulls and not (",
+            "                _tp.is_relative_to(_CAND_ROOT)",
+            "                or _tp.is_relative_to(_TMP_ROOT)",
+            "            ):",
+            "                raise PermissionError(",
+            "                    f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_tp}'",
+            "                )",
+            "sys.addaudithook(_aipc_boot_audit)",
             "",
         ]
     )
@@ -335,6 +465,7 @@ class SafeSelfDevelopmentRunner:
         c_root = Path(self.config.candidate_worktree_root).resolve()
         c_src = (c_root / "src").resolve()
 
+        pre_snap = _git_status_and_head(c_root, parent_env=parent_env)
         origin_report = verify_candidate_import_origin(
             stable_root=s_root,
             candidate_root=c_root,
@@ -342,6 +473,12 @@ class SafeSelfDevelopmentRunner:
             use_isolation_bootstrap=True,
             parent_env=parent_env,
         )
+        post_snap = _git_status_and_head(c_root, parent_env=parent_env)
+        if pre_snap != post_snap:
+            raise ControllerError(
+                "WORKSPACE_MUTATED_DURING_VERIFICATION: "
+                "candidate worktree mutated during import-origin check"
+            )
 
         if self.config.verification_isolation == "container":
             return self._run_container_verification(
@@ -479,6 +616,7 @@ class SafeSelfDevelopmentRunner:
             proc = self._exec(list(checked_argv), sanitized_env, candidate_root)
 
         passed = proc.returncode == 0
+        raw_out = (proc.stdout or proc.stderr or "isolated verification complete").strip()
         return CandidateVerificationReceipt(
             candidate_sha=self.config.candidate_sha,
             isolation_mode="isolated_subprocess",
@@ -488,7 +626,7 @@ class SafeSelfDevelopmentRunner:
             exit_code=int(proc.returncode),
             passed=passed,
             status_code="PASS" if passed else "TEST_FAILURE",
-            summary=(proc.stdout or proc.stderr or "isolated verification complete").strip()[:500],
+            summary=raw_out[-500:],
         )
 
     def _exec(

@@ -805,17 +805,94 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
             )
         )
 
+    async def slow_single_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        proc = await real_exec(
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdin=kwargs["stdin"],
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+        spawned.append(proc)
+        return proc
+
+    real_run = subprocess.run
+
+    def failing_taskkill_run(cmd: object, *args: object, **kwargs: object) -> object:
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "taskkill":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Access is denied.")
+        return real_run(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_single_exec)
+    monkeypatch.setattr("aipc.adapters.subscription_worker._pid_exists", lambda _pid: True)
+    if os.name == "nt":
+        monkeypatch.setattr(subprocess, "run", failing_taskkill_run)
+    else:
+
+        def _deny_killpg(_pid: int, _sig: int) -> None:
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(os, "killpg", _deny_killpg)
+
+    with pytest.raises(ControllerError):
+        asyncio.run(
+            invoke_antigravity_cli_worker(
+                _task(wt, task_id="task-r3-killfail", timeout=1),
+                cfg,
+                env,
+                "gemini-3.8-flash-medium",
+            )
+        )
+    assert len(spawned) == 3
+    assert spawned[2].returncode is not None
+
 
 def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: Path) -> None:
     """Verify run_cli_worker_job enforces all nested review, provenance, gate, and audit IDs."""
-    from aipc.domain.enums import ReviewVerdict
-    from aipc.domain.models import ReviewResult
-    from aipc.review.context import digest
-    from aipc.review.models import BoundReview, GateAction, PhaseGateDecision, ReviewProvenance
+    import hashlib
+    from datetime import UTC, datetime
+
+    from aipc.domain.enums import CriterionStatus, ReviewVerdict
+    from aipc.domain.models import (
+        AgentResult,
+        CriterionResult,
+        EvidenceReferences,
+        ReviewResult,
+        TestSummary,
+    )
+    from aipc.evidence.models import (
+        ArtifactRecord,
+        EvidenceBundle,
+        EvidenceItem,
+        GitEvidence,
+        TestEvidence,
+    )
+    from aipc.project.models import (
+        AcceptanceCriterion,
+        AgentAssignments,
+        ControllerConfig,
+        PhaseDefinition,
+        ProjectDefinition,
+        ProjectIdentity,
+    )
+    from aipc.project.state_models import ProjectState, ProjectStatus
+    from aipc.review.context import review_provenance
+    from aipc.review.gate import PhaseGate
+    from aipc.review.models import (
+        BoundReview,
+        CriterionRule,
+        PhaseReviewStage,
+        ReviewContext,
+    )
+    from aipc.review.reviewer import bind_review
     from aipc.review.subscription_reviewer_gate import (
         SessionIsolationAuditReceipt,
         SubscriptionReviewerGateDecision,
     )
+    from aipc.version.models import CheckpointMetadata, CheckpointType
 
     wt = tmp_path / "candidate_wt"
     sha = _init_git_repo(wt)
@@ -832,53 +909,206 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             summary="Noop.",
         )
 
-    def _build_gate_decision(gate_path: Path) -> SubscriptionReviewerGateDecision:
+    def _build_gate_decision(
+        gate_path: Path,
+    ) -> tuple[SubscriptionReviewerGateDecision, ReviewContext]:
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        ev_root = tmp_path / ".aipc_test_evidence"
+        ev_root.mkdir(parents=True, exist_ok=True)
+        task_req = _task(wt, task_id="task-b01-1")
+        project_def = ProjectDefinition(
+            schema_version="1.0",
+            project=ProjectIdentity(id="proj-b01", name="B01 Test", workspace=str(wt)),
+            controller=ControllerConfig(),
+            agents=AgentAssignments(planner="planner", worker="worker", reviewer="reviewer"),
+            phases=(
+                PhaseDefinition(
+                    id="01",
+                    name="Phase 01",
+                    objective="Implement double",
+                    acceptance_criteria=(
+                        AcceptanceCriterion(
+                            id="AC-01",
+                            statement="All tests pass",
+                            required=True,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        state = ProjectState(
+            schema_version="1.0",
+            project_id="proj-b01",
+            run_id="run-001",
+            current_phase="01",
+            current_attempt=1,
+            status=ProjectStatus.RUNNING,
+            completed_phases=(),
+            blocked_phases=(),
+            active_task_id="task-b01-1",
+            last_review=None,
+            updated_at=now,
+        )
+        agent_result = AgentResult(
+            schema_version="1.0",
+            task_id="task-b01-1",
+            agent_id="aipc-implementation-worker",
+            provider="gemini",
+            status=AgentStatus.COMPLETED,
+            started_at=now,
+            completed_at=now,
+            summary="Noop.",
+            files_changed=[],
+            commands=[],
+            tests=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            artifacts=[],
+            warnings=[],
+            errors=[],
+            approval_requests=[],
+            worker_claimed_complete=True,
+            evidence=EvidenceReferences(
+                git_diff_path="git_diff.txt",
+                test_log_path="pytest.log",
+                terminal_log_path="terminal.log",
+                screenshots=[],
+            ),
+            raw_output_ref=None,
+        )
+        required_ids = (
+            ("task", "task.json"),
+            ("agent_result", "agent_result.json"),
+            ("commands", "commands.json"),
+            ("artifact_index", "artifact_index.json"),
+            ("git_status", "git_status.txt"),
+            ("git_diff", "git_diff.txt"),
+            ("git_summary", "git_log.txt"),
+            ("test_log", "pytest.log"),
+            ("terminal_log", "terminal.log"),
+            ("raw_output", "raw_output.txt"),
+        )
+        file_payloads: dict[str, bytes] = {
+            "task.json": task_req.model_dump_json(indent=2).encode("utf-8"),
+            "agent_result.json": agent_result.model_dump_json(indent=2).encode("utf-8"),
+            "commands.json": json.dumps(
+                {"source": "agent_result", "commands": []}, indent=2
+            ).encode("utf-8"),
+            "git_status.txt": b"",
+            "git_diff.txt": b"",
+            "git_log.txt": f"{sha} initial commit\n".encode(),
+            "pytest.log": b"1 passed in 0.01s\n",
+            "terminal.log": b"pytest -q\n",
+            "raw_output.txt": b"1 passed in 0.01s\n",
+        }
+        artifacts_list: list[ArtifactRecord] = []
+        for eid, rel_path in required_ids:
+            if eid == "artifact_index":
+                continue
+            data = file_payloads[rel_path]
+            (ev_root / rel_path).write_bytes(data)
+            artifacts_list.append(
+                ArtifactRecord(
+                    artifact_id=f"art-{eid}",
+                    path=rel_path,
+                    kind=eid,
+                    size=len(data),
+                    sha256=hashlib.sha256(data).hexdigest(),
+                    source="test",
+                )
+            )
+        index_bytes = json.dumps(
+            {"artifacts": [a.model_dump(mode="json") for a in artifacts_list]},
+            indent=2,
+        ).encode("utf-8")
+        (ev_root / "artifact_index.json").write_bytes(index_bytes)
+        artifacts_list.append(
+            ArtifactRecord(
+                artifact_id="art-artifact_index",
+                path="artifact_index.json",
+                kind="artifact_index",
+                size=len(index_bytes),
+                sha256=hashlib.sha256(index_bytes).hexdigest(),
+                source="test",
+            )
+        )
+        items = tuple(
+            EvidenceItem(evidence_id=eid, kind=eid, status="collected", path=path, source="test")
+            for eid, path in required_ids
+        )
+        evidence = EvidenceBundle(
+            project_id="proj-b01",
+            run_id="run-001",
+            phase_id="01",
+            attempt=1,
+            task_id="task-b01-1",
+            status="COMPLETE",
+            git=GitEvidence(
+                status="collected",
+                head=sha,
+                baseline=sha,
+                branch="main",
+                changes=(),
+            ),
+            tests=TestEvidence(
+                parse_status="collected",
+                log_ref="pytest.log",
+                structured=TestSummary(total=1, passed=1, failed=0, skipped=0),
+                parsed=TestSummary(total=1, passed=1, failed=0, skipped=0),
+                agrees=True,
+            ),
+            commands=(),
+            items=items,
+            artifacts=tuple(artifacts_list),
+        )
+        (ev_root / "manifest.json").write_bytes(evidence.model_dump_json(indent=2).encode("utf-8"))
+        checkpoint = CheckpointMetadata(
+            checkpoint_id="phase-01-attempt-01",
+            checkpoint_type=CheckpointType.ATTEMPT,
+            project_id="proj-b01",
+            phase_id="01",
+            attempt=1,
+            git_commit=sha,
+            git_ref="refs/tags/aipc/proj-b01/phase-01/attempt-01",
+            source_branch="main",
+            created_at=now,
+            parent_checkpoint="phase-01-pre",
+        )
+        review_ctx = ReviewContext(
+            project=project_def,
+            state=state,
+            task=task_req,
+            agent_result=agent_result,
+            evidence=evidence,
+            evidence_root=str(ev_root),
+            checkpoint=checkpoint,
+            phase_stage=PhaseReviewStage.AWAITING_REVIEW,
+            rules=(CriterionRule(criterion_id="AC-01", kind="tests", minimum_passed=1),),
+        )
         review = ReviewResult(
             schema_version="1.0",
             review_id="rev-001",
             task_id="task-b01-1",
             verdict=ReviewVerdict.PASS,
             confidence=0.95,
-            criteria=[],
+            criteria=[
+                CriterionResult(
+                    criterion_id="AC-01",
+                    status=CriterionStatus.PASS,
+                    evidence=["test_log"],
+                    notes="All tests passed.",
+                )
+            ],
             failed_criteria=[],
             required_fixes=[],
             risks=[],
             next_phase_allowed=True,
         )
-        provenance = ReviewProvenance(
-            project_id="proj-b01",
-            run_id="run-001",
-            phase_id="01",
-            attempt=1,
-            task_id="task-b01-1",
-            attempt_checkpoint_id="ckpt-task-b01-1",
-            git_commit=sha,
-            agent_result_digest="a" * 64,
-            evidence_digest="b" * 64,
-        )
-        bound = BoundReview(
-            review=review,
-            context_digest="c" * 64,
-            review_digest=digest(review),
+        bound = bind_review(
+            review_ctx,
+            review,
             authority="milestone-b-independent-subscription-reviewer",
-            provenance=provenance,
+            reviewed=review_provenance(review_ctx),
         )
-        gate_decision = PhaseGateDecision(
-            verdict=ReviewVerdict.PASS,
-            project_id="proj-b01",
-            phase_id="01",
-            attempt=1,
-            task_id="task-b01-1",
-            review_id="rev-001",
-            actions=(GateAction.MARK_PHASE_PASS,),
-            next_phase_allowed=True,
-            stable_checkpoint_allowed=True,
-            repair_required=False,
-            human_intervention_required=False,
-            reasons=(),
-            failed_criteria=(),
-            required_fixes=(),
-        )
+        gate_decision = PhaseGate().evaluate(bound, review_ctx)
         audit = SessionIsolationAuditReceipt(
             audit_id="audit-001",
             task_id="task-b01-1",
@@ -901,7 +1131,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             reduced_independence=False,
             high_risk_escalation_required=False,
         )
-        return SubscriptionReviewerGateDecision(
+        decision = SubscriptionReviewerGateDecision(
             gate_outcome="PASS",
             task_id="task-b01-1",
             candidate_commit_sha=sha,
@@ -912,8 +1142,15 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             session_audit=audit,
             receipt_path=str(gate_path),
         )
+        return decision, review_ctx
 
-    def _prepare_case(name: str, payload: dict[str, object]) -> tuple[PersistentTaskQueue, Path]:
+    def _prepare_case(
+        name: str,
+        payload: dict[str, object],
+        review_ctx: ReviewContext,
+        *,
+        include_review_context: bool = True,
+    ) -> tuple[PersistentTaskQueue, Path]:
         case_dir = tmp_path / name
         case_dir.mkdir(parents=True, exist_ok=True)
         q_path = case_dir / "queue.json"
@@ -926,8 +1163,10 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         gate_path = case_dir / "gate.json"
         payload["receipt_path"] = str(gate_path)
         gate_path.write_text(json.dumps(payload), encoding="utf-8")
+        ctx_path = case_dir / "review_context.json"
+        ctx_path.write_text(review_ctx.model_dump_json(indent=2), encoding="utf-8")
         job_path = case_dir / "job.json"
-        job_payload = {
+        job_payload: dict[str, object] = {
             "queue_path": str(q_path),
             "review_gate_decision_path": str(gate_path),
             "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
@@ -939,12 +1178,14 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
                 "require_non_empty_diff": False,
             },
         }
+        if include_review_context:
+            job_payload["review_context_path"] = str(ctx_path)
         job_path.write_text(json.dumps(job_payload), encoding="utf-8")
         return q, job_path
 
-    base_decision = _build_gate_decision(tmp_path / "valid" / "gate.json")
+    base_decision, base_ctx = _build_gate_decision(tmp_path / "valid" / "gate.json")
     valid_payload = base_decision.model_dump(mode="json")
-    q_ok, job_ok = _prepare_case("valid", valid_payload)
+    q_ok, job_ok = _prepare_case("valid", valid_payload, base_ctx)
     rc = run_cli_worker_job(
         job_ok,
         qualification_report=_qualified_report(),
@@ -953,10 +1194,24 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
     assert rc == 0
     assert q_ok.load().tasks[0].status == QueuedTaskStatus.COMPLETED
 
+    q_missing_ctx, job_missing_ctx = _prepare_case(
+        "missing_ctx", valid_payload, base_ctx, include_review_context=False
+    )
+    with pytest.raises(ControllerError, match="review_context_path is required"):
+        run_cli_worker_job(
+            job_missing_ctx,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+    assert q_missing_ctx.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
     mutations: list[tuple[str, tuple[str, ...], object]] = [
         ("prov_task", ("bound_review", "provenance", "task_id"), "other-task"),
         ("prov_sha", ("bound_review", "provenance", "git_commit"), "0" * 40),
         ("prov_attempt", ("bound_review", "provenance", "attempt"), 2),
+        ("forged_context_digest", ("bound_review", "context_digest"), "d" * 64),
+        ("forged_agent_digest", ("bound_review", "provenance", "agent_result_digest"), "d" * 64),
+        ("forged_evidence_digest", ("bound_review", "provenance", "evidence_digest"), "d" * 64),
         ("gate_task", ("phase_gate_decision", "task_id"), "other-task"),
         ("gate_attempt", ("phase_gate_decision", "attempt"), 2),
         ("gate_review_id", ("phase_gate_decision", "review_id"), "rev-other"),
@@ -968,7 +1223,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         for key in path_keys[:-1]:
             target = target[key]  # type: ignore[assignment]
         target[path_keys[-1]] = bad_val
-        q_bad, job_bad = _prepare_case(f"bad_{name}", mutated)
+        q_bad, job_bad = _prepare_case(f"bad_{name}", mutated, base_ctx)
         with pytest.raises((ControllerError, ValueError)):
             run_cli_worker_job(
                 job_bad,
@@ -1054,7 +1309,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         neg_payload = neg_decision.model_dump(mode="json")
         with pytest.raises(ValueError):
             SubscriptionReviewerGateDecision.model_validate(neg_payload)
-        q_neg, job_neg = _prepare_case(f"neg_{name}", neg_payload)
+        q_neg, job_neg = _prepare_case(f"neg_{name}", neg_payload, base_ctx)
         with pytest.raises((ControllerError, ValueError)):
             run_cli_worker_job(
                 job_neg,
@@ -1062,3 +1317,30 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
                 worker_invoker=noop_invoker,
             )
         assert q_neg.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+
+def test_b01_cli_worker_job_invalid_worker_config_leaves_task_eligible(tmp_path: Path) -> None:
+    """N2: invalid worker_config fails before begin_dispatch, leaving task ELIGIBLE."""
+    wt = tmp_path / "candidate_wt"
+    _init_git_repo(wt)
+    q_path = tmp_path / "queue.json"
+    q = PersistentTaskQueue(q_path)
+    q.initialize(
+        project_id="proj-b01",
+        milestone_id="milestone-b",
+        contracts=[_approved_contract("task-b01-1")],
+    )
+    job_path = tmp_path / "invalid_job.json"
+    job_payload = {
+        "queue_path": str(q_path),
+        "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
+        "worker_config": {
+            "candidate_worktree": str(wt),
+            "evidence_output_dir": str(tmp_path / "evidence"),
+            "operating_profile": "api_key",
+        },
+    }
+    job_path.write_text(json.dumps(job_payload), encoding="utf-8")
+    with pytest.raises(SubscriptionBoundaryError):
+        run_cli_worker_job(job_path, qualification_report=_qualified_report())
+    assert q.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE

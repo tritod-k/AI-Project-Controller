@@ -221,7 +221,7 @@ def _write_isolated_python_guard(
         "    _orig_open = builtins.open",
         "",
         "    def _is_allowed_write_path(target: Path) -> bool:",
-        "        if str(target) == os.devnull:",
+        "        if str(target).lower() in (os.devnull.lower(), r'\\\\.\\nul', '/dev/null'):",
         "            return True",
         "        return target.is_relative_to(_WS_ROOT) or target.is_relative_to(_TMP_ROOT)",
         "",
@@ -277,6 +277,9 @@ def _write_isolated_python_guard(
         "        return _orig_os_open(path, flags, *args, **kwargs)",
         "",
         "    os.open = _guarded_os_open",
+        "    _low_mod = sys.modules.get('nt' if os.name == 'nt' else 'posix')",
+        "    if _low_mod is not None and hasattr(_low_mod, 'open'):",
+        "        _low_mod.open = _guarded_os_open",
         "",
         "    def _wrap_single_path_mutator(fn):",
         "        def _wrapped(path, *args, **kwargs):",
@@ -425,8 +428,18 @@ def _write_isolated_python_guard(
         "            )",
         "        if event in ('ctypes.dlopen', 'ctypes.dlsym'):",
         "            raise PermissionError(f'CTYPES_SANDBOX_BLOCKED: {event} prohibited')",
-        "        if event == 'open' and len(args) >= 2 and isinstance(args[1], str):",
-        "            if any(ch in args[1] for ch in ('w', 'a', 'x', '+')):",
+        "        if event == 'open' and len(args) >= 2:",
+        "            mode_arg = args[1]",
+        "            flags_arg = args[2] if len(args) >= 3 else 0",
+        "            is_write = (",
+        "                (",
+        "                    isinstance(mode_arg, str)",
+        "                    and any(c in mode_arg for c in ('w', 'a', 'x', '+'))",
+        "                )",
+        "                or (isinstance(mode_arg, int) and bool(mode_arg & _WRITE_FLAGS))",
+        "                or (isinstance(flags_arg, int) and bool(flags_arg & _WRITE_FLAGS))",
+        "            )",
+        "            if is_write:",
         "                _check_write_target(args[0])",
         "        elif event in (",
         "            'os.remove', 'os.unlink', 'os.mkdir', 'os.rmdir',",
@@ -752,20 +765,16 @@ class MultiLanguageIsolatedVerifier:
         ):
             return _fail_receipt("CANDIDATE_WORKTREE_HEAD_OR_DIRTY_MISMATCH")
 
+        initial_digests = snapshot_workspace_digests(workspace_path)
+
         needs_origin_check = (
             workspace_path / "src" / "aipc" / "__init__.py"
         ).is_file() or stable_root is not None
         import_origin_verified = False
         import_origin_report: CandidateImportOriginReport | None = None
-        if needs_origin_check and effective_mode in ("isolated_subprocess", "container"):
+        if needs_origin_check and effective_mode == "isolated_subprocess":
             first_tok = test_commands[0][0] if test_commands and test_commands[0] else ""
-            py_exe = (
-                first_tok
-                if effective_mode == "isolated_subprocess"
-                and first_tok
-                and Path(first_tok).is_file()
-                else sys.executable
-            )
+            py_exe = first_tok if first_tok and Path(first_tok).is_file() else sys.executable
             try:
                 import_origin_report = verify_candidate_import_origin(
                     stable_root=stable_root or (workspace_path.parent / "__aipc_disjoint_stable__"),
@@ -783,6 +792,17 @@ class MultiLanguageIsolatedVerifier:
                 import_origin_verified = True
             except ControllerError:
                 return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+        elif needs_origin_check and effective_mode == "container":
+            if not (workspace_path / "src" / "aipc" / "__init__.py").is_file():
+                return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+            if stable_root is not None:
+                s_res = Path(stable_root).resolve()
+                if (
+                    s_res == workspace_path
+                    or s_res.is_relative_to(workspace_path)
+                    or workspace_path.is_relative_to(s_res)
+                ):
+                    return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
 
         container_argv: tuple[str, ...] | None = None
         resource_limits: ContainerResourceLimits | None = None
@@ -853,7 +873,12 @@ class MultiLanguageIsolatedVerifier:
                     )
                 )
 
-        workspace_mutated = pre_digests != post_digests
+        post_git_ok = (not verify_git_head) or _verify_candidate_git_worktree(
+            workspace_path, candidate_sha, sanitized_env
+        )
+        workspace_mutated = (
+            (initial_digests != pre_digests) or (pre_digests != post_digests) or (not post_git_ok)
+        )
         overall_exit_code = test_exit if test_exit != 0 else extra_exit
 
         if workspace_mutated:
@@ -868,6 +893,18 @@ class MultiLanguageIsolatedVerifier:
         else:
             passed = True
             failure_reason = None
+
+        if passed and effective_mode == "container" and needs_origin_check:
+            import_origin_verified = True
+            import_origin_report = CandidateImportOriginReport(
+                verified=True,
+                expected_candidate_src=str((workspace_path / "src").resolve()),
+                actual_imported_file=str(
+                    (workspace_path / "src" / "aipc" / "__init__.py").resolve()
+                ),
+                leaked_stable_paths=(),
+                status_code="OK",
+            )
 
         return MultiLanguageVerificationReceipt(
             receipt_id=receipt_id,

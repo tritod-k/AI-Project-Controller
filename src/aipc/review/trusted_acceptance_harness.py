@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Literal, Self
@@ -28,7 +29,10 @@ from aipc.domain.models import (
 )
 from aipc.hardening.env_isolation import build_sanitized_child_env
 from aipc.hardening.secrets import assert_no_secrets
-from aipc.review.models import Digest
+from aipc.review.context import context_fingerprint, digest, review_provenance
+from aipc.review.errors import PhaseGateError, ReviewContextError
+from aipc.review.gate import PhaseGate
+from aipc.review.models import Digest, ReviewContext
 from aipc.review.subscription_reviewer_gate import SubscriptionReviewerGateDecision
 from aipc.version.models import Commit
 
@@ -111,12 +115,38 @@ def assert_milestone_c_scope_authorized(
         )
 
 
+def _compute_manifest_digest(
+    manifest_id: str,
+    project_id: str,
+    milestone_id: str,
+    pinned_file_sha256: dict[str, str],
+    protected_harness_globs: tuple[str, ...] | list[str],
+) -> str:
+    """Compute canonical SHA-256 digest over TrustedHarnessManifest provenance fields."""
+    payload = (
+        manifest_id,
+        project_id,
+        milestone_id,
+        dict(sorted(pinned_file_sha256.items())),
+        list(protected_harness_globs),
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class TrustedHarnessManifest(CanonicalRecord):
     """Manifest pinning protected trusted acceptance harness paths and SHA-256 digests."""
 
     manifest_id: NonBlank
     project_id: NonBlank
     milestone_id: NonBlank
+    manifest_authority: Literal["trusted_operator", "stable_controller"] = "trusted_operator"
+    manifest_digest: Digest | None = None
     protected_harness_globs: tuple[NonBlank, ...] = _DEFAULT_PROTECTED_HARNESS_GLOBS
     pinned_file_sha256: dict[str, Digest] = Field(default_factory=dict)
     pre_workspace_snapshot: dict[str, Digest] = Field(default_factory=dict)
@@ -131,6 +161,16 @@ class TrustedHarnessManifest(CanonicalRecord):
             raise ValueError(
                 "TrustedHarnessManifest requires at least one pinned_file_sha256 entry"
             )
+        if self.manifest_digest is not None:
+            expected_digest = _compute_manifest_digest(
+                self.manifest_id,
+                self.project_id,
+                self.milestone_id,
+                self.pinned_file_sha256,
+                self.protected_harness_globs,
+            )
+            if self.manifest_digest != expected_digest:
+                raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: manifest_digest mismatch")
         assert_no_secrets(self.model_dump(mode="json"))
         return self
 
@@ -176,10 +216,19 @@ def build_trusted_harness_manifest(
         pinned[norm_rel] = hashlib.sha256(target.read_bytes()).hexdigest()
 
     pre_snap = _snapshot_workspace_files(workspace_root)
+    resolved_manifest_id = manifest_id or f"manifest-{uuid4().hex[:12]}"
+    manifest_digest_val = _compute_manifest_digest(
+        resolved_manifest_id,
+        project_id,
+        milestone_id,
+        pinned,
+        _DEFAULT_PROTECTED_HARNESS_GLOBS,
+    )
     return TrustedHarnessManifest(
-        manifest_id=manifest_id or f"manifest-{uuid4().hex[:12]}",
+        manifest_id=resolved_manifest_id,
         project_id=project_id,
         milestone_id=milestone_id,
+        manifest_digest=manifest_digest_val,
         pinned_file_sha256=pinned,
         pre_workspace_snapshot=pre_snap,
     )
@@ -853,6 +902,19 @@ class TrustedAcceptanceHarnessValidator:
                     )
                 )
 
+        if manifest.require_behavioral_assertions and verification_receipt is None:
+            findings.append(
+                RewardHackingFinding(
+                    rule_id="UNVERIFIED_EXECUTION_RECEIPT",
+                    file_path="verification_receipt",
+                    description=(
+                        "Behavioral acceptance requires a verified "
+                        "CandidateVerificationReceipt bound to candidate_sha"
+                    ),
+                )
+            )
+            reward_hacking_detected = True
+
         if verification_receipt is not None and (
             not verification_receipt.passed
             or verification_receipt.exit_code != 0
@@ -888,19 +950,38 @@ class TrustedAcceptanceHarnessValidator:
                 )
                 reward_hacking_detected = True
 
+            def _valid_criterion_evidence(ev: str, cid: str) -> bool:
+                if candidate_sha in ev and cid in ev:
+                    return True
+                return (
+                    ev in {"pytest_log", "git_diff", "git_status", "terminal_log"}
+                    and verification_receipt is not None
+                    and verification_receipt.passed
+                    and verification_receipt.candidate_sha == candidate_sha
+                )
+
             criterion_map: dict[str, bool] = {}
             if isinstance(criterion_results, dict):
-                criterion_map = {str(k): bool(v) for k, v in criterion_results.items()}
+                for k in criterion_results:
+                    criterion_map[str(k)] = False
+                for req_id in manifest.required_criterion_ids:
+                    criterion_map[req_id] = False
+                findings.append(
+                    RewardHackingFinding(
+                        rule_id="REQUIRED_CRITERION_UNVERIFIED",
+                        file_path="criteria",
+                        description=(
+                            "Boolean criterion map lacks structured execution evidence; "
+                            "provide CriterionResult items"
+                        ),
+                    )
+                )
+                reward_hacking_detected = True
             elif criterion_results is not None:
                 for cr in criterion_results:
                     if cr.criterion_id in manifest.required_criterion_ids:
                         has_provenance = any(
-                            candidate_sha in ev
-                            or cr.criterion_id in ev
-                            or "pytest" in ev
-                            or "test" in ev
-                            or "ok" in ev
-                            for ev in cr.evidence
+                            _valid_criterion_evidence(ev, cr.criterion_id) for ev in cr.evidence
                         )
                         criterion_map[cr.criterion_id] = (
                             cr.status == CriterionStatus.PASS
@@ -997,6 +1078,7 @@ class DogfoodingAuditBundle(CanonicalRecord):
     def validate_bundle(self) -> Self:
         assert_milestone_c_scope_authorized(self.milestone_id, task_id=self.task_id)
         cand_root = Path(self.candidate_worktree_root).resolve()
+        cand_src_root = (cand_root / "src").resolve()
         cand_pkg_root = (cand_root / "src" / "aipc").resolve()
         expected_src = Path(self.import_origin_report.expected_candidate_src).resolve()
         actual_file_raw = self.import_origin_report.actual_imported_file.strip()
@@ -1019,7 +1101,7 @@ class DogfoodingAuditBundle(CanonicalRecord):
             or self.trusted_acceptance.candidate_sha != self.candidate_sha
             or not self.verification_receipt.import_origin_verified
             or bool(self.import_origin_report.leaked_stable_paths)
-            or expected_src != cand_pkg_root
+            or expected_src not in (cand_src_root, cand_pkg_root)
             or not actual_imported_ok
         ):
             raise ValueError(
@@ -1147,6 +1229,7 @@ class SelfDevelopmentDogfoodingCoordinator:
         reviewer_gate_decision: SubscriptionReviewerGateDecision | None = None,
         verify_stable_git_integrity: bool = True,
         criterion_results: tuple[CriterionResult, ...] | dict[str, bool] | None = None,
+        review_context: ReviewContext | None = None,
     ) -> DogfoodingAuditBundle:
         """Run trusted acceptance & isolation audit for a self-development candidate."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -1192,8 +1275,9 @@ class SelfDevelopmentDogfoodingCoordinator:
         if verification_receipt.candidate_sha != stable_candidate_config.candidate_sha:
             blockers.append("VERIFICATION_RECEIPT_SHA_MISMATCH")
 
-        expected_cand_src = Path(import_origin_report.expected_candidate_src).resolve()
+        cand_src_root = (c_root / "src").resolve()
         expected_pkg_root = (c_root / "src" / "aipc").resolve()
+        expected_cand_src = Path(import_origin_report.expected_candidate_src).resolve()
         actual_file_raw = import_origin_report.actual_imported_file.strip()
         actual_imported_ok = bool(actual_file_raw) and (
             Path(actual_file_raw).resolve().is_relative_to(expected_pkg_root)
@@ -1201,7 +1285,7 @@ class SelfDevelopmentDogfoodingCoordinator:
         if (
             not verification_receipt.import_origin_verified
             or verification_receipt.import_origin_report != import_origin_report
-            or expected_cand_src != expected_pkg_root
+            or expected_cand_src not in (cand_src_root, expected_pkg_root)
             or not actual_imported_ok
             or len(import_origin_report.leaked_stable_paths) > 0
         ):
@@ -1219,7 +1303,9 @@ class SelfDevelopmentDogfoodingCoordinator:
             or (c_root / _normalize_rel_path(fc.path)).resolve().is_relative_to(s_root)
             for fc in changed_files
         )
-        if verify_stable_git_integrity and not stable_mutated:
+        if not verify_stable_git_integrity:
+            blockers.append("STABLE_GIT_INTEGRITY_UNVERIFIED")
+        elif not stable_mutated:
             stable_mutated = _check_stable_git_integrity(
                 s_root,
                 stable_candidate_config.pinned_stable_sha,
@@ -1268,6 +1354,18 @@ class SelfDevelopmentDogfoodingCoordinator:
                 )
                 if not nested_ok:
                     decision_mismatch = True
+                elif bound_rev.review_digest != digest(reviewer_gate_decision.review_result):
+                    decision_mismatch = True
+                elif review_context is not None:
+                    try:
+                        if (
+                            bound_rev.context_digest != context_fingerprint(review_context)
+                            or bound_rev.provenance != review_provenance(review_context)
+                            or PhaseGate().evaluate(bound_rev, review_context) != gate_dec
+                        ):
+                            decision_mismatch = True
+                    except (ReviewContextError, PhaseGateError):
+                        decision_mismatch = True
             if decision_mismatch:
                 blockers.append("REVIEW_GATE_DECISION_MISMATCH")
 
@@ -1283,6 +1381,7 @@ class SelfDevelopmentDogfoodingCoordinator:
             "VERIFICATION_RECEIPT_SHA_MISMATCH",
             "IMPORT_ORIGIN_WORKSPACE_MISMATCH",
             "CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH",
+            "STABLE_GIT_INTEGRITY_UNVERIFIED",
             "STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH",
             "REVIEW_GATE_DECISION_MISMATCH",
             "MISSING_REVIEWER_GATE_DECISION",

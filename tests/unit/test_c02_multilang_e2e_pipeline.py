@@ -1548,8 +1548,9 @@ def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
         update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
     )
     verifier = MultiLanguageIsolatedVerifier()
+    outside = (tmp_path / "outside_low_open.txt").resolve()
     fd_code = (
-        "import os; "
+        "import os\n"
         "blocked = False\n"
         "try:\n"
         "    os.chmod(1, 0o600)\n"
@@ -1562,6 +1563,14 @@ def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
         "except PermissionError:\n"
         "    dir_blocked = True\n"
         "assert dir_blocked\n"
+        "low_blocked = False\n"
+        "try:\n"
+        "    __import__('nt' if os.name == 'nt' else 'posix').open(\n"
+        f"        {str(outside)!r}, os.O_WRONLY | os.O_CREAT, 0o600\n"
+        "    )\n"
+        "except PermissionError as exc:\n"
+        "    low_blocked = 'WORKSPACE_WRITE_ISOLATION_BLOCKED' in str(exc)\n"
+        "assert low_blocked\n"
         "print('1 passed')"
     )
     receipt = verifier.verify_project_candidate(
@@ -1571,6 +1580,40 @@ def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
         command_override=(sys.executable, "-c", fd_code),
     )
     assert receipt.passed is True
+    assert not outside.exists()
+
+
+def test_import_time_source_mutation_or_network_is_blocked_and_detected(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    ws = Path(bundle.workspace_root)
+    (ws / "src" / "aipc").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "aipc" / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "(Path(__file__).resolve().parents[2] / 'pyproject.toml').write_text(\n"
+        "    \"[project]\\nname='mutated-on-import'\\n\",\n"
+        "    encoding='utf-8',\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    head_sha = _commit_all_clean(ws, "add mutating init")
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", "print('1 passed')"),
+    )
+    assert receipt.passed is False
+    assert receipt.workspace_mutated_during_verification is True
+    assert receipt.failure_reason == "WORKSPACE_MUTATED_DURING_VERIFICATION"
 
 
 def test_e2e_pipeline_rejects_forged_context_or_agent_result_digest(tmp_path: Path) -> None:

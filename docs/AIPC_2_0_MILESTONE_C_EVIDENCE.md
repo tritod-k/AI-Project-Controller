@@ -30,7 +30,7 @@
   - **Inner Role Exclusion**: `argon` is excluded from inner AIPC roles (`worker`, `planner`, `reviewer`).
   - **Registry Entrypoint**: `build_default_subscription_role_registry` in `src/aipc/agents/role_registry.py` (used by `RoleBasedModelRegistry`).
 - **Verification**:
-  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: **`30 passed`** (0 failures).
+  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: **`31 passed`** (0 failures).
 
 ---
 
@@ -48,7 +48,7 @@
 ### Workstream C02 — Multi-Language Isolated Verification & End-to-End Pipeline (`2c0a84b`, `3d757c2`)
 - **Commits**: `2c0a84b`, `3d757c2`
 - **Implementation**: `src/aipc/controller/milestone_c_pipeline.py`
-- **Tests**: `tests/unit/test_c02_multilang_e2e_pipeline.py` (**`20 passed`**)
+- **Tests**: `tests/unit/test_c02_multilang_e2e_pipeline.py` (**`21 passed`**)
 - **Capabilities Verified**:
   - Multi-language isolated verification (`blocked`, `container`, `isolated_subprocess`) across Python, Node.js/JS/TS, Static Web, and Google Apps Script offline mock stacks.
   - Enforces fail-closed `ContainerResourceLimits` (`network_mode="none"`, `read_only_root_fs=True`, `non_root_user="65534:65534"`, `cap_drop=("ALL",)`, `no_new_privileges=True`).
@@ -58,7 +58,7 @@
 ### Workstream C03 — Trusted Acceptance Harness & Self-Development Dogfooding (`eae7689`, `c8b532f`)
 - **Commits**: `eae7689`, `c8b532f`
 - **Implementation**: `src/aipc/review/trusted_acceptance_harness.py`
-- **Tests**: `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (**`50 passed`**)
+- **Tests**: `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (**`53 passed`**)
 - **Capabilities Verified**:
   - Enforces Milestone C scope boundary via `assert_milestone_c_scope_authorized` (`UNAUTHORIZED_MILESTONE_D_BLOCKED` for any `milestone-d`, `d01`, `d02`, or `d03` target).
   - Enforces protected harness tamper detection (`TRUSTED_HARNESS_TAMPER_DETECTED` across `tests/acceptance/**`, `tests/trusted/**`, `src/aipc/review/gate.py`, `src/aipc/review/trusted_acceptance_harness.py`, `src/aipc/controller/task_queue.py`, and `src/aipc/approvals/**`), including full pre/post workspace SHA-256 snapshot and `git status`/`git diff` verification (**R6**).
@@ -67,7 +67,7 @@
 
 ### Worker Queue & Recovery Hardening (`31464ab`)
 - **Implementation**: `src/aipc/adapters/subscription_worker.py`
-- **Tests**: `tests/unit/test_b01_subscription_worker_automation.py` (**`10 passed`**)
+- **Tests**: `tests/unit/test_b01_subscription_worker_automation.py` (**`11 passed`**)
 - **Capabilities Verified**:
   - Prevents worker self-approval in `run_cli_worker_job` (**R1**) by requiring a verified `SubscriptionReviewerGateDecision` bound across outer fields, `review_result`, `bound_review.provenance`, `phase_gate_decision`, and `session_audit` before recording `PASS`.
   - Enforces `RecoveryDecision.safe_to_automate` and clean worktree preconditions before resuming `INTERRUPTED` or `WAITING_PROVIDER` tasks (**R2**).
@@ -78,7 +78,7 @@
 ## Part 4: Full CI Regression, Linter & Schema Verification Summary
 
 - **Full CI Regression Suite**:
-  - **`1192 passed`** across `unit`, `contract`, `gemini`, `CLI`, `routing`, `consensus`, `observability`, `dashboard`, `MCP`, `hardening`, `controller`, `review`, `plugins`, and `E2E` suites (`118 passed` in Milestone B/C focused suite).
+  - **`1197 passed`** across `unit`, `contract`, `gemini`, `CLI`, `routing`, `consensus`, `observability`, `dashboard`, `MCP`, `hardening`, `controller`, `review`, `plugins`, and `E2E` suites (`123 passed` in Milestone B/C focused suite).
 - **Ruff Linter & Formatter**:
   - `ruff check src tests tools`: clean (`0 errors`).
   - `ruff format --check src tests tools`: clean (`319 files already formatted`).

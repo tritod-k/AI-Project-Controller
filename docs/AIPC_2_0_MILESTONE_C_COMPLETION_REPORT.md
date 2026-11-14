@@ -7,12 +7,12 @@
 
 ## 2. Status
 - **Implementation & Full CI Regression Verification**: `PASS` (`READY FOR COMMANDER MERGE REVIEW`)
-  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`30 passed`**
+  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`31 passed`**
   - **Workstream C01** (`test_c01_universal_project_profiles.py`): **`17 passed`** (`2df59c7`, `1115726`)
-  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`20 passed`** (`2c0a84b`, `3d757c2`)
-  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`50 passed`** (`eae7689`, `c8b532f`)
-  - **Milestone B/C Focused Suite**: **`118 passed`**
-  - **Full CI Regression**: **`1192 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites
+  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`21 passed`** (`2c0a84b`, `3d757c2`)
+  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`53 passed`** (`eae7689`, `c8b532f`)
+  - **Milestone B/C Focused Suite**: **`123 passed`**
+  - **Full CI Regression**: **`1197 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites
   - **Static Analysis & Schemas**: `ruff check` clean, `ruff format --check` clean, domain and project JSON schemas verified
 
 ## 3. Summary

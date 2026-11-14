@@ -56,7 +56,7 @@ MILESTONE_C_READY_FOR_REVIEW (Final merge authority belongs exclusively to Human
 - Phase 24 — Self-Development Automation & Independent Reviewer Integration: PASS (Commander final merge authorization; PR #4 merged into `master` at `26f455fd40d7728d99dcf5494c1cad9353e45988`; 380 regression tests PASS; live Antigravity Flash subagents & live Codex subscription Independent Reviewer qualified in sanitized child environments).
 - AIPC 2.0 — Milestone A (`A01`–`A04`: Subscription-Only Multi-Provider Foundations): PASS (Commander final merge authorization; PR #5 merged into `master` at `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`; 895 + 343 passing tests, live subscription-authenticated independent review `rev-aipc2-milestone-a-12efdcc7` `PASS`).
 - AIPC 2.0 — Milestone B (`B01`–`B03`: Autonomous Multi-Provider Development Loop): PASS (Commander final merge authorization; PR #6 merged into `master` at `849c866`; live cross-provider Codex `read-only` subscription independent review verdict `PASS` with confidence `0.95`; 14 B01–B03 unit/boundary tests + 65 Milestone A/B/Phase 24 regression tests + 122 review/consensus tests + 31 Antigravity/Docker container isolation tests PASS).
-- AIPC 2.0 — Milestone C (`C01`–`C03`: Universal Project Support, End-to-End Automation & Self-Development Dogfooding): READY FOR COMMANDER MERGE REVIEW (`f997783` targeted 2-tier inline Python execution policy; `4c1aab3` / `4db2134` `agy 1.5.8` & `gemini-4-hydrogen-medium` subscription worker integration; `C01` `2df59c7` / `1115726` `17 passed`; `C02` `2c0a84b` / `3d757c2` `20 passed`; `C03` `eae7689` / `c8b532f` `50 passed`; `1192 passed` full CI regression, `ruff check` and `ruff format --check` clean, domain and project schemas verified).
+- AIPC 2.0 — Milestone C (`C01`–`C03`: Universal Project Support, End-to-End Automation & Self-Development Dogfooding): READY FOR COMMANDER MERGE REVIEW (`f997783` targeted 2-tier inline Python execution policy; `4c1aab3` / `4db2134` `agy 1.5.8` & `gemini-4-hydrogen-medium` subscription worker integration; `C01` `2df59c7` / `1115726` `17 passed`; `C02` `2c0a84b` / `3d757c2` `21 passed`; `C03` `eae7689` / `c8b532f` `53 passed`; `1197 passed` full CI regression, `ruff check` and `ruff format --check` clean, domain and project schemas verified).
 
 ## Documentation Alignment
 COMPLETED — Updated Milestone C (`C01`–`C03`) and Gemini 4 Hydrogen subscription worker integration records in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (v0.6), `CURRENT_STATE.md`, `docs/AIPC_2_0_MILESTONE_C_EVIDENCE.md`, and `docs/AIPC_2_0_MILESTONE_C_COMPLETION_REPORT.md` (leaving `MASTER_PLAN.md` untouched).
@@ -165,12 +165,12 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 
 ## Tests
 - **Milestone C & Hydrogen Worker Suites (`gemini/aipc-2.0-milestone-c`)**:
-  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `30 passed`.
+  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `31 passed`.
   - `tests/unit/test_c01_universal_project_profiles.py`: `17 passed` (`2df59c7`, `1115726`).
-  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `20 passed` (`2c0a84b`, `3d757c2`).
-  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `50 passed` (`eae7689`, `c8b532f`).
-  - **Milestone B/C Focused Suite**: `118 passed`.
-  - **Full CI Regression**: `1192 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
+  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `21 passed` (`2c0a84b`, `3d757c2`).
+  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `53 passed` (`eae7689`, `c8b532f`).
+  - **Milestone B/C Focused Suite**: `123 passed`.
+  - **Full CI Regression**: `1197 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
   - `ruff check` and `ruff format --check`: clean (`0 errors`).
   - Domain and project JSON schemas: verified (`Checked 4 canonical schemas`, `Checked 2 project schemas`).
 
