@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import StrictBool, StrictInt, model_validator
@@ -229,26 +229,38 @@ def _write_candidate_isolation_bootstrap(
             "    _orig_gethostbyname = socket.gethostbyname",
             "    def _blocked_network(*_args, **_kwargs):",
             "        raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
+            "    _blocked_network.__defaults__ = None",
+            "    _blocked_network.__kwdefaults__ = None",
             "    def _guarded_sock_connect(_self, _addr):",
             "        if not _is_loopback_addr(_addr):",
             "            raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
             "        return _orig_connect(_self, _addr)",
+            "    _guarded_sock_connect.__defaults__ = None",
+            "    _guarded_sock_connect.__kwdefaults__ = None",
             "    def _guarded_sock_connect_ex(_self, _addr):",
             "        if not _is_loopback_addr(_addr):",
             "            raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
             "        return _orig_connect_ex(_self, _addr)",
+            "    _guarded_sock_connect_ex.__defaults__ = None",
+            "    _guarded_sock_connect_ex.__kwdefaults__ = None",
             "    def _guarded_sock_bind(_self, _addr):",
             "        if not _is_loopback_addr(_addr):",
             "            raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
             "        return _orig_bind(_self, _addr)",
+            "    _guarded_sock_bind.__defaults__ = None",
+            "    _guarded_sock_bind.__kwdefaults__ = None",
             "    def _guarded_getaddrinfo(_host, *_a, **_kw):",
             "        if str(_host or '') not in ('127.0.0.1', '::1', 'localhost', ''):",
             "            raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
             "        return _orig_getaddrinfo(_host, *_a, **_kw)",
+            "    _guarded_getaddrinfo.__defaults__ = None",
+            "    _guarded_getaddrinfo.__kwdefaults__ = None",
             "    def _guarded_gethostbyname(_host):",
             "        if str(_host or '') not in ('127.0.0.1', '::1', 'localhost', ''):",
             "            raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
             "        return _orig_gethostbyname(_host)",
+            "    _guarded_gethostbyname.__defaults__ = None",
+            "    _guarded_gethostbyname.__kwdefaults__ = None",
             "    socket.socket.connect = _guarded_sock_connect",
             "    socket.socket.connect_ex = _guarded_sock_connect_ex",
             "    socket.socket.sendto = _blocked_network",
@@ -261,10 +273,13 @@ def _write_candidate_isolation_bootstrap(
             "    _WFLAGS = (",
             "        os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND",
             "    )",
-            "    def _guarded_os_open(path, flags, *args, _c_open=os.open, **kwargs):",
+            "    _orig_os_open = os.open",
+            "    def _guarded_os_open(path, flags, *args, **kwargs):",
             "        if isinstance(path, int) or kwargs.get('dir_fd') is not None:",
             "            raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
-            "        return _c_open(path, flags, *args, **kwargs)",
+            "        return _orig_os_open(path, flags, *args, **kwargs)",
+            "    _guarded_os_open.__defaults__ = None",
+            "    _guarded_os_open.__kwdefaults__ = None",
             "    os.open = _guarded_os_open",
             "    class _BlockNativeMods:",
             "        _BLOCKED = ('ctypes', '_ctypes', '_posixsubprocess', '_winapi', 'msvcrt')",
@@ -289,23 +304,18 @@ def _write_candidate_isolation_bootstrap(
             "        env_copy['PYTHONNOUSERSITE'] = '1'",
             "        kwargs['env'] = env_copy",
             "        return _orig_popen_init(_self, *p_args, **kwargs)",
+            "    _guarded_popen_init.__defaults__ = None",
+            "    _guarded_popen_init.__kwdefaults__ = None",
             "    subprocess.Popen.__init__ = _guarded_popen_init",
-            "    def _check_cand_write(_raw):",
-            "        if not isinstance(_raw, (str, bytes, os.PathLike)):",
-            "            raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
-            "        _tp = Path(os.fsdecode(_raw)).resolve()",
-            "        _nulls = (os.devnull.lower(), r'\\\\.\\nul', '/dev/null')",
-            "        if str(_tp).lower() in _nulls:",
-            "            return",
-            "        if _tp == _SELF_FILE or (",
-            "            _tp.is_relative_to(_BOOT_DIR) and not _tp.is_relative_to(_TMP_ROOT)",
-            "        ):",
-            "            raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_tp}')",
-            "        if not (_tp.is_relative_to(_CAND_ROOT) or _tp.is_relative_to(_TMP_ROOT)):",
-            "            raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_tp}')",
             "    def _aipc_boot_audit(_ev, _args):",
             "        if _ev in ('socket.connect', 'socket.bind') and len(_args) >= 2:",
-            "            if not _is_loopback_addr(_args[1]):",
+            "            _addr = _args[1]",
+            "            _is_lb = (",
+            "                isinstance(_addr, tuple)",
+            "                and len(_addr) >= 1",
+            "                and str(_addr[0]) in ('127.0.0.1', '::1', 'localhost', '')",
+            "            )",
+            "            if not _is_lb:",
             "                raise PermissionError('NETWORK_ISOLATION_BLOCKED')",
             "        if _ev in ('socket.getaddrinfo', 'socket.gethostbyname') and _args:",
             "            if str(_args[0] or '') not in ('127.0.0.1', '::1', 'localhost', ''):",
@@ -333,6 +343,8 @@ def _write_candidate_isolation_bootstrap(
             "                    raise PermissionError(",
             "                        'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: guard-disabling flag'",
             "                    )",
+            "            return",
+            "        _paths = ()",
             "        if _ev == 'open' and len(_args) >= 2:",
             "            _m = _args[1]",
             "            _f = _args[2] if len(_args) >= 3 else 0",
@@ -347,21 +359,36 @@ def _write_candidate_isolation_bootstrap(
             "                    if _raw > 2:",
             "                        raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
             "                    return",
-            "                _check_cand_write(_raw)",
+            "                _paths = (_raw,)",
             "        elif _ev in (",
             "            'os.remove', 'os.unlink', 'os.mkdir', 'os.rmdir',",
             "            'os.chmod', 'os.truncate', 'os.chown', 'os.utime', 'shutil.rmtree',",
             "        ):",
             "            if _args:",
-            "                _check_cand_write(_args[0])",
+            "                _paths = (_args[0],)",
             "        elif _ev in (",
             "            'os.rename', 'os.replace', 'os.link', 'os.symlink',",
             "            'shutil.copyfile', 'shutil.move',",
             "        ):",
             "            if len(_args) >= 2:",
-            "                _check_cand_write(_args[0])",
-            "                _check_cand_write(_args[1])",
+            "                _paths = (_args[0], _args[1])",
+            "        _nulls = (os.devnull.lower(), r'\\\\.\\nul', '/dev/null')",
+            "        for _raw in _paths:",
+            "            if not isinstance(_raw, (str, bytes, os.PathLike)):",
+            "                raise PermissionError('WORKSPACE_WRITE_ISOLATION_BLOCKED')",
+            "            _tp = Path(os.fsdecode(_raw)).resolve()",
+            "            if str(_tp).lower() in _nulls:",
+            "                continue",
+            "            if _tp == _SELF_FILE or (",
+            "                _tp.is_relative_to(_BOOT_DIR) and not _tp.is_relative_to(_TMP_ROOT)",
+            "            ):",
+            "                raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_tp}')",
+            "            if not (_tp.is_relative_to(_CAND_ROOT) or _tp.is_relative_to(_TMP_ROOT)):",
+            "                raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_tp}')",
+            "    _aipc_boot_audit.__defaults__ = None",
+            "    _aipc_boot_audit.__kwdefaults__ = None",
             "    sys.addaudithook(_aipc_boot_audit)",
+            "    del _aipc_boot_audit",
             "_install_aipc_boot_guard()",
             "del _install_aipc_boot_guard",
             "",
@@ -642,30 +669,32 @@ class SafeSelfDevelopmentRunner:
                             break
                     except json.JSONDecodeError:
                         pass
-            if detected_origin is not None:
-                if not (
-                    detected_origin == "/workspace/src/aipc/__init__.py"
-                    or detected_origin.startswith("/workspace/src/aipc/")
-                ):
-                    raise ControllerError(
-                        f"{IMPORT_ORIGIN_MISMATCH}: container imported aipc from "
-                        f"'{detected_origin}'"
-                    )
-                origin_report = CandidateImportOriginReport(
-                    verified=True,
-                    expected_candidate_src=str(candidate_src),
-                    actual_imported_file=detected_origin,
-                    leaked_stable_paths=(),
-                    status_code="OK",
+            if detected_origin is None:
+                raise ControllerError(
+                    f"{IMPORT_ORIGIN_MISMATCH}: container output missing verified "
+                    "aipc_import_origin observation"
                 )
-            else:
-                origin_report = CandidateImportOriginReport(
-                    verified=True,
-                    expected_candidate_src=str(candidate_src),
-                    actual_imported_file=str((candidate_src / "aipc" / "__init__.py").resolve()),
-                    leaked_stable_paths=(),
-                    status_code="OK",
+            origin_posix_str = detected_origin.replace("\\", "/")
+            if not origin_posix_str or ".." in PurePosixPath(origin_posix_str).parts:
+                raise ControllerError(
+                    f"{IMPORT_ORIGIN_MISMATCH}: container imported aipc from '{detected_origin}'"
                 )
+            origin_posix = PurePosixPath(origin_posix_str)
+            expected_pkg = PurePosixPath("/workspace/src/aipc")
+            if not (
+                origin_posix == expected_pkg / "__init__.py"
+                or origin_posix.is_relative_to(expected_pkg)
+            ):
+                raise ControllerError(
+                    f"{IMPORT_ORIGIN_MISMATCH}: container imported aipc from '{detected_origin}'"
+                )
+            origin_report = CandidateImportOriginReport(
+                verified=True,
+                expected_candidate_src=str(candidate_src),
+                actual_imported_file=detected_origin,
+                leaked_stable_paths=(),
+                status_code="OK",
+            )
             import_origin_verified = True
 
         return CandidateVerificationReceipt(

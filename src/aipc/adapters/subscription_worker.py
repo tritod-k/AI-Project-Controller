@@ -317,11 +317,14 @@ def _run_git(
     )
 
 
-def _pid_exists(pid: int) -> bool:
+def _pid_exists(pid: int, env: Mapping[str, str] | None = None) -> bool:
     if os.name == "nt":
+        sanitized = build_sanitized_child_env(env)
+        assert_child_env_isolated(sanitized)
         try:
             res = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                env=dict(sanitized),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -339,6 +342,19 @@ def _pid_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+class _JobObjectBasicAccountingInformation(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", ctypes.c_uint32),
+        ("TotalProcesses", ctypes.c_uint32),
+        ("ActiveProcesses", ctypes.c_uint32),
+        ("TotalTerminatedProcesses", ctypes.c_uint32),
+    ]
 
 
 class _JobObjectBasicLimitInformation(ctypes.Structure):
@@ -380,9 +396,11 @@ class _JobObjectExtendedLimitInformation(ctypes.Structure):
 class _WindowsKillOnCloseJob:
     """Windows Job Object that terminates assigned processes on close."""
 
-    def __init__(self, pid: int | None) -> None:
+    def __init__(self, *, strict: bool = False) -> None:
         self._handle: int | None = None
-        if os.name != "nt" or pid is None:
+        self._strict = strict
+        self.enrolled: bool = False
+        if os.name != "nt":
             return
         k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
@@ -394,6 +412,14 @@ class _WindowsKillOnCloseJob:
             ctypes.c_uint32,
         ]
         k32.SetInformationJobObject.restype = ctypes.c_int
+        k32.QueryInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        k32.QueryInformationJobObject.restype = ctypes.c_int
         k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
         k32.OpenProcess.restype = ctypes.c_void_p
         k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -405,37 +431,82 @@ class _WindowsKillOnCloseJob:
 
         h_job = k32.CreateJobObjectW(None, None)
         if not h_job:
+            if self._strict:
+                raise ControllerError("Failed to create/configure Windows Job Object")
             return
         try:
             info = _JobObjectExtendedLimitInformation()
             info.BasicLimitInformation.LimitFlags = 0x2000
             if not k32.SetInformationJobObject(h_job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                if self._strict:
+                    raise ControllerError("Failed to create/configure Windows Job Object")
                 k32.CloseHandle(h_job)
                 return
-            h_proc = k32.OpenProcess(0x1F0FFF, False, pid)
-            if not h_proc:
-                k32.CloseHandle(h_job)
-                return
-            try:
-                if not k32.AssignProcessToJobObject(h_job, h_proc):
-                    k32.CloseHandle(h_job)
-                    return
-            finally:
-                k32.CloseHandle(h_proc)
             self._handle = h_job
         except Exception:
             k32.CloseHandle(h_job)
             raise
+
+    def assign(self, pid: int | None) -> None:
+        if os.name != "nt":
+            return
+        if self._handle is None or pid is None:
+            if self._strict:
+                raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
+            return
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        h_proc = k32.OpenProcess(0x1F0FFF, False, pid)
+        if not h_proc:
+            if self._strict:
+                raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
+            return
+        try:
+            if not k32.AssignProcessToJobObject(self._handle, h_proc):
+                if self._strict:
+                    raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
+                return
+            self.enrolled = True
+        finally:
+            k32.CloseHandle(h_proc)
+
+    def active_processes(self) -> int:
+        if os.name != "nt" or self._handle is None:
+            return 0
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        acct = _JobObjectBasicAccountingInformation()
+        ok = k32.QueryInformationJobObject(
+            self._handle,
+            1,
+            ctypes.byref(acct),
+            ctypes.sizeof(acct),
+            None,
+        )
+        if not ok:
+            if self._strict:
+                raise ControllerError("Failed to query Windows Job Object active processes")
+            return 0
+        return int(acct.ActiveProcesses)
 
     def close(self) -> None:
         if os.name != "nt" or self._handle is None:
             return
         k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         h_job = self._handle
-        self._handle = None
         try:
-            k32.TerminateJobObject(h_job, 1)
+            ok = k32.TerminateJobObject(h_job, 1)
+            if self._strict and not ok:
+                raise ControllerError("TerminateJobObject failed")
+            for _ in range(20):
+                if self.active_processes() == 0:
+                    break
+                time.sleep(0.05)
+            else:
+                if self._strict and self.active_processes() > 0:
+                    raise ControllerError(
+                        "Windows Job Object still has active processes after TerminateJobObject"
+                    )
         finally:
+            self._handle = None
             k32.CloseHandle(h_job)
 
 
@@ -444,6 +515,7 @@ def _terminate_pid_tree(
     env: Mapping[str, str],
     *,
     require_tree_kill: bool = False,
+    job_obj: _WindowsKillOnCloseJob | None = None,
 ) -> None:
     if pid is None:
         return
@@ -467,15 +539,17 @@ def _terminate_pid_tree(
                     f"Failed to terminate worker process tree for PID {pid}: {kill_err}"
                 ) from kill_err
             if res is not None and res.returncode != 0:
-                combined_out = f"{res.stdout or ''}{_NL}{res.stderr or ''}".lower()
                 already_gone = (
-                    res.returncode == 128 or "not found" in combined_out
-                ) and not _pid_exists(pid)
+                    res.returncode == 128
+                    and not _pid_exists(pid, env)
+                    and job_obj is not None
+                    and job_obj.enrolled
+                )
                 if not already_gone:
                     raise ControllerError(
                         f"taskkill /F /T failed (rc={res.returncode}) for PID {pid}"
                     )
-            elif _pid_exists(pid):
+            elif _pid_exists(pid, env):
                 rc = res.returncode if res is not None else "none"
                 raise ControllerError(f"taskkill /F /T failed (rc={rc}) for PID {pid}")
         return
@@ -484,7 +558,7 @@ def _terminate_pid_tree(
     except ProcessLookupError:
         pass
     except (PermissionError, OSError) as exc:
-        if require_tree_kill and _pid_exists(pid):
+        if require_tree_kill and _pid_exists(pid, env):
             raise ControllerError(f"Failed to kill process group {pid}") from exc
 
 
@@ -502,6 +576,7 @@ def _default_validation_command_runner(
         else token
         for token in argv
     ]
+    job_obj = _WindowsKillOnCloseJob(strict=False)
     proc = subprocess.Popen(
         cleaned_argv,
         cwd=str(worktree),
@@ -512,7 +587,7 @@ def _default_validation_command_runner(
         text=True,
         start_new_session=(os.name != "nt"),
     )
-    job_obj = _WindowsKillOnCloseJob(proc.pid)
+    job_obj.assign(proc.pid)
     try:
         stdout_text, stderr_text = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -555,7 +630,7 @@ def _terminate_worker_process_tree(
     job_obj: _WindowsKillOnCloseJob | None = None,
 ) -> None:
     try:
-        _terminate_pid_tree(proc.pid, env, require_tree_kill=True)
+        _terminate_pid_tree(proc.pid, env, require_tree_kill=True, job_obj=job_obj)
     finally:
         if job_obj is not None:
             job_obj.close()
@@ -599,16 +674,42 @@ async def invoke_antigravity_cli_worker(
         "-p",
         task.prompt,
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=str(Path(config.candidate_worktree).resolve()),
-        env=dict(env),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=(os.name != "nt"),
-    )
-    job_obj = _WindowsKillOnCloseJob(proc.pid)
+    job_obj = _WindowsKillOnCloseJob(strict=(os.name == "nt"))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(Path(config.candidate_worktree).resolve()),
+            env=dict(env),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=(os.name != "nt"),
+        )
+    except Exception:
+        job_obj.close()
+        raise
+    try:
+        job_obj.assign(proc.pid)
+    except Exception as exc:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except TimeoutError:
+            pass
+        finally:
+            transport = getattr(proc, "_transport", None)
+            if transport is not None and hasattr(transport, "close"):
+                transport.close()
+            try:
+                job_obj.close()
+            except ControllerError:
+                pass
+        if isinstance(exc, ControllerError):
+            raise
+        raise ControllerError(str(exc)) from exc
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(),
@@ -1466,25 +1567,17 @@ def _verify_clean_worktree_for_recovery(
     return dec_precondition == expected_precondition
 
 
+def _normalize_agent_result_timestamps(res: AgentResult, ref_time: datetime) -> AgentResult:
+    return res.model_copy(update={"started_at": ref_time, "completed_at": ref_time})
+
+
 def _agent_result_matches_worker_output(
     ctx_res: AgentResult,
     worker_res: AgentResult,
 ) -> bool:
-    return (
-        ctx_res.task_id == worker_res.task_id
-        and ctx_res.agent_id == worker_res.agent_id
-        and ctx_res.provider == worker_res.provider
-        and ctx_res.status == worker_res.status
-        and ctx_res.summary == worker_res.summary
-        and ctx_res.files_changed == worker_res.files_changed
-        and ctx_res.commands == worker_res.commands
-        and ctx_res.tests == worker_res.tests
-        and ctx_res.warnings == worker_res.warnings
-        and ctx_res.errors == worker_res.errors
-        and ctx_res.approval_requests == worker_res.approval_requests
-        and ctx_res.worker_claimed_complete == worker_res.worker_claimed_complete
-        and ctx_res.raw_output_ref == worker_res.raw_output_ref
-    )
+    norm_ctx = _normalize_agent_result_timestamps(ctx_res, worker_res.started_at)
+    norm_worker = _normalize_agent_result_timestamps(worker_res, worker_res.started_at)
+    return norm_ctx == norm_worker and digest(norm_ctx) == digest(norm_worker)
 
 
 def run_cli_worker_job(
@@ -1586,6 +1679,20 @@ def run_cli_worker_job(
                 )
                 sha = out.receipt.candidate_commit_sha
                 bound = gate_dec.bound_review
+                receipt_file = (
+                    Path(out.receipt.receipt_json_path) if out.receipt.receipt_json_path else None
+                )
+                receipt_on_disk_ok = (
+                    receipt_file is not None
+                    and receipt_file.is_file()
+                    and WorkerAutomationReceipt.model_validate_json(
+                        receipt_file.read_text(encoding="utf-8")
+                    )
+                    == out.receipt
+                )
+                expected_diff_path = str(
+                    Path(w_cfg.evidence_output_dir).resolve() / tid / "git.diff"
+                )
                 verified_pass = (
                     gate_dec.task_id == tid
                     and gate_dec.candidate_commit_sha == sha
@@ -1605,10 +1712,10 @@ def run_cli_worker_job(
                     and gate_ctx.task.attempt == expected_attempt
                     and gate_ctx.checkpoint.git_commit == sha
                     and _agent_result_matches_worker_output(gate_ctx.agent_result, out.agent_result)
-                    and (
-                        not job.get("require_live_worker_agent_result_match")
-                        or digest(gate_ctx.agent_result) == digest(out.agent_result)
-                    )
+                    and receipt_on_disk_ok
+                    and out.receipt.git_diff_path
+                    in (gate_ctx.agent_result.evidence.git_diff_path, expected_diff_path)
+                    and out.receipt.receipt_json_path in gate_ctx.agent_result.artifacts
                     and gate_ctx.evidence.git.head == sha
                     and gate_ctx.evidence.git.changes == tuple(out.agent_result.files_changed)
                     and tuple((c.command, c.exit_code) for c in gate_ctx.evidence.commands)

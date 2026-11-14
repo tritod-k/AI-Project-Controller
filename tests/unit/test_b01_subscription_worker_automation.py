@@ -22,6 +22,8 @@ from aipc.adapters.subscription_worker import (
     SubscriptionWorkerConfig,
     WorkerCommandReceipt,
     WorkerInvocationResponse,
+    _pid_exists,
+    _WindowsKillOnCloseJob,
     invoke_antigravity_cli_worker,
     run_cli_worker_job,
     select_preferred_worker_model,
@@ -827,7 +829,9 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
         return real_run(cmd, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_single_exec)
-    monkeypatch.setattr("aipc.adapters.subscription_worker._pid_exists", lambda _pid: True)
+    monkeypatch.setattr(
+        "aipc.adapters.subscription_worker._pid_exists", lambda _pid, _env=None: True
+    )
     if os.name == "nt":
         monkeypatch.setattr(subprocess, "run", failing_taskkill_run)
     else:
@@ -871,7 +875,9 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", orphan_root_exec)
     if os.name == "nt":
-        monkeypatch.setattr("aipc.adapters.subscription_worker._pid_exists", lambda _pid: False)
+        monkeypatch.setattr(
+            "aipc.adapters.subscription_worker._pid_exists", lambda _pid, _env=None: False
+        )
         monkeypatch.setattr(subprocess, "run", failing_taskkill_run)
         with pytest.raises(ControllerError):
             asyncio.run(
@@ -970,11 +976,38 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         *,
         summary_text: str = "Noop.",
         ev_subdir: str = ".aipc_test_evidence",
+        case_name: str = "valid",
+        git_diff_path_override: str | None = None,
+        artifacts_override: list[str] | None = None,
+        session_id_override: str | None = None,
+        receipt_json_path_override: str | None = None,
     ) -> tuple[SubscriptionReviewerGateDecision, ReviewContext]:
         now = datetime(2026, 1, 1, tzinfo=UTC)
         ev_root = tmp_path / ev_subdir
         ev_root.mkdir(parents=True, exist_ok=True)
         task_req = _task(wt, task_id="task-b01-1")
+        ev_dir = (tmp_path / case_name / "evidence").resolve() / "task-b01-1"
+        git_diff_path = git_diff_path_override or str(ev_dir / "git.diff")
+        test_log_path = str(ev_dir / "test_output.log")
+        receipt_json_path = receipt_json_path_override or str(ev_dir / "worker_receipt.json")
+        artifacts_val = (
+            artifacts_override if artifacts_override is not None else [receipt_json_path]
+        )
+        metadata_val: dict[str, object] = {
+            "operating_profile": "subscription_only",
+            "provider_id": "gemini-antigravity",
+            "auth_mode": "antigravity_subscription",
+            "model_requested": "gemini-3.8-flash-medium",
+            "model_used": "gemini-3.8-flash-medium",
+            "session_id": session_id_override or "sess-1",
+            "prompt_sha256": hashlib.sha256(task_req.prompt.encode("utf-8")).hexdigest(),
+            "base_commit_sha": sha,
+            "candidate_commit_sha": sha,
+            "receipt_json_path": receipt_json_path,
+            "noop_detected": False,
+            "forbidden_paths_violated": [],
+            "sanitized_child_env": True,
+        }
         project_def = ProjectDefinition(
             schema_version="1.0",
             project=ProjectIdentity(id="proj-b01", name="B01 Test", workspace=str(wt)),
@@ -1020,18 +1053,19 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             files_changed=[],
             commands=[CommandResult(command=val_cmd, exit_code=0)],
             tests=TestSummary(total=1, passed=1, failed=0, skipped=0),
-            artifacts=[],
+            artifacts=artifacts_val,
             warnings=[],
             errors=[],
             approval_requests=[],
             worker_claimed_complete=True,
             evidence=EvidenceReferences(
-                git_diff_path="git_diff.txt",
-                test_log_path="pytest.log",
-                terminal_log_path="terminal.log",
+                git_diff_path=git_diff_path,
+                test_log_path=test_log_path,
+                terminal_log_path=None,
                 screenshots=[],
             ),
             raw_output_ref=None,
+            metadata=metadata_val,
         )
         required_ids = (
             ("task", "task.json"),
@@ -1388,6 +1422,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         tmp_path / "mismatched_agent_result" / "gate.json",
         summary_text="Different summary",
         ev_subdir=".aipc_test_evidence_mismatch",
+        case_name="mismatched_agent_result",
     )
     q_mismatch, job_mismatch = _prepare_case(
         "mismatched_agent_result",
@@ -1401,6 +1436,136 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
             worker_invoker=noop_invoker,
         )
     assert q_mismatch.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+    sub_cases: list[tuple[str, dict[str, object]]] = [
+        (
+            "sub_git_diff_path",
+            {"git_diff_path_override": str(tmp_path / "other" / "git.diff")},
+        ),
+        (
+            "sub_artifacts",
+            {"artifacts_override": [str(tmp_path / "other" / "worker_receipt.json")]},
+        ),
+        (
+            "sub_session_id",
+            {"session_id_override": "sess-forged"},
+        ),
+        (
+            "sub_receipt_json_path",
+            {"receipt_json_path_override": str(tmp_path / "other" / "worker_receipt.json")},
+        ),
+    ]
+    for sub_name, kwargs in sub_cases:
+        sub_dec, sub_ctx = _build_gate_decision(
+            tmp_path / sub_name / "gate.json",
+            ev_subdir=f".aipc_test_evidence_{sub_name}",
+            case_name=sub_name,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        q_sub, job_sub = _prepare_case(sub_name, sub_dec.model_dump(mode="json"), sub_ctx)
+        with pytest.raises(ControllerError):
+            run_cli_worker_job(
+                job_sub,
+                qualification_report=_qualified_report(),
+                worker_invoker=noop_invoker,
+            )
+        assert q_sub.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+
+def test_b01_pid_exists_and_job_object_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify NEW_ENV1 sanitized _pid_exists and R3 fail-closed Job Object enforcement."""
+    import ctypes
+
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_tasklist(
+        cmd: object, *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "tasklist":
+            captured_envs.append(dict(kwargs.get("env") or {}))  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(cmd, 0, stdout='"python.exe","12345"', stderr="")
+        raise AssertionError(f"Unexpected command: {cmd!r}")
+
+    dirty_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "GEMINI_API_KEY": SYNTHETIC_API_KEY,
+        "OpenAI_Api_Key": SYNTHETIC_API_KEY,
+    }
+    monkeypatch.setattr(subprocess, "run", fake_tasklist)
+    if os.name == "nt":
+        assert _pid_exists(12345, dirty_env) is True
+        assert len(captured_envs) == 1
+        assert all(k.lower() != "gemini_api_key" for k in captured_envs[0])
+        assert all(k.lower() != "openai_api_key" for k in captured_envs[0])
+
+    monkeypatch.undo()
+    wt = tmp_path / "candidate_wt"
+    _init_git_repo(wt)
+    fake_agy = tmp_path / "agy.cmd"
+    fake_agy.write_text("@echo off\r\n", encoding="utf-8")
+    cfg = SubscriptionWorkerConfig(
+        candidate_worktree=str(wt),
+        evidence_output_dir=str(tmp_path / "evidence"),
+        in_scope_paths=["src/module.py"],
+    )
+    env = build_sanitized_child_env({"PATH": os.environ.get("PATH", "")})
+    monkeypatch.setattr("aipc.adapters.subscription_worker.find_agy_executable", lambda: fake_agy)
+    real_exec = asyncio.create_subprocess_exec
+    spawned: list[asyncio.subprocess.Process] = []
+
+    async def fast_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        payload_code = (
+            "import json; print(json.dumps("
+            "{'status':'SUCCESS','conversation_id':'c1','response':'ok'}))"
+        )
+        proc = await real_exec(
+            sys.executable,
+            "-c",
+            payload_code,
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdin=kwargs["stdin"],
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fast_exec)
+
+    def fail_assign(self: _WindowsKillOnCloseJob, pid: int | None) -> None:
+        raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
+
+    monkeypatch.setattr(_WindowsKillOnCloseJob, "assign", fail_assign)
+    with pytest.raises(ControllerError, match="Failed to assign PID"):
+        asyncio.run(
+            invoke_antigravity_cli_worker(
+                _task(wt, task_id="task-r3-assign-fail", timeout=10),
+                cfg,
+                env,
+                "gemini-3.8-flash-medium",
+            )
+        )
+    assert len(spawned) == 1
+    assert spawned[0].returncode is not None
+
+    monkeypatch.undo()
+    monkeypatch.setattr("aipc.adapters.subscription_worker.find_agy_executable", lambda: fake_agy)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fast_exec)
+    if os.name == "nt":
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        monkeypatch.setattr(k32, "TerminateJobObject", lambda _h, _code: 0)
+        with pytest.raises(ControllerError, match="TerminateJobObject failed"):
+            asyncio.run(
+                invoke_antigravity_cli_worker(
+                    _task(wt, task_id="task-r3-term-fail", timeout=10),
+                    cfg,
+                    env,
+                    "gemini-3.8-flash-medium",
+                )
+            )
 
 
 def test_b01_cli_worker_job_invalid_worker_config_leaves_task_eligible(tmp_path: Path) -> None:

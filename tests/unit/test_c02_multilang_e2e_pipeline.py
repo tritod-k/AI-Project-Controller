@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -1605,6 +1606,33 @@ def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
         "except PermissionError:\n"
         "    outside_unlink_blocked = True\n"
         "assert outside_unlink_blocked\n"
+        "import socket\n"
+        "assert os.remove.__defaults__ is None\n"
+        "assert os.remove.__kwdefaults__ is None\n"
+        "assert os.open.__defaults__ is None\n"
+        "assert os.open.__kwdefaults__ is None\n"
+        "assert socket.socket.connect.__defaults__ is None\n"
+        "for _fn in (os.remove, os.open, socket.socket.connect):\n"
+        "    _fn.__defaults__ = (lambda *a, **kw: None,)\n"
+        "    _fn.__kwdefaults__ = {'_bypass': True}\n"
+        "adv_open_blocked = False\n"
+        "try:\n"
+        f"    open({str(outside)!r}, 'w').write('x')\n"
+        "except PermissionError:\n"
+        "    adv_open_blocked = True\n"
+        "assert adv_open_blocked\n"
+        "adv_unlink_blocked = False\n"
+        "try:\n"
+        f"    os.unlink({str(outside)!r})\n"
+        "except PermissionError:\n"
+        "    adv_unlink_blocked = True\n"
+        "assert adv_unlink_blocked\n"
+        "adv_net_blocked = False\n"
+        "try:\n"
+        "    socket.create_connection(('127.0.0.1', 1))\n"
+        "except PermissionError:\n"
+        "    adv_net_blocked = True\n"
+        "assert adv_net_blocked\n"
         "print('1 passed')"
     )
     receipt = verifier.verify_project_candidate(
@@ -1732,12 +1760,13 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
 
     def wrong_origin_runner(argv, **kwargs):
         cmd_str = " ".join(str(tok) for tok in argv)
-        if "AIPC_ORIGIN:" in cmd_str:
+        m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        if m:
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=0,
                 stdout=(
-                    'AIPC_ORIGIN:{"file": '
+                    f'{m.group(0)}{{"file": '
                     '"/usr/local/lib/python3.12/site-packages/aipc/__init__.py", "path": []}\n'
                 ),
                 stderr="",
@@ -1757,14 +1786,88 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
     assert bad_receipt.import_origin_verified is False
     assert bad_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
 
-    def good_origin_runner(argv, **kwargs):
+    def absent_origin_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    absent_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=absent_origin_runner,
+    )
+    assert absent_receipt.passed is False
+    assert absent_receipt.import_origin_verified is False
+    assert absent_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+    def nonzero_probe_runner(argv, **kwargs):
         cmd_str = " ".join(str(tok) for tok in argv)
-        if "AIPC_ORIGIN:" in cmd_str:
+        m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        if m:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=1,
+                stdout=(
+                    f'{m.group(0)}{{"file": "/workspace/src/aipc/__init__.py", '
+                    '"path": ["/workspace/src"]}\n'
+                ),
+                stderr="probe error",
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    nonzero_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=nonzero_probe_runner,
+    )
+    assert nonzero_receipt.passed is False
+    assert nonzero_receipt.import_origin_verified is False
+    assert nonzero_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+    def traversal_origin_runner(argv, **kwargs):
+        cmd_str = " ".join(str(tok) for tok in argv)
+        m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        if m:
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=0,
                 stdout=(
-                    'AIPC_ORIGIN:{"file": "/workspace/src/aipc/__init__.py", '
+                    f'{m.group(0)}{{"file": '
+                    '"/workspace/src/aipc/../../other/aipc/__init__.py", '
+                    '"path": ["/workspace/src"]}\n'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    traversal_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=traversal_origin_runner,
+    )
+    assert traversal_receipt.passed is False
+    assert traversal_receipt.import_origin_verified is False
+    assert traversal_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+    def good_origin_runner(argv, **kwargs):
+        cmd_str = " ".join(str(tok) for tok in argv)
+        m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        if m:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=(
+                    f'{m.group(0)}{{"file": "/workspace/src/aipc/__init__.py", '
                     '"path": ["/workspace/src"]}\n'
                 ),
                 stderr="",

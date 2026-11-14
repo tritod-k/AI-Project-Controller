@@ -138,7 +138,12 @@ def test_container_and_subprocess_verification_use_sanitized_env_without_api_key
         cwd: Path,
     ) -> subprocess.CompletedProcess[str]:
         observed_calls.append((list(argv), dict(env), cwd))
-        return subprocess.CompletedProcess(argv, 0, stdout="1 passed in 0.05s", stderr="")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"aipc_import_origin": "/workspace/src/aipc/__init__.py"}\n1 passed in 0.05s',
+            stderr="",
+        )
 
     container_cfg = StableCandidateConfig(
         stable_root=str(stable_root),

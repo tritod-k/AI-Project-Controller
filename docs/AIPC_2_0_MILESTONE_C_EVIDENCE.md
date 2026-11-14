@@ -30,7 +30,7 @@
   - **Inner Role Exclusion**: `argon` is excluded from inner AIPC roles (`worker`, `planner`, `reviewer`).
   - **Registry Entrypoint**: `build_default_subscription_role_registry` in `src/aipc/agents/role_registry.py` (used by `RoleBasedModelRegistry`).
 - **Verification**:
-  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: **`31 passed`** (0 failures).
+  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: **`32 passed`** (0 failures).
 
 ---
 
@@ -58,7 +58,7 @@
 ### Workstream C03 — Trusted Acceptance Harness & Self-Development Dogfooding (`eae7689`, `c8b532f`)
 - **Commits**: `eae7689`, `c8b532f`
 - **Implementation**: `src/aipc/review/trusted_acceptance_harness.py`
-- **Tests**: `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (**`60 passed`**)
+- **Tests**: `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (**`63 passed`**)
 - **Capabilities Verified**:
   - Enforces Milestone C scope boundary via `assert_milestone_c_scope_authorized` (`UNAUTHORIZED_MILESTONE_D_BLOCKED` for any `milestone-d`, `d01`, `d02`, or `d03` target).
   - Enforces protected harness tamper detection (`TRUSTED_HARNESS_TAMPER_DETECTED` across `tests/acceptance/**`, `tests/trusted/**`, `src/aipc/review/gate.py`, `src/aipc/review/trusted_acceptance_harness.py`, `src/aipc/controller/task_queue.py`, and `src/aipc/approvals/**`), including full pre/post workspace SHA-256 snapshot and `git status`/`git diff` verification (**R6**).
@@ -67,7 +67,7 @@
 
 ### Worker Queue & Recovery Hardening (`31464ab`)
 - **Implementation**: `src/aipc/adapters/subscription_worker.py`
-- **Tests**: `tests/unit/test_b01_subscription_worker_automation.py` (**`11 passed`**)
+- **Tests**: `tests/unit/test_b01_subscription_worker_automation.py` (**`12 passed`**)
 - **Capabilities Verified**:
   - Prevents worker self-approval in `run_cli_worker_job` (**R1**) by requiring a verified `SubscriptionReviewerGateDecision` bound across outer fields, `review_result`, `bound_review.provenance`, `phase_gate_decision`, and `session_audit` before recording `PASS`.
   - Enforces `RecoveryDecision.safe_to_automate` and clean worktree preconditions before resuming `INTERRUPTED` or `WAITING_PROVIDER` tasks (**R2**).
@@ -78,7 +78,7 @@
 ## Part 4: Full CI Regression, Linter & Schema Verification Summary
 
 - **Full CI Regression Suite**:
-  - **`1205 passed`** across `unit`, `contract`, `gemini`, `CLI`, `routing`, `consensus`, `observability`, `dashboard`, `MCP`, `hardening`, `controller`, `review`, `plugins`, and `E2E` suites (`131 passed` in Milestone B/C focused suite).
+  - **`1209 passed`** across `unit`, `contract`, `gemini`, `CLI`, `routing`, `consensus`, `observability`, `dashboard`, `MCP`, `hardening`, `controller`, `review`, `plugins`, and `E2E` suites (`135 passed` in Milestone B/C focused suite).
 - **Ruff Linter & Formatter**:
   - `ruff check src tests tools`: clean (`0 errors`).
   - `ruff format --check src tests tools`: clean (`319 files already formatted`).

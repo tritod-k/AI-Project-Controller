@@ -64,6 +64,7 @@ from aipc.review.trusted_acceptance_harness import (
     REWARD_HACKING_DETECTED,
     TRUSTED_HARNESS_TAMPER_DETECTED,
     UNAUTHORIZED_MILESTONE_D_BLOCKED,
+    CriterionExecutionReceipt,
     DogfoodingAuditBundle,
     RewardHackingFinding,
     SelfDevelopmentDogfoodingCoordinator,
@@ -1105,6 +1106,25 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
     assert eval_weak_ev.rejection_code == REWARD_HACKING_DETECTED
     assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in eval_weak_ev.findings)
 
+    assert manifest.manifest_digest is not None
+    exec_receipts = (
+        CriterionExecutionReceipt(
+            criterion_id="AC-01",
+            candidate_sha=_CANDIDATE_SHA,
+            manifest_digest=manifest.manifest_digest,
+            test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+            passed=True,
+            exit_code=0,
+        ),
+        CriterionExecutionReceipt(
+            criterion_id="AC-02",
+            candidate_sha=_CANDIDATE_SHA,
+            manifest_digest=manifest.manifest_digest,
+            test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+            passed=True,
+            exit_code=0,
+        ),
+    )
     eval_valid = validator.evaluate_candidate(
         manifest=manifest,
         workspace=candidate_root,
@@ -1129,6 +1149,7 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
             ),
         ),
         verification_receipt=receipt,
+        criterion_execution_receipts=exec_receipts,
     )
     assert eval_valid.passed is True
     assert eval_valid.findings == ()
@@ -2111,7 +2132,13 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
     validator = TrustedAcceptanceHarnessValidator()
     receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
 
-    for bad_ev in (f"pytest:{_CANDIDATE_SHA}:AC-01", "pytest_log"):
+    assert manifest.manifest_digest is not None
+    for unbacked_ev in (
+        f"pytest:{_CANDIDATE_SHA}:AC-01",
+        "pytest_log",
+        f"receipt:{_CANDIDATE_SHA}:AC-01:{manifest.manifest_digest}",
+        "tests/unit/test_feature.py",
+    ):
         bad_eval = validator.evaluate_candidate(
             manifest=manifest,
             workspace=candidate_root,
@@ -2125,8 +2152,8 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
                 CriterionResult(
                     criterion_id="AC-01",
                     status=CriterionStatus.PASS,
-                    evidence=[bad_ev],
-                    notes="unverified evidence string",
+                    evidence=[unbacked_ev],
+                    notes="unverified evidence string without execution receipt",
                 ),
             ),
             verification_receipt=receipt,
@@ -2135,9 +2162,18 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
         assert bad_eval.rejection_code == REWARD_HACKING_DETECTED
         assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in bad_eval.findings)
 
+    exec_receipt = CriterionExecutionReceipt(
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        manifest_digest=manifest.manifest_digest,
+        test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+        passed=True,
+        exit_code=0,
+    )
     for good_ev in (
         f"receipt:{_CANDIDATE_SHA}:AC-01:{manifest.manifest_digest}",
         "tests/unit/test_feature.py",
+        "tests/unit/test_feature.py::test_feature_behavior",
     ):
         good_eval = validator.evaluate_candidate(
             manifest=manifest,
@@ -2157,7 +2193,152 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
                 ),
             ),
             verification_receipt=receipt,
+            criterion_execution_receipts=(exec_receipt,),
         )
         assert good_eval.passed is True
         assert good_eval.findings == ()
         assert good_eval.rejection_code is None
+
+
+def test_empty_test_file_without_test_functions_rejected(tmp_path: Path) -> None:
+    _, candidate_root, manifest = _setup_candidate_workspace(tmp_path)
+    empty_test = candidate_root / "tests" / "unit" / "test_empty.py"
+    empty_test.write_text("# empty test file\n", encoding="utf-8")
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-empty-test",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(FileChange(path="tests/unit/test_empty.py", change_type=ChangeType.ADDED),),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        verification_receipt=receipt,
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "VACUOUS_TEST_WITHOUT_ASSERT" for f in evaluation.findings)
+
+
+def test_generic_review_context_artifact_rejected_for_required_criterion(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-generic-art",
+        required_criterion_ids=("AC-01",),
+    )
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    review_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-generic-art",
+        candidate_sha=_CANDIDATE_SHA,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-generic-art",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=["terminal_log.txt"],
+                notes="generic ok log without AC-01 or candidate_sha",
+            ),
+        ),
+        verification_receipt=receipt,
+        review_context=review_ctx,
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+def test_manifest_with_omitted_external_path_rejected(tmp_path: Path) -> None:
+    _, candidate_root, base_manifest = _setup_candidate_workspace(tmp_path)
+    no_path_manifest = base_manifest.model_copy(update={"trusted_manifest_path": None})
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+
+    evaluation = validator.evaluate_candidate(
+        manifest=no_path_manifest,
+        workspace=candidate_root,
+        task_id="task-c03-no-manifest-path",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        verification_receipt=receipt,
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.harness_intact is False
+    assert evaluation.rejection_code == TRUSTED_HARNESS_TAMPER_DETECTED
+
+
+def test_failed_criterion_receipt_rejected_despite_passing_aggregate_summary(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-failed-rec",
+        required_criterion_ids=("AC-01",),
+    )
+    assert manifest.manifest_digest is not None
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+    failed_exec = CriterionExecutionReceipt(
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        manifest_digest=manifest.manifest_digest,
+        test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+        passed=False,
+        exit_code=1,
+    )
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-failed-rec",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=10, passed=10, failed=0, skipped=0),
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=["tests/unit/test_feature.py::test_feature_behavior"],
+                notes="claimed pass despite failed criterion execution receipt",
+            ),
+        ),
+        verification_receipt=receipt,
+        criterion_execution_receipts=(failed_exec,),
+    )
+
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)

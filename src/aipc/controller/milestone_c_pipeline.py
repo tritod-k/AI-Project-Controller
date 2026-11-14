@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from uuid import uuid4
 
@@ -212,6 +212,8 @@ def _write_isolated_python_guard(
         "            raise PermissionError(",
         "                'NETWORK_ISOLATION_BLOCKED: external network disabled'",
         "            )",
+        "        _blocked_network.__defaults__ = None",
+        "        _blocked_network.__kwdefaults__ = None",
         "        socket.socket.connect = _blocked_network",
         "        socket.socket.connect_ex = _blocked_network",
         "        socket.socket.sendto = _blocked_network",
@@ -221,75 +223,37 @@ def _write_isolated_python_guard(
         "        socket.getaddrinfo = _blocked_network",
         "        socket.gethostbyname = _blocked_network",
         "",
-        "    def _is_allowed_write_path(",
-        "        target: Path,",
-        "        _ws=_WS_ROOT,",
-        "        _tmp=_TMP_ROOT,",
-        "        _self_file=_SELF_FILE,",
-        "        _boot=_BOOT_DIR_PATH,",
-        "    ) -> bool:",
-        "        if target == _self_file or (",
-        "            target.is_relative_to(_boot) and not target.is_relative_to(_tmp)",
-        "        ):",
-        "            return False",
-        "        if str(target).lower() in (os.devnull.lower(), r'\\\\.\\nul', '/dev/null'):",
-        "            return True",
-        "        return target.is_relative_to(_ws) or target.is_relative_to(_tmp)",
-        "",
-        "    def _check_write_target(p, _chk_allowed=_is_allowed_write_path) -> None:",
-        "        if isinstance(p, int):",
-        "            raise PermissionError(",
-        "                'WORKSPACE_WRITE_ISOLATION_BLOCKED: raw file descriptor path prohibited'",
-        "            )",
-        "        if not isinstance(p, (str, bytes, os.PathLike)):",
-        "            raise PermissionError(",
-        "                'WORKSPACE_WRITE_ISOLATION_BLOCKED: unsupported path type'",
-        "            )",
-        "        raw_path = Path(os.fsdecode(p))",
-        "        abs_path = raw_path if raw_path.is_absolute() else (Path.cwd() / raw_path)",
-        "        for comp in (abs_path, *abs_path.parents):",
-        "            try:",
-        "                st = comp.lstat()",
-        "            except OSError:",
-        "                continue",
-        "            is_link = stat.S_ISLNK(st.st_mode) or bool(",
-        "                getattr(st, 'st_file_attributes', 0)",
-        "                & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)",
-        "            )",
-        "            if is_link and not _chk_allowed(comp.resolve()):",
-        "                raise PermissionError(",
-        "                    f'WORKSPACE_WRITE_ISOLATION_BLOCKED: symlink escape {comp}'",
-        "                )",
-        "        target = raw_path.resolve()",
-        "        if not _chk_allowed(target):",
-        "            raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {target}')",
-        "",
         "    _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND",
         "",
-        "    def _guarded_os_open(path, flags, *args, _c_open=os.open, **kwargs):",
+        "    def _guarded_os_open(path, flags, *args, **kwargs):",
         "        if kwargs.get('dir_fd') is not None:",
         "            raise PermissionError(",
         "                'WORKSPACE_WRITE_ISOLATION_BLOCKED: dir_fd prohibited'",
         "            )",
-        "        return _c_open(path, flags, *args, **kwargs)",
+        "        import sys as _sys",
+        "        _native = __import__('nt' if _sys.platform == 'win32' else 'posix')",
+        "        return _native.open(path, flags, *args, **kwargs)",
+        "    _guarded_os_open.__defaults__ = None",
+        "    _guarded_os_open.__kwdefaults__ = None",
         "",
         "    os.open = _guarded_os_open",
         "",
-        "    def _wrap_single_path_mutator(fn, _chk=_check_write_target):",
-        "        def _wrapped(path, *args, _fn=fn, _c=_chk, **kwargs):",
+        "    def _wrap_single_path_mutator(fn):",
+        "        def _wrapped(path, *args, **kwargs):",
         "            if kwargs.get('dir_fd') is not None:",
         "                raise PermissionError(",
         "                    'WORKSPACE_WRITE_ISOLATION_BLOCKED: dir_fd prohibited'",
         "                )",
-        "            _c(path)",
-        "            return _fn(path, *args, **kwargs)",
+        "            return fn(path, *args, **kwargs)",
+        "        _wrapped.__defaults__ = None",
+        "        _wrapped.__kwdefaults__ = None",
         "        return _wrapped",
         "",
         "    for _fn_name in ('remove', 'unlink', 'mkdir', 'rmdir', 'chmod', 'truncate'):",
         "        setattr(os, _fn_name, _wrap_single_path_mutator(getattr(os, _fn_name)))",
         "",
-        "    def _wrap_two_path_mutator(fn, _chk=_check_write_target):",
-        "        def _wrapped(src, dst, *args, _fn=fn, _c=_chk, **kwargs):",
+        "    def _wrap_two_path_mutator(fn):",
+        "        def _wrapped(src, dst, *args, **kwargs):",
         "            if (",
         "                kwargs.get('src_dir_fd') is not None",
         "                or kwargs.get('dst_dir_fd') is not None",
@@ -297,43 +261,21 @@ def _write_isolated_python_guard(
         "                raise PermissionError(",
         "                    'WORKSPACE_WRITE_ISOLATION_BLOCKED: dir_fd prohibited'",
         "                )",
-        "            _c(src)",
-        "            _c(dst)",
-        "            return _fn(src, dst, *args, **kwargs)",
+        "            return fn(src, dst, *args, **kwargs)",
+        "        _wrapped.__defaults__ = None",
+        "        _wrapped.__kwdefaults__ = None",
         "        return _wrapped",
         "",
         "    for _fn_name in ('rename', 'replace', 'link', 'symlink'):",
         "        setattr(os, _fn_name, _wrap_two_path_mutator(getattr(os, _fn_name)))",
-        "",
-        "    def _guarded_rmtree(",
-        "        path, *args, _fn=shutil.rmtree, _c=_check_write_target, **kwargs",
-        "    ):",
-        "        _c(path)",
-        "        return _fn(path, *args, **kwargs)",
-        "    shutil.rmtree = _guarded_rmtree",
-        "",
-        "    def _guarded_move(",
-        "        src, dst, *args, _fn=shutil.move, _c=_check_write_target, **kwargs",
-        "    ):",
-        "        _c(src)",
-        "        _c(dst)",
-        "        return _fn(src, dst, *args, **kwargs)",
-        "    shutil.move = _guarded_move",
-        "",
-        "    def _wrap_shutil_dst(fn, _chk=_check_write_target):",
-        "        def _wrapped(src, dst, *args, _fn=fn, _c=_chk, **kwargs):",
-        "            _c(dst)",
-        "            return _fn(src, dst, *args, **kwargs)",
-        "        return _wrapped",
-        "",
-        "    for _sh_name in ('copy', 'copy2', 'copyfile', 'copytree'):",
-        "        setattr(shutil, _sh_name, _wrap_shutil_dst(getattr(shutil, _sh_name)))",
         "",
         "    def _blocked_proc(*args, **kwargs):",
         "        raise PermissionError(",
         "            'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: '",
         "            'direct process execution prohibited'",
         "        )",
+        "    _blocked_proc.__defaults__ = None",
+        "    _blocked_proc.__kwdefaults__ = None",
         "",
         "    for _name in dir(os):",
         "        if _name == 'system' or _name.startswith(('spawn', 'exec', 'popen')):",
@@ -353,42 +295,6 @@ def _write_isolated_python_guard(
         "            _loaded_mod.fork_exec = _blocked_proc",
         "    sys.meta_path.insert(0, _BlockDisallowedImports())",
         "",
-        "    def _is_python_exe(exe_val) -> bool:",
-        "        return Path(os.fsdecode(exe_val)).name.lower().removesuffix('.exe').startswith(",
-        "            'python'",
-        "        )",
-        "",
-        "    def _check_popen_allowed(exe_target, cmd_arg):",
-        "        if isinstance(cmd_arg, (str, bytes, os.PathLike)):",
-        "            argv = [os.fsdecode(cmd_arg)]",
-        "        elif cmd_arg is not None:",
-        "            argv = [os.fsdecode(tok) for tok in cmd_arg]",
-        "        else:",
-        "            argv = []",
-        "        eff_exe = exe_target if exe_target is not None else (argv[0] if argv else None)",
-        "        if not argv or not eff_exe:",
-        "            raise PermissionError(",
-        "                'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: '",
-        "                'non-Python or unguarded child process prohibited'",
-        "            )",
-        "        blocked = not _is_python_exe(eff_exe)",
-        "        if not blocked and exe_target is not None and not _is_python_exe(argv[0]):",
-        "            blocked = True",
-        "        if not blocked:",
-        "            for tok in argv[1:]:",
-        "                if tok == '--isolated' or (",
-        "                    tok.startswith('-')",
-        "                    and not tok.startswith('--')",
-        "                    and any(ch in tok[1:] for ch in ('S', 'I', 'E'))",
-        "                ):",
-        "                    blocked = True",
-        "                    break",
-        "        if blocked:",
-        "            raise PermissionError(",
-        "                'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: '",
-        "                'non-Python or unguarded child process prohibited'",
-        "            )",
-        "",
         "    _orig_popen_init = subprocess.Popen.__init__",
         "",
         "    def _guarded_popen_init(self, *p_args, **kwargs):",
@@ -396,8 +302,6 @@ def _write_isolated_python_guard(
         "            raise PermissionError(",
         "                'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: shell=True prohibited'",
         "            )",
-        "        cmd_arg = p_args[0] if p_args else kwargs.get('args')",
-        "        _check_popen_allowed(kwargs.get('executable'), cmd_arg)",
         "        raw_env = kwargs.get('env')",
         "        if isinstance(raw_env, Mapping):",
         "            env_copy = dict(raw_env)",
@@ -413,21 +317,13 @@ def _write_isolated_python_guard(
         "        env_copy['PYTHONNOUSERSITE'] = '1'",
         "        kwargs['env'] = env_copy",
         "        return _orig_popen_init(self, *p_args, **kwargs)",
+        "    _guarded_popen_init.__defaults__ = None",
+        "    _guarded_popen_init.__kwdefaults__ = None",
         "",
         "    subprocess.Popen.__init__ = _guarded_popen_init",
         "",
-        "    def _audit_hook(",
-        "        event,",
-        "        args,",
-        "        _ws=_WS_ROOT,",
-        "        _tmp=_TMP_ROOT,",
-        "        _self_file=_SELF_FILE,",
-        "        _allow_net=_ALLOW_NETWORK,",
-        "        _wflags=_WRITE_FLAGS,",
-        "        _chk=_check_write_target,",
-        "        _chk_popen=_check_popen_allowed,",
-        "    ):",
-        "        if not _allow_net and event in (",
+        "    def _audit_hook(event, args):",
+        "        if not _ALLOW_NETWORK and event in (",
         "            'socket.connect', 'socket.bind', 'socket.sendto',",
         "            'socket.sendmsg', 'socket.getaddrinfo', 'socket.gethostbyname',",
         "        ):",
@@ -440,6 +336,44 @@ def _write_isolated_python_guard(
         "            )",
         "        if event in ('ctypes.dlopen', 'ctypes.dlsym'):",
         "            raise PermissionError(f'CTYPES_SANDBOX_BLOCKED: {event} prohibited')",
+        "        if event == 'subprocess.Popen' and len(args) >= 2:",
+        "            _exe_target, _cmd_arg = args[0], args[1]",
+        "            if isinstance(_cmd_arg, (str, bytes, os.PathLike)):",
+        "                _argv = [os.fsdecode(_cmd_arg)]",
+        "            elif _cmd_arg is not None:",
+        "                _argv = [os.fsdecode(_tok) for _tok in _cmd_arg]",
+        "            else:",
+        "                _argv = []",
+        "            _eff_exe = _exe_target if _exe_target is not None else (",
+        "                _argv[0] if _argv else None",
+        "            )",
+        "            if not _argv or not _eff_exe:",
+        "                raise PermissionError(",
+        "                    'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: '",
+        "                    'non-Python or unguarded child process prohibited'",
+        "                )",
+        "            _eff_name = Path(os.fsdecode(_eff_exe)).name.lower().removesuffix('.exe')",
+        "            _blocked = not _eff_name.startswith('python')",
+        "            if not _blocked and _exe_target is not None:",
+        "                _a0 = Path(os.fsdecode(_argv[0])).name.lower().removesuffix('.exe')",
+        "                if not _a0.startswith('python'):",
+        "                    _blocked = True",
+        "            if not _blocked:",
+        "                for _tok in _argv[1:]:",
+        "                    if _tok == '--isolated' or (",
+        "                        _tok.startswith('-')",
+        "                        and not _tok.startswith('--')",
+        "                        and any(_ch in _tok[1:] for _ch in ('S', 'I', 'E'))",
+        "                    ):",
+        "                        _blocked = True",
+        "                        break",
+        "            if _blocked:",
+        "                raise PermissionError(",
+        "                    'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: '",
+        "                    'non-Python or unguarded child process prohibited'",
+        "                )",
+        "            return",
+        "        _paths_to_check = ()",
         "        if event == 'open' and len(args) >= 2:",
         "            mode_arg = args[1]",
         "            flags_arg = args[2] if len(args) >= 3 else 0",
@@ -448,8 +382,8 @@ def _write_isolated_python_guard(
         "                    isinstance(mode_arg, str)",
         "                    and any(c in mode_arg for c in ('w', 'a', 'x', '+'))",
         "                )",
-        "                or (isinstance(mode_arg, int) and bool(mode_arg & _wflags))",
-        "                or (isinstance(flags_arg, int) and bool(flags_arg & _wflags))",
+        "                or (isinstance(mode_arg, int) and bool(mode_arg & _WRITE_FLAGS))",
+        "                or (isinstance(flags_arg, int) and bool(flags_arg & _WRITE_FLAGS))",
         "            )",
         "            if isinstance(args[0], int):",
         "                if is_write and args[0] > 2:",
@@ -459,24 +393,81 @@ def _write_isolated_python_guard(
         "                    )",
         "                return",
         "            if is_write:",
-        "                _chk(args[0])",
+        "                _paths_to_check = (args[0],)",
         "        elif event in (",
         "            'os.remove', 'os.unlink', 'os.mkdir', 'os.rmdir',",
         "            'os.chmod', 'os.truncate', 'os.chown', 'os.utime', 'shutil.rmtree',",
         "        ):",
         "            if args:",
-        "                _chk(args[0])",
+        "                _paths_to_check = (args[0],)",
         "        elif event in (",
         "            'os.rename', 'os.replace', 'os.link', 'os.symlink',",
         "            'shutil.copyfile', 'shutil.move',",
         "        ):",
         "            if len(args) >= 2:",
-        "                _chk(args[0])",
-        "                _chk(args[1])",
-        "        elif event == 'subprocess.Popen' and len(args) >= 2:",
-        "            _chk_popen(args[0], args[1])",
+        "                _paths_to_check = (args[0], args[1])",
+        "        _nulls = (os.devnull.lower(), r'\\\\.\\nul', '/dev/null')",
+        "        for _p in _paths_to_check:",
+        "            if isinstance(_p, int):",
+        "                raise PermissionError(",
+        "                    'WORKSPACE_WRITE_ISOLATION_BLOCKED: '",
+        "                    'raw file descriptor path prohibited'",
+        "                )",
+        "            if not isinstance(_p, (str, bytes, os.PathLike)):",
+        "                raise PermissionError(",
+        "                    'WORKSPACE_WRITE_ISOLATION_BLOCKED: unsupported path type'",
+        "                )",
+        "            _raw_path = Path(os.fsdecode(_p))",
+        "            _abs_path = (",
+        "                _raw_path if _raw_path.is_absolute() else (Path.cwd() / _raw_path)",
+        "            )",
+        "            for _comp in (_abs_path, *_abs_path.parents):",
+        "                try:",
+        "                    _st = _comp.lstat()",
+        "                except OSError:",
+        "                    continue",
+        "                _is_link = stat.S_ISLNK(_st.st_mode) or bool(",
+        "                    getattr(_st, 'st_file_attributes', 0)",
+        "                    & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)",
+        "                )",
+        "                if _is_link:",
+        "                    _rc = _comp.resolve()",
+        "                    _rc_ok = (",
+        "                        _rc != _SELF_FILE",
+        "                        and not (",
+        "                            _rc.is_relative_to(_BOOT_DIR_PATH)",
+        "                            and not _rc.is_relative_to(_TMP_ROOT)",
+        "                        )",
+        "                        and (",
+        "                            str(_rc).lower() in _nulls",
+        "                            or _rc.is_relative_to(_WS_ROOT)",
+        "                            or _rc.is_relative_to(_TMP_ROOT)",
+        "                        )",
+        "                    )",
+        "                    if not _rc_ok:",
+        "                        raise PermissionError(",
+        "                            f'WORKSPACE_WRITE_ISOLATION_BLOCKED: symlink escape {_comp}'",
+        "                        )",
+        "            _target = _raw_path.resolve()",
+        "            _target_ok = (",
+        "                _target != _SELF_FILE",
+        "                and not (",
+        "                    _target.is_relative_to(_BOOT_DIR_PATH)",
+        "                    and not _target.is_relative_to(_TMP_ROOT)",
+        "                )",
+        "                and (",
+        "                    str(_target).lower() in _nulls",
+        "                    or _target.is_relative_to(_WS_ROOT)",
+        "                    or _target.is_relative_to(_TMP_ROOT)",
+        "                )",
+        "            )",
+        "            if not _target_ok:",
+        "                raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {_target}')",
         "",
+        "    _audit_hook.__defaults__ = None",
+        "    _audit_hook.__kwdefaults__ = None",
         "    sys.addaudithook(_audit_hook)",
+        "    del _audit_hook",
         "",
         "    _STABLE = Path(_STABLE_STR).resolve() if _STABLE_STR else None",
         "    _STABLE_VENV = (_STABLE / '.venv').resolve() if _STABLE is not None else None",
@@ -864,12 +855,14 @@ class MultiLanguageIsolatedVerifier:
                     )
                 )
                 if needs_origin_check:
+                    probe_nonce = uuid4().hex
+                    origin_prefix = f"AIPC_ORIGIN_{probe_nonce}:"
                     probe_cmd = (
                         "python3",
                         "-c",
                         (
                             "import json, sys, aipc; from pathlib import Path; "
-                            "print('AIPC_ORIGIN:' + json.dumps({"
+                            f"print({origin_prefix!r} + json.dumps({{"
                             "'file': str(Path(aipc.__file__).resolve()), "
                             "'path': list(sys.path)}))"
                         ),
@@ -878,52 +871,44 @@ class MultiLanguageIsolatedVerifier:
                     probe_combined = "\n".join(
                         p for p in (probe_proc.stdout, probe_proc.stderr) if p
                     )
-                    origin_payload: dict[str, object] | None = None
-                    for line in (probe_proc.stdout or "").splitlines():
-                        if line.startswith("AIPC_ORIGIN:"):
-                            try:
-                                origin_payload = json.loads(line[len("AIPC_ORIGIN:") :])
-                            except json.JSONDecodeError:
-                                origin_payload = None
-                            break
-                    if origin_payload is not None:
-                        actual_file = str(origin_payload.get("file", ""))
-                        actual_posix = actual_file.replace("\\", "/")
-                        valid_origin = (
-                            actual_posix == "/workspace/src/aipc/__init__.py"
-                            or actual_posix.startswith("/workspace/src/aipc/")
-                        )
-                        if not valid_origin:
-                            return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
-                        import_origin_verified = True
-                        import_origin_report = CandidateImportOriginReport(
-                            verified=True,
-                            expected_candidate_src=str((workspace_path / "src").resolve()),
-                            actual_imported_file=actual_file,
-                            leaked_stable_paths=(),
-                            status_code="OK",
-                        )
-                    elif runner is None:
-                        return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
-                    elif (
+                    if (
                         probe_proc.returncode != 0
                         or "IMPORT_ORIGIN_MISMATCH" in probe_combined
                         or "AIPC_ORIGIN_MISMATCH" in probe_combined
                     ):
                         return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
-                    elif (workspace_path / "src" / "aipc" / "__init__.py").is_file():
-                        import_origin_verified = True
-                        import_origin_report = CandidateImportOriginReport(
-                            verified=True,
-                            expected_candidate_src=str((workspace_path / "src").resolve()),
-                            actual_imported_file=str(
-                                (workspace_path / "src" / "aipc" / "__init__.py").resolve()
-                            ),
-                            leaked_stable_paths=(),
-                            status_code="OK",
-                        )
-                    else:
+                    origin_payload: dict[str, object] | None = None
+                    for line in reversed((probe_proc.stdout or "").splitlines()):
+                        if line.startswith(origin_prefix):
+                            try:
+                                parsed_origin = json.loads(line[len(origin_prefix) :])
+                                if isinstance(parsed_origin, dict):
+                                    origin_payload = parsed_origin
+                            except json.JSONDecodeError:
+                                origin_payload = None
+                            break
+                    if origin_payload is None:
                         return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+                    actual_file = str(origin_payload.get("file", ""))
+                    actual_posix_str = actual_file.replace("\\", "/")
+                    if not actual_posix_str or ".." in PurePosixPath(actual_posix_str).parts:
+                        return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+                    actual_posix = PurePosixPath(actual_posix_str)
+                    expected_pkg = PurePosixPath("/workspace/src/aipc")
+                    valid_origin = (
+                        actual_posix == expected_pkg / "__init__.py"
+                        or actual_posix.is_relative_to(expected_pkg)
+                    )
+                    if not valid_origin:
+                        return _fail_receipt("IMPORT_ORIGIN_MISMATCH")
+                    import_origin_verified = True
+                    import_origin_report = CandidateImportOriginReport(
+                        verified=True,
+                        expected_candidate_src=str((workspace_path / "src").resolve()),
+                        actual_imported_file=actual_file,
+                        leaked_stable_paths=(),
+                        status_code="OK",
+                    )
         else:
             with tempfile.TemporaryDirectory(prefix="aipc-c02-boot-") as tmp_boot:
                 _write_isolated_python_guard(

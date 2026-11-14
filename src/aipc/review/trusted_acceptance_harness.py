@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, StrictBool, model_validator
+from pydantic import Field, StrictBool, StrictInt, model_validator
 
 from aipc.controller.milestone_b_orchestrator import HandoffNextAuthorizedAction
 from aipc.controller.self_dev_runner import (
@@ -221,6 +221,7 @@ def build_trusted_harness_manifest(
     require_behavioral_assertions: bool = True,
     forbid_test_deletion: bool = True,
     trusted_manifest_file: Path | None = None,
+    trusted_manifest_dir: Path | None = None,
 ) -> TrustedHarnessManifest:
     """Build a TrustedHarnessManifest with SHA-256 digests of protected files in workspace."""
     assert_milestone_c_scope_authorized(milestone_id)
@@ -235,18 +236,32 @@ def build_trusted_harness_manifest(
             raise FileNotFoundError(f"Protected file not found in workspace: {norm_rel}")
         pinned[norm_rel] = hashlib.sha256(target.read_bytes()).hexdigest()
 
-    trusted_path_str: str | None = None
+    pre_snap = _snapshot_workspace_files(workspace_root)
+    resolved_manifest_id = manifest_id or f"manifest-{uuid4().hex[:12]}"
     if trusted_manifest_file is not None:
         resolved_manifest = Path(trusted_manifest_file).resolve()
-        if resolved_manifest.is_relative_to(workspace_root):
+        if resolved_manifest == workspace_root or resolved_manifest.is_relative_to(workspace_root):
             raise ValueError(
                 f"{TRUSTED_HARNESS_TAMPER_DETECTED}: trusted_manifest_file "
                 "must not reside inside candidate workspace"
             )
         trusted_path_str = str(resolved_manifest)
+    else:
+        manifest_dir = (
+            Path(trusted_manifest_dir).resolve()
+            if trusted_manifest_dir is not None
+            else (
+                workspace_root.parent / f".aipc_trusted_manifests_{workspace_root.name}"
+            ).resolve()
+        )
+        resolved_manifest = (manifest_dir / f"{resolved_manifest_id}.json").resolve()
+        if resolved_manifest == workspace_root or resolved_manifest.is_relative_to(workspace_root):
+            raise ValueError(
+                f"{TRUSTED_HARNESS_TAMPER_DETECTED}: trusted_manifest_dir "
+                "must not reside inside candidate workspace"
+            )
+        trusted_path_str = str(resolved_manifest)
 
-    pre_snap = _snapshot_workspace_files(workspace_root)
-    resolved_manifest_id = manifest_id or f"manifest-{uuid4().hex[:12]}"
     manifest_digest_val = _compute_manifest_digest(
         resolved_manifest_id,
         project_id,
@@ -272,10 +287,9 @@ def build_trusted_harness_manifest(
         require_behavioral_assertions=require_behavioral_assertions,
         forbid_test_deletion=forbid_test_deletion,
     )
-    if trusted_manifest_file is not None and trusted_path_str is not None:
-        out_path = Path(trusted_path_str)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    out_path = Path(trusted_path_str)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
     return manifest
 
 
@@ -286,6 +300,17 @@ def _verify_manifest_integrity(
 ) -> list[RewardHackingFinding]:
     """Verify manifest policy digest and trusted manifest storage boundary."""
     findings: list[RewardHackingFinding] = []
+    if manifest.manifest_authority not in ("trusted_operator", "stable_controller"):
+        findings.append(
+            RewardHackingFinding(
+                rule_id="MANIFEST_AUTHORITY_INVALID",
+                file_path="manifest",
+                description=(
+                    f"{TRUSTED_HARNESS_TAMPER_DETECTED}: invalid manifest_authority "
+                    f"'{manifest.manifest_authority}'"
+                ),
+            )
+        )
     expected_digest = _compute_manifest_digest(
         manifest.manifest_id,
         manifest.project_id,
@@ -314,9 +339,22 @@ def _verify_manifest_integrity(
         if trusted_manifest_file is not None
         else manifest.trusted_manifest_path
     )
-    if manifest_path_str is not None:
+    if manifest_path_str is None or not manifest_path_str.strip():
+        findings.append(
+            RewardHackingFinding(
+                rule_id="TRUSTED_MANIFEST_PATH_MISSING",
+                file_path="manifest",
+                description=(
+                    f"{TRUSTED_HARNESS_TAMPER_DETECTED}: trusted_manifest_path is "
+                    "required and must reside outside candidate worktree"
+                ),
+            )
+        )
+    else:
         resolved_manifest_path = Path(manifest_path_str).resolve()
-        if resolved_manifest_path.is_relative_to(workspace_root):
+        if resolved_manifest_path == workspace_root or resolved_manifest_path.is_relative_to(
+            workspace_root
+        ):
             findings.append(
                 RewardHackingFinding(
                     rule_id="MANIFEST_INSIDE_CANDIDATE_WORKTREE",
@@ -340,9 +378,9 @@ def _verify_manifest_integrity(
             )
         else:
             try:
-                disk_data = json.loads(resolved_manifest_path.read_text(encoding="utf-8"))
-                disk_manifest = TrustedHarnessManifest.model_validate(disk_data)
-                if disk_manifest.model_dump(mode="json") != manifest.model_dump(mode="json"):
+                raw_text = resolved_manifest_path.read_text(encoding="utf-8")
+                disk_manifest = TrustedHarnessManifest.model_validate_json(raw_text)
+                if disk_manifest != manifest:
                     findings.append(
                         RewardHackingFinding(
                             rule_id="TRUSTED_MANIFEST_DISK_MISMATCH",
@@ -365,6 +403,18 @@ def _verify_manifest_integrity(
                     )
                 )
     return findings
+
+
+class CriterionExecutionReceipt(CanonicalRecord):
+    """Structured execution receipt binding a criterion to candidate_sha and manifest_digest."""
+
+    criterion_id: NonBlank
+    candidate_sha: Commit
+    manifest_digest: Digest
+    test_node_id: NonBlank
+    passed: StrictBool
+    exit_code: StrictInt
+    log_sha256: Digest | None = None
 
 
 class RewardHackingFinding(CanonicalRecord):
@@ -825,6 +875,7 @@ class TrustedAcceptanceHarnessValidator:
             )
 
         skip_flagged = False
+        test_fn_count = 0
         for node in ast.walk(tree):
             if not skip_flagged and isinstance(node, ast.Call):
                 if _is_pytest_skip_or_xfail_call(node):
@@ -853,6 +904,7 @@ class TrustedAcceptanceHarnessValidator:
 
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if node.name.startswith("test_"):
+                    test_fn_count += 1
                     has_real, has_trivial, has_unreachable = _inspect_function_assertions(node)
                     if has_trivial:
                         findings.append(
@@ -887,6 +939,21 @@ class TrustedAcceptanceHarnessValidator:
                             )
                         )
 
+        norm_rel = _normalize_rel_path(rel_path)
+        filename = Path(norm_rel).name
+        if (
+            test_fn_count == 0
+            and norm_rel.startswith("tests/")
+            and (filename.startswith("test_") or filename.endswith("_test.py"))
+        ):
+            findings.append(
+                RewardHackingFinding(
+                    rule_id="VACUOUS_TEST_WITHOUT_ASSERT",
+                    file_path=rel_path,
+                    description="Test module defines no test_* functions",
+                )
+            )
+
         return tuple(findings)
 
     def evaluate_candidate(
@@ -902,6 +969,7 @@ class TrustedAcceptanceHarnessValidator:
         verification_receipt: CandidateVerificationReceipt | None = None,
         review_context: ReviewContext | None = None,
         trusted_manifest_file: Path | None = None,
+        criterion_execution_receipts: tuple[CriterionExecutionReceipt, ...] = (),
     ) -> TrustedAcceptanceEvaluation:
         """Evaluate candidate changes and test evidence against TrustedHarnessManifest."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -1094,7 +1162,41 @@ class TrustedAcceptanceHarnessValidator:
                 )
                 reward_hacking_detected = True
 
-            def _is_verified_context_artifact(ev: str) -> bool:
+            def _parse_summary_receipts(summary: str) -> list[CriterionExecutionReceipt]:
+                stripped = summary.strip()
+                if not stripped or stripped[0] not in ("{", "["):
+                    return []
+                try:
+                    parsed = json.loads(stripped)
+                except ValueError:
+                    return []
+                raw_items: object = (
+                    parsed.get("criterion_execution_receipts")
+                    if isinstance(parsed, dict)
+                    else parsed
+                )
+                if not isinstance(raw_items, list):
+                    return []
+                out: list[CriterionExecutionReceipt] = []
+                for item in raw_items:
+                    try:
+                        out.append(CriterionExecutionReceipt.model_validate(item))
+                    except ValueError:
+                        continue
+                return out
+
+            all_exec_receipts = list(criterion_execution_receipts)
+            if verification_receipt is not None:
+                all_exec_receipts.extend(_parse_summary_receipts(verification_receipt.summary))
+
+            failed_receipt_cids = {
+                rec.criterion_id
+                for rec in all_exec_receipts
+                if rec.criterion_id in manifest.required_criterion_ids
+                and (not rec.passed or rec.exit_code != 0)
+            }
+
+            def _is_verified_context_artifact_for_criterion(ev: str, cid: str) -> bool:
                 if review_context is None:
                     return False
                 ev_root = Path(review_context.evidence_root).resolve()
@@ -1110,41 +1212,56 @@ class TrustedAcceptanceHarnessValidator:
                     art_file = (ev_root / item.path).resolve()
                     if not art_file.is_relative_to(ev_root) or not art_file.is_file():
                         return False
-                    return hashlib.sha256(art_file.read_bytes()).hexdigest() == art.sha256
+                    raw_bytes = art_file.read_bytes()
+                    if hashlib.sha256(raw_bytes).hexdigest() != art.sha256:
+                        return False
+                    content = raw_bytes.decode("utf-8", errors="replace")
+                    return cid in content and candidate_sha in content and "PASS" in content
                 return False
 
             def _valid_criterion_evidence(ev: str, cid: str) -> bool:
-                if _is_verified_context_artifact(ev):
+                if cid in failed_receipt_cids:
+                    return False
+                if _is_verified_context_artifact_for_criterion(ev, cid):
                     return True
                 if (
                     verification_receipt is None
                     or not verification_receipt.passed
                     or verification_receipt.exit_code != 0
                     or verification_receipt.candidate_sha != candidate_sha
+                    or manifest.manifest_digest is None
                 ):
                     return False
-                if (
-                    cid not in verification_receipt.summary
-                    and "passed" not in verification_receipt.summary
-                ):
-                    return False
-                if manifest.manifest_digest is not None:
-                    expected_ev = (
-                        f"receipt:{verification_receipt.candidate_sha}"
-                        f":{cid}:{manifest.manifest_digest}"
-                    )
-                    if ev == expected_ev:
+                expected_ev = (
+                    f"receipt:{verification_receipt.candidate_sha}:{cid}:{manifest.manifest_digest}"
+                )
+                for exec_rec in all_exec_receipts:
+                    if (
+                        exec_rec.criterion_id != cid
+                        or exec_rec.candidate_sha != candidate_sha
+                        or exec_rec.manifest_digest != manifest.manifest_digest
+                        or not exec_rec.passed
+                        or exec_rec.exit_code != 0
+                    ):
+                        continue
+                    parts = exec_rec.test_node_id.split("::")
+                    if len(parts) < 2 or not parts[-1].startswith("test_"):
+                        continue
+                    norm_test_file = _normalize_rel_path(parts[0])
+                    if (
+                        Path(norm_test_file).is_absolute()
+                        or not norm_test_file.startswith("tests/")
+                        or not norm_test_file.endswith(".py")
+                    ):
+                        continue
+                    test_path = (workspace_root / norm_test_file).resolve()
+                    if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
+                        continue
+                    source = test_path.read_text(encoding="utf-8")
+                    if len(self.inspect_python_test_source(norm_test_file, source)) != 0:
+                        continue
+                    if ev in (exec_rec.test_node_id, norm_test_file, expected_ev):
                         return True
-                norm_ev = _normalize_rel_path(ev)
-                if (
-                    not Path(norm_ev).is_absolute()
-                    and norm_ev.startswith("tests/")
-                    and norm_ev.endswith(".py")
-                ):
-                    test_path = (workspace_root / norm_ev).resolve()
-                    if test_path.is_relative_to(workspace_root) and test_path.is_file():
-                        source = test_path.read_text(encoding="utf-8")
-                        return len(self.inspect_python_test_source(norm_ev, source)) == 0
                 return False
 
             criterion_map: dict[str, bool] = {}
@@ -1167,7 +1284,7 @@ class TrustedAcceptanceHarnessValidator:
             elif criterion_results is not None:
                 for cr in criterion_results:
                     if cr.criterion_id in manifest.required_criterion_ids:
-                        has_provenance = any(
+                        has_provenance = cr.criterion_id not in failed_receipt_cids and any(
                             _valid_criterion_evidence(ev, cr.criterion_id) for ev in cr.evidence
                         )
                         criterion_map[cr.criterion_id] = (
