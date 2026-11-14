@@ -39,10 +39,62 @@ _STABLE_SHA = "1" * 40
 _CANDIDATE_SHA = "2" * 40
 
 
+def _init_git_repo(repo_root: Path) -> str:
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "AIPC Test"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "aipc-test@example.invalid"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "add", "-A"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return _git_head_sha(repo_root)
+
+
+def _git_head_sha(repo_root: Path) -> str:
+    res = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return res.stdout.strip()
+
+
 def _setup_candidate_workspace(tmp_path: Path) -> tuple[Path, Path, TrustedHarnessManifest]:
     stable_root = tmp_path / "stable_checkout"
     candidate_root = tmp_path / "candidate_worktree"
     (stable_root / "src" / "aipc").mkdir(parents=True)
+    (stable_root / "src" / "aipc" / "__init__.py").write_text("", encoding="utf-8")
+    _init_git_repo(stable_root)
     (candidate_root / "src" / "aipc" / "review").mkdir(parents=True)
     (candidate_root / "tests" / "trusted").mkdir(parents=True)
     (candidate_root / "tests" / "unit").mkdir(parents=True)
@@ -264,7 +316,7 @@ def test_dogfooding_coordinator_clean_pass_stops_at_human_merge_review(tmp_path:
     config = StableCandidateConfig(
         stable_root=str(stable_root),
         candidate_worktree_root=str(candidate_root),
-        pinned_stable_sha=_STABLE_SHA,
+        pinned_stable_sha=_git_head_sha(stable_root),
         candidate_sha=_CANDIDATE_SHA,
         verification_isolation="isolated_subprocess",
         allow_auto_promote_stable=False,
@@ -318,7 +370,7 @@ def test_dogfooding_coordinator_blocks_on_import_origin_or_harness_failure(
     config = StableCandidateConfig(
         stable_root=str(stable_root),
         candidate_worktree_root=str(candidate_root),
-        pinned_stable_sha=_STABLE_SHA,
+        pinned_stable_sha=_git_head_sha(stable_root),
         candidate_sha=_CANDIDATE_SHA,
         verification_isolation="isolated_subprocess",
         allow_auto_promote_stable=False,
@@ -404,6 +456,10 @@ def test_empty_pinned_manifest_raises_validation_error() -> None:
     [
         "def test_trivial_const() -> None:\n    assert True\n",
         "def test_trivial_eq() -> None:\n    x = 1\n    assert x == x\n",
+        "def test_not_false() -> None:\n    assert not False\n",
+        "def test_unittest_true(self) -> None:\n    self.assertTrue(True)\n",
+        "def test_unittest_eq_const(self) -> None:\n    self.assertEqual(1, 1)\n",
+        "def test_unittest_eq_same(self) -> None:\n    x = 1\n    self.assertEqual(x, x)\n",
     ],
 )
 def test_trivial_tautological_assert_fails_closed(tmp_path: Path, test_body: str) -> None:
@@ -431,6 +487,26 @@ def test_trivial_tautological_assert_fails_closed(tmp_path: Path, test_body: str
     [
         "def test_dead() -> None:\n    return\n    assert 1 + 1 == 2\n",
         "def test_dead_if() -> None:\n    if False:\n        assert 1 + 1 == 2\n",
+        (
+            "def test_empty_tuple_loop() -> None:\n"
+            "    x = 1\n"
+            "    for _ in ():\n"
+            "        assert x == 1\n"
+        ),
+        (
+            "def test_empty_range_loop() -> None:\n"
+            "    x = 1\n"
+            "    for _ in range(0):\n"
+            "        assert x == 1\n"
+        ),
+        (
+            "def test_after_if_else_return(cond: bool) -> None:\n"
+            "    if cond:\n"
+            "        return\n"
+            "    else:\n"
+            "        return\n"
+            "    assert 1 + 1 == 2\n"
+        ),
     ],
 )
 def test_unreachable_assertion_fails_closed(tmp_path: Path, test_body: str) -> None:
@@ -535,7 +611,7 @@ def _make_clean_dogfood_inputs(
     config = StableCandidateConfig(
         stable_root=str(stable_root),
         candidate_worktree_root=str(candidate_root),
-        pinned_stable_sha=_STABLE_SHA,
+        pinned_stable_sha=_git_head_sha(stable_root),
         candidate_sha=_CANDIDATE_SHA,
         verification_isolation="isolated_subprocess",
         allow_auto_promote_stable=False,
@@ -633,7 +709,7 @@ def test_dogfooding_detects_mutated_or_wrong_head_stable_git_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
-    (Path(config.stable_root) / ".git").mkdir()
+    (Path(config.stable_root) / ".git").mkdir(exist_ok=True)
 
     def _fake_git_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["git", "rev-parse"]:
@@ -747,6 +823,146 @@ def test_dogfooding_rejects_mismatched_reviewer_gate_decision(tmp_path: Path) ->
         stable_candidate_config=config,
         manifest=manifest,
         task_id="task-c03-dogfood",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=gate_decision,
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "REVIEW_GATE_DECISION_MISMATCH" in bundle.blockers
+
+
+@pytest.mark.parametrize("failure_mode", ["missing_root", "missing_git", "dirty_worktree"])
+def test_dogfooding_stable_git_integrity_fails_closed(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    stable_path = Path(config.stable_root)
+    if failure_mode == "missing_root":
+        config = config.model_copy(update={"stable_root": str(tmp_path / "nonexistent_stable")})
+    elif failure_mode == "missing_git":
+        no_git_dir = tmp_path / "stable_without_git"
+        no_git_dir.mkdir(parents=True, exist_ok=True)
+        config = config.model_copy(update={"stable_root": str(no_git_dir)})
+    else:
+        (stable_path / "dirty.txt").write_text("uncommitted", encoding="utf-8")
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-stable-fail",
+        changed_files=(
+            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
+        ),
+        tests_summary=TestSummary(total=2, passed=2, failed=0, skipped=0),
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+    )
+
+    assert bundle.dogfooding_passed is False
+    assert bundle.stable_worktree_mutated is True
+    assert bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert "STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH" in bundle.blockers
+
+
+def test_dogfooding_rejects_mismatched_nested_phase_gate_decision_task_id(
+    tmp_path: Path,
+) -> None:
+    config, manifest, import_report, verification_receipt = _make_clean_dogfood_inputs(tmp_path)
+    digest_zero = "0" * 64
+    task_id = "task-c03-dogfood"
+    review_result = ReviewResult(
+        schema_version="1.0",
+        review_id="rev-match",
+        task_id=task_id,
+        verdict=ReviewVerdict.PASS,
+        confidence=0.95,
+        criteria=[],
+        failed_criteria=[],
+        required_fixes=[],
+        risks=[],
+        next_phase_allowed=True,
+    )
+    bound_review = BoundReview(
+        review=review_result,
+        context_digest=digest_zero,
+        review_digest=digest_zero,
+        authority="codex",
+        provenance=ReviewProvenance(
+            project_id="aipc",
+            run_id="run-1",
+            phase_id="c03",
+            attempt=1,
+            task_id=task_id,
+            attempt_checkpoint_id="cp-1",
+            git_commit=_CANDIDATE_SHA,
+            agent_result_digest=digest_zero,
+            evidence_digest=digest_zero,
+        ),
+    )
+    phase_gate = PhaseGateDecision(
+        verdict=ReviewVerdict.PASS,
+        project_id="aipc",
+        phase_id="c03",
+        attempt=1,
+        task_id="task-other",
+        review_id="rev-match",
+        actions=(GateAction.MARK_PHASE_PASS,),
+        next_phase_allowed=True,
+        stable_checkpoint_allowed=True,
+        repair_required=False,
+        human_intervention_required=False,
+        reasons=("ok",),
+        failed_criteria=(),
+        required_fixes=(),
+    )
+    gate_decision = SubscriptionReviewerGateDecision(
+        gate_outcome="PASS",
+        task_id=task_id,
+        candidate_commit_sha=_CANDIDATE_SHA,
+        reviewed_commit_sha=_CANDIDATE_SHA,
+        review_result=review_result,
+        bound_review=bound_review,
+        phase_gate_decision=phase_gate,
+        session_audit=SessionIsolationAuditReceipt(
+            audit_id="audit-1",
+            task_id=task_id,
+            candidate_commit_sha=_CANDIDATE_SHA,
+            worker_agent_id="worker-1",
+            worker_provider_family="google_antigravity",
+            reviewer_binding_id="rev-bind-1",
+            reviewer_provider_id="codex",
+            reviewer_provider_family="openai_codex",
+            reviewer_model_id="gpt-5.4",
+            reviewer_session_id="sess-1",
+            fresh_isolated_session=True,
+            inherited_chat_history=False,
+            read_only_sandbox_enforced=True,
+            workspace_snapshot_before_sha256=digest_zero,
+            workspace_snapshot_after_sha256=digest_zero,
+            workspace_mutated=False,
+            independence_level="cross_provider",
+            reduced_independence=False,
+        ),
+        receipt_path="evidence/rev.json",
+    )
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id=task_id,
         changed_files=(
             FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
         ),

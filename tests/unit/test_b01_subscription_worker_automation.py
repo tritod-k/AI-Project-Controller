@@ -777,3 +777,173 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
                 "gemini-3.8-flash-medium",
             )
         )
+
+
+def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: Path) -> None:
+    """Verify run_cli_worker_job enforces all nested review, provenance, gate, and audit IDs."""
+    from aipc.domain.enums import ReviewVerdict
+    from aipc.domain.models import ReviewResult
+    from aipc.review.models import BoundReview, GateAction, PhaseGateDecision, ReviewProvenance
+    from aipc.review.subscription_reviewer_gate import (
+        SessionIsolationAuditReceipt,
+        SubscriptionReviewerGateDecision,
+    )
+
+    wt = tmp_path / "candidate_wt"
+    sha = _init_git_repo(wt)
+
+    async def noop_invoker(
+        _task: TaskRequest,
+        _cfg: SubscriptionWorkerConfig,
+        _env: Mapping[str, str],
+        resolved_model: str,
+    ) -> WorkerInvocationResponse:
+        return WorkerInvocationResponse(
+            session_id="agy-session-nested",
+            model_used=resolved_model,
+            summary="Noop.",
+        )
+
+    def _build_gate_payload(gate_path: Path) -> dict[str, object]:
+        review = ReviewResult(
+            schema_version="1.0",
+            review_id="rev-001",
+            task_id="task-b01-1",
+            verdict=ReviewVerdict.PASS,
+            confidence=0.95,
+            criteria=[],
+            failed_criteria=[],
+            required_fixes=[],
+            risks=[],
+            next_phase_allowed=True,
+        )
+        provenance = ReviewProvenance(
+            project_id="proj-b01",
+            run_id="run-001",
+            phase_id="01",
+            attempt=1,
+            task_id="task-b01-1",
+            attempt_checkpoint_id="ckpt-task-b01-1",
+            git_commit=sha,
+            agent_result_digest="a" * 64,
+            evidence_digest="b" * 64,
+        )
+        bound = BoundReview(
+            review=review,
+            context_digest="c" * 64,
+            review_digest="d" * 64,
+            authority="milestone-b-independent-subscription-reviewer",
+            provenance=provenance,
+        )
+        gate_decision = PhaseGateDecision(
+            verdict=ReviewVerdict.PASS,
+            project_id="proj-b01",
+            phase_id="01",
+            attempt=1,
+            task_id="task-b01-1",
+            review_id="rev-001",
+            actions=(GateAction.MARK_PHASE_PASS,),
+            next_phase_allowed=True,
+            stable_checkpoint_allowed=True,
+            repair_required=False,
+            human_intervention_required=False,
+            reasons=(),
+            failed_criteria=(),
+            required_fixes=(),
+        )
+        audit = SessionIsolationAuditReceipt(
+            audit_id="audit-001",
+            task_id="task-b01-1",
+            candidate_commit_sha=sha,
+            worker_agent_id="aipc-implementation-worker",
+            worker_provider_family="google",
+            reviewer_binding_id="codex-review-strict",
+            reviewer_provider_id="codex_subscription",
+            reviewer_provider_family="openai",
+            reviewer_model_id="gpt-5.4-medium",
+            reviewer_session_id="rev-sess-001",
+            fresh_isolated_session=True,
+            inherited_chat_history=False,
+            read_only_sandbox_enforced=True,
+            workspace_snapshot_before_sha256="e" * 64,
+            workspace_snapshot_after_sha256="e" * 64,
+            workspace_mutated=False,
+            independence_level="cross_provider",
+            reduced_independence=False,
+            high_risk_escalation_required=False,
+        )
+        decision = SubscriptionReviewerGateDecision(
+            gate_outcome="PASS",
+            task_id="task-b01-1",
+            candidate_commit_sha=sha,
+            reviewed_commit_sha=sha,
+            review_result=review,
+            bound_review=bound,
+            phase_gate_decision=gate_decision,
+            session_audit=audit,
+            receipt_path=str(gate_path),
+        )
+        return decision.model_dump(mode="json")
+
+    def _prepare_case(name: str, payload: dict[str, object]) -> tuple[PersistentTaskQueue, Path]:
+        case_dir = tmp_path / name
+        case_dir.mkdir(parents=True, exist_ok=True)
+        q_path = case_dir / "queue.json"
+        q = PersistentTaskQueue(q_path)
+        q.initialize(
+            project_id="proj-b01",
+            milestone_id="milestone-b",
+            contracts=[_approved_contract("task-b01-1")],
+        )
+        gate_path = case_dir / "gate.json"
+        payload["receipt_path"] = str(gate_path)
+        gate_path.write_text(json.dumps(payload), encoding="utf-8")
+        job_path = case_dir / "job.json"
+        job_payload = {
+            "queue_path": str(q_path),
+            "review_gate_decision_path": str(gate_path),
+            "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
+            "worker_config": {
+                "candidate_worktree": str(wt),
+                "evidence_output_dir": str(case_dir / "evidence"),
+                "in_scope_paths": ["src/module.py"],
+                "auto_commit_candidate": False,
+                "require_non_empty_diff": False,
+            },
+        }
+        job_path.write_text(json.dumps(job_payload), encoding="utf-8")
+        return q, job_path
+
+    valid_payload = _build_gate_payload(tmp_path / "valid" / "gate.json")
+    q_ok, job_ok = _prepare_case("valid", valid_payload)
+    rc = run_cli_worker_job(
+        job_ok,
+        qualification_report=_qualified_report(),
+        worker_invoker=noop_invoker,
+    )
+    assert rc == 0
+    assert q_ok.load().tasks[0].status == QueuedTaskStatus.COMPLETED
+
+    mutations: list[tuple[str, tuple[str, ...], object]] = [
+        ("prov_task", ("bound_review", "provenance", "task_id"), "other-task"),
+        ("prov_sha", ("bound_review", "provenance", "git_commit"), "0" * 40),
+        ("prov_attempt", ("bound_review", "provenance", "attempt"), 2),
+        ("gate_task", ("phase_gate_decision", "task_id"), "other-task"),
+        ("gate_attempt", ("phase_gate_decision", "attempt"), 2),
+        ("gate_review_id", ("phase_gate_decision", "review_id"), "rev-other"),
+        ("audit_task", ("session_audit", "task_id"), "other-task"),
+    ]
+    for name, path_keys, bad_val in mutations:
+        mutated = json.loads(json.dumps(valid_payload))
+        target: dict[str, object] = mutated
+        for key in path_keys[:-1]:
+            target = target[key]  # type: ignore[assignment]
+        target[path_keys[-1]] = bad_val
+        q_bad, job_bad = _prepare_case(f"bad_{name}", mutated)
+        with pytest.raises(ControllerError, match="not a verified PASS"):
+            run_cli_worker_job(
+                job_bad,
+                qualification_report=_qualified_report(),
+                worker_invoker=noop_invoker,
+            )
+        assert q_bad.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED

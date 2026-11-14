@@ -1263,6 +1263,9 @@ def run_cli_worker_job(
     mdl = select_preferred_worker_model(rep, preferred_model=pref)
     q = PersistentTaskQueue(Path(job["queue_path"])) if job.get("queue_path") else None
     tid = job["task_request"]["task_id"]
+    expected_project_id = job["task_request"]["project_id"]
+    expected_phase_id = job["task_request"]["phase_id"]
+    expected_attempt = 1
     if q is not None:
         rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
         if rec.status in (QueuedTaskStatus.INTERRUPTED, QueuedTaskStatus.WAITING_PROVIDER):
@@ -1287,6 +1290,9 @@ def run_cli_worker_job(
             worker_id=job.get("worker_id", "aipc-implementation-worker"),
             provider="gemini",
         )
+        expected_attempt = next(
+            t for t in q.load().tasks if t.contract.task_id == tid
+        ).current_attempt
 
     w_cfg = SubscriptionWorkerConfig.model_validate(
         {**job["worker_config"], "model_requested": mdl, "reasoning_effort": "medium"}
@@ -1311,41 +1317,64 @@ def run_cli_worker_job(
         return 1
 
     if q is not None:
-        gate_path = job.get("review_gate_decision_path")
-        if gate_path:
-            gate_dec = SubscriptionReviewerGateDecision.model_validate_json(
-                Path(gate_path).read_text(encoding="utf-8")
-            )
-            sha = out.receipt.candidate_commit_sha
-            verified_pass = (
-                gate_dec.task_id == tid
-                and gate_dec.candidate_commit_sha == sha
-                and gate_dec.reviewed_commit_sha == sha
-                and gate_dec.gate_outcome == "PASS"
-                and gate_dec.review_result.verdict == ReviewVerdict.PASS
-                and gate_dec.phase_gate_decision is not None
-                and gate_dec.phase_gate_decision.verdict == ReviewVerdict.PASS
-            )
-            if not verified_pass:
-                raise ControllerError(
-                    f"Review gate decision for task '{tid}' is not a verified PASS for '{sha}'."
+        try:
+            gate_path = job.get("review_gate_decision_path")
+            if gate_path:
+                gate_dec = SubscriptionReviewerGateDecision.model_validate_json(
+                    Path(gate_path).read_text(encoding="utf-8")
                 )
-            ev_root = str(Path(out.receipt.receipt_json_path or "").parent)
-            q.record_attempt_outcome(
-                tid,
-                candidate_sha=sha,
-                checkpoint_id=f"ckpt-{tid}-{sha[:8]}",
-                evidence_root=ev_root,
-                review_id=gate_dec.review_result.review_id,
-                review_verdict="PASS",
-                gate_verdict="PASS",
-            )
-        elif job.get("defer_review_to_waiting_provider", False):
-            q.mark_interrupted(
-                tid,
-                reason="Awaiting independent subscription review",
-                quota_exhausted=True,
-            )
+                sha = out.receipt.candidate_commit_sha
+                verified_pass = (
+                    gate_dec.task_id == tid
+                    and gate_dec.candidate_commit_sha == sha
+                    and gate_dec.reviewed_commit_sha == sha
+                    and gate_dec.gate_outcome == "PASS"
+                    and gate_dec.review_result.verdict == ReviewVerdict.PASS
+                    and gate_dec.review_result.task_id == tid
+                    and gate_dec.bound_review is not None
+                    and gate_dec.bound_review.review.review_id == gate_dec.review_result.review_id
+                    and gate_dec.bound_review.review.task_id == tid
+                    and gate_dec.bound_review.provenance.task_id == tid
+                    and gate_dec.bound_review.provenance.project_id == expected_project_id
+                    and gate_dec.bound_review.provenance.phase_id == expected_phase_id
+                    and gate_dec.bound_review.provenance.attempt == expected_attempt
+                    and gate_dec.bound_review.provenance.git_commit == sha
+                    and gate_dec.phase_gate_decision is not None
+                    and gate_dec.phase_gate_decision.verdict == ReviewVerdict.PASS
+                    and gate_dec.phase_gate_decision.task_id == tid
+                    and gate_dec.phase_gate_decision.project_id == expected_project_id
+                    and gate_dec.phase_gate_decision.phase_id == expected_phase_id
+                    and gate_dec.phase_gate_decision.attempt == expected_attempt
+                    and (gate_dec.phase_gate_decision.review_id == gate_dec.review_result.review_id)
+                    and gate_dec.session_audit.task_id == tid
+                    and gate_dec.session_audit.candidate_commit_sha == sha
+                    and not gate_dec.session_audit.workspace_mutated
+                    and gate_dec.session_audit.fresh_isolated_session
+                )
+                if not verified_pass:
+                    raise ControllerError(
+                        f"Review gate decision for task '{tid}' is not a verified PASS for '{sha}'."
+                    )
+                ev_root = str(Path(out.receipt.receipt_json_path or "").parent)
+                q.record_attempt_outcome(
+                    tid,
+                    candidate_sha=sha,
+                    checkpoint_id=f"ckpt-{tid}-{sha[:8]}",
+                    evidence_root=ev_root,
+                    review_id=gate_dec.review_result.review_id,
+                    review_verdict="PASS",
+                    gate_verdict="PASS",
+                )
+            elif job.get("defer_review_to_waiting_provider", False):
+                q.mark_interrupted(
+                    tid,
+                    reason="Awaiting independent subscription review",
+                    quota_exhausted=True,
+                )
+        except Exception as exc:
+            reason = str(exc).strip()[:200] or type(exc).__name__
+            q.mark_interrupted(tid, reason=reason, quota_exhausted=False)
+            raise
 
     print(json.dumps(out.receipt.model_dump(mode="json")))
     return 0

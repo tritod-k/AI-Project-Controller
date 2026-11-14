@@ -3335,8 +3335,8 @@ Milestone D (`D01`–`D03`) remains unauthorized.
 ## 38.7 Milestone C Implementation & Verification Summary (`C01`–`C03`)
 
 All Milestone C workstreams were executed through AIPC-managed Gemini 4 Hydrogen subscription worker dispatch (`AntigravitySubscriptionWorkerAutomation`) on `gemini/aipc-2.0-milestone-c`:
-- **Hydrogen Worker & Role Registry Integration (`4c1aab3`, `4db2134`, `31464ab`)**: `src/aipc/adapters/gemini/doctor.py`, `src/aipc/adapters/subscription_qualification.py`, `src/aipc/adapters/subscription_worker.py`, `src/aipc/agents/role_registry.py`, and unit tests (`29 passed` in `test_a01`, `test_a03`, `test_b01`).
+- **Hydrogen Worker & Role Registry Integration (`4c1aab3`, `4db2134`, `31464ab`)**: `src/aipc/adapters/gemini/doctor.py`, `src/aipc/adapters/subscription_qualification.py`, `src/aipc/adapters/subscription_worker.py`, `src/aipc/agents/role_registry.py`, and unit tests (`30 passed` in `test_a01`, `test_a03`, `test_b01`).
 - **C01 (`2df59c7`, `1115726`)**: `src/aipc/project/universal_profiles.py`, `src/aipc/project/__init__.py`, & `tests/unit/test_c01_universal_project_profiles.py` (`17 passed`).
-- **C02 (`2c0a84b`, `3d757c2`)**: `src/aipc/controller/milestone_c_pipeline.py`, `src/aipc/controller/__init__.py`, & `tests/unit/test_c02_multilang_e2e_pipeline.py` (`12 passed`).
-- **C03 (`eae7689`, `c8b532f`)**: `src/aipc/review/trusted_acceptance_harness.py`, `src/aipc/review/__init__.py`, & `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (`25 passed`).
-- **Full CI Verification**: `1154 passed` across the full CI regression suite, `ruff check .` and `ruff format --check .` clean (`0 errors`), and canonical/project JSON schemas verified. See `docs/AIPC_2_0_MILESTONE_C_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_C_COMPLETION_REPORT.md`.
+- **C02 (`2c0a84b`, `3d757c2`)**: `src/aipc/controller/milestone_c_pipeline.py`, `src/aipc/controller/__init__.py`, & `tests/unit/test_c02_multilang_e2e_pipeline.py` (`15 passed`).
+- **C03 (`eae7689`, `c8b532f`)**: `src/aipc/review/trusted_acceptance_harness.py`, `src/aipc/review/__init__.py`, & `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` (`34 passed`).
+- **Full CI Verification**: `1169 passed` across the full CI regression suite (`97 passed` in Milestone B/C focused suite), `ruff check .` and `ruff format --check .` clean (`0 errors`), and canonical/project JSON schemas verified. See `docs/AIPC_2_0_MILESTONE_C_EVIDENCE.md` and `docs/AIPC_2_0_MILESTONE_C_COMPLETION_REPORT.md`.

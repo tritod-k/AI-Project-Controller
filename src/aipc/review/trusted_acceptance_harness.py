@@ -235,15 +235,186 @@ def _is_assertion_call(node: ast.Call) -> bool:
     return False
 
 
+def _eval_static_constant(expr: ast.expr) -> tuple[bool, object]:
+    """Evaluate a side-effect-free static AST expression, returning (is_static, value)."""
+    if isinstance(expr, ast.Constant):
+        return True, expr.value
+    if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+        items: list[object] = []
+        for elt in expr.elts:
+            ok, val = _eval_static_constant(elt)
+            if not ok:
+                return False, None
+            items.append(val)
+        if isinstance(expr, ast.Tuple):
+            return True, tuple(items)
+        if isinstance(expr, ast.List):
+            return True, items
+        try:
+            return True, set(items)
+        except TypeError:
+            return False, None
+    if isinstance(expr, ast.Dict):
+        dict_pairs: list[tuple[object, object]] = []
+        for key_node, val_node in zip(expr.keys, expr.values, strict=True):
+            if key_node is None:
+                return False, None
+            k_ok, k_val = _eval_static_constant(key_node)
+            v_ok, v_val = _eval_static_constant(val_node)
+            if not k_ok or not v_ok:
+                return False, None
+            dict_pairs.append((k_val, v_val))
+        try:
+            return True, dict(dict_pairs)
+        except TypeError:
+            return False, None
+    if isinstance(expr, ast.UnaryOp):
+        ok, operand_val = _eval_static_constant(expr.operand)
+        if not ok:
+            return False, None
+        try:
+            if isinstance(expr.op, ast.Not):
+                return True, not operand_val
+            if isinstance(expr.op, ast.UAdd):
+                return True, +operand_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.USub):
+                return True, -operand_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.Invert):
+                return True, ~operand_val  # type: ignore[operator]
+        except TypeError:
+            return False, None
+        return False, None
+    if isinstance(expr, ast.BoolOp):
+        is_and = isinstance(expr.op, ast.And)
+        last_val: object = None
+        for val_node in expr.values:
+            ok, val = _eval_static_constant(val_node)
+            if not ok:
+                return False, None
+            last_val = val
+            if is_and and not val:
+                return True, val
+            if not is_and and val:
+                return True, val
+        return True, last_val
+    if isinstance(expr, ast.BinOp):
+        l_ok, l_val = _eval_static_constant(expr.left)
+        r_ok, r_val = _eval_static_constant(expr.right)
+        if not l_ok or not r_ok:
+            return False, None
+        try:
+            if isinstance(expr.op, ast.Add):
+                return True, l_val + r_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.Sub):
+                return True, l_val - r_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.Mult):
+                return True, l_val * r_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.Mod):
+                return True, l_val % r_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.BitAnd):
+                return True, l_val & r_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.BitOr):
+                return True, l_val | r_val  # type: ignore[operator]
+            if isinstance(expr.op, ast.BitXor):
+                return True, l_val ^ r_val  # type: ignore[operator]
+        except (TypeError, ZeroDivisionError, ValueError):
+            return False, None
+        return False, None
+    if isinstance(expr, ast.Compare):
+        operands = [expr.left, *expr.comparators]
+        evals = [_eval_static_constant(op_node) for op_node in operands]
+        if all(ok for ok, _ in evals):
+            vals = [val for _, val in evals]
+            try:
+                for op, l_val, r_val in zip(expr.ops, vals, vals[1:], strict=False):
+                    if isinstance(op, ast.Eq):
+                        res = l_val == r_val
+                    elif isinstance(op, ast.NotEq):
+                        res = l_val != r_val
+                    elif isinstance(op, ast.Lt):
+                        res = l_val < r_val  # type: ignore[operator]
+                    elif isinstance(op, ast.LtE):
+                        res = l_val <= r_val  # type: ignore[operator]
+                    elif isinstance(op, ast.Gt):
+                        res = l_val > r_val  # type: ignore[operator]
+                    elif isinstance(op, ast.GtE):
+                        res = l_val >= r_val  # type: ignore[operator]
+                    elif isinstance(op, ast.Is):
+                        res = l_val is r_val
+                    elif isinstance(op, ast.IsNot):
+                        res = l_val is not r_val
+                    elif isinstance(op, ast.In):
+                        res = l_val in r_val  # type: ignore[operator]
+                    elif isinstance(op, ast.NotIn):
+                        res = l_val not in r_val  # type: ignore[operator]
+                    else:
+                        return False, None
+                    if not res:
+                        return True, False
+                return True, True
+            except TypeError:
+                return False, None
+        for op, left_op, right_op in zip(expr.ops, operands, operands[1:], strict=False):
+            if ast.dump(left_op) == ast.dump(right_op):
+                if isinstance(op, (ast.Eq, ast.Is, ast.LtE, ast.GtE)):
+                    return True, True
+                if isinstance(op, (ast.NotEq, ast.IsNot, ast.Lt, ast.Gt)):
+                    return True, False
+        return False, None
+    if isinstance(expr, ast.IfExp):
+        t_ok, t_val = _eval_static_constant(expr.test)
+        if t_ok:
+            return _eval_static_constant(expr.body if t_val else expr.orelse)
+        return False, None
+    return False, None
+
+
 def _is_trivial_tautological_assert(node: ast.Assert) -> bool:
-    test = node.test
-    if isinstance(test, (ast.Constant, ast.Tuple, ast.List, ast.Dict, ast.Set)):
-        return True
-    if isinstance(test, ast.Compare) and len(test.comparators) == 1:
-        op = test.ops[0]
-        if isinstance(op, (ast.Eq, ast.Is, ast.LtE, ast.GtE)):
-            if ast.dump(test.left) == ast.dump(test.comparators[0]):
-                return True
+    return _eval_static_constant(node.test)[0]
+
+
+_UNARY_UNITTEST_ASSERT_METHODS = frozenset(
+    {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
+)
+_BINARY_UNITTEST_ASSERT_METHODS = frozenset(
+    {"assertEqual", "assertNotEqual", "assertIs", "assertIsNot", "assertIn", "assertNotIn"}
+)
+
+
+def _is_trivial_assertion_call(node: ast.Call) -> bool:
+    if isinstance(node.func, ast.Attribute) and node.func.attr in _UNITTEST_ASSERT_METHODS:
+        if node.func.attr in _UNARY_UNITTEST_ASSERT_METHODS:
+            return len(node.args) >= 1 and _eval_static_constant(node.args[0])[0]
+        if node.func.attr in _BINARY_UNITTEST_ASSERT_METHODS:
+            if len(node.args) < 2:
+                return False
+            both_static = (
+                _eval_static_constant(node.args[0])[0] and _eval_static_constant(node.args[1])[0]
+            )
+            return both_static or ast.dump(node.args[0]) == ast.dump(node.args[1])
+    return False
+
+
+def _is_empty_static_iterable(expr: ast.expr) -> bool:
+    if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+        return len(expr.elts) == 0
+    if isinstance(expr, ast.Dict):
+        return len(expr.keys) == 0
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, (str, bytes)):
+        return len(expr.value) == 0
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and not expr.keywords:
+        if expr.func.id in {"tuple", "list", "set", "dict"} and not expr.args:
+            return True
+        if expr.func.id == "range" and 1 <= len(expr.args) <= 3:
+            evals = [_eval_static_constant(arg) for arg in expr.args]
+            if all(ok and isinstance(val, int) for ok, val in evals):
+                nums = [int(val) for _, val in evals]  # type: ignore[arg-type]
+                if len(nums) == 1:
+                    return nums[0] <= 0
+                if len(nums) == 2:
+                    return nums[0] >= nums[1]
+                step = nums[2]
+                return (step > 0 and nums[0] >= nums[1]) or (step < 0 and nums[0] <= nums[1])
     return False
 
 
@@ -256,17 +427,19 @@ def _inspect_function_assertions(
     has_unreachable = False
 
     def _scan_expr(expr: ast.expr | None, reachable: bool) -> None:
-        nonlocal has_real, has_unreachable
+        nonlocal has_real, has_trivial, has_unreachable
         if expr is None:
             return
         for sub in ast.walk(expr):
             if isinstance(sub, ast.Call) and _is_assertion_call(sub):
-                if reachable:
-                    has_real = True
-                else:
+                if not reachable:
                     has_unreachable = True
+                elif _is_trivial_assertion_call(sub):
+                    has_trivial = True
+                else:
+                    has_real = True
 
-    def _walk_stmts(stmts: list[ast.stmt], reachable: bool) -> None:
+    def _walk_stmts(stmts: list[ast.stmt], reachable: bool) -> bool:
         nonlocal has_real, has_trivial, has_unreachable
         terminated = False
         for stmt in stmts:
@@ -275,22 +448,32 @@ def _inspect_function_assertions(
                 continue
             if isinstance(stmt, ast.If):
                 _scan_expr(stmt.test, stmt_reachable)
-                if isinstance(stmt.test, ast.Constant):
-                    body_reach = stmt_reachable and bool(stmt.test.value)
-                    else_reach = stmt_reachable and not bool(stmt.test.value)
+                is_const, const_val = _eval_static_constant(stmt.test)
+                if is_const and bool(const_val):
+                    body_term = _walk_stmts(stmt.body, stmt_reachable)
+                    _walk_stmts(stmt.orelse, False)
+                    if body_term:
+                        terminated = True
+                elif is_const and not bool(const_val):
+                    _walk_stmts(stmt.body, False)
+                    else_term = _walk_stmts(stmt.orelse, stmt_reachable)
+                    if else_term:
+                        terminated = True
                 else:
-                    body_reach = stmt_reachable
-                    else_reach = stmt_reachable
-                _walk_stmts(stmt.body, body_reach)
-                _walk_stmts(stmt.orelse, else_reach)
+                    body_term = _walk_stmts(stmt.body, stmt_reachable)
+                    else_term = _walk_stmts(stmt.orelse, stmt_reachable) if stmt.orelse else False
+                    if stmt.orelse and body_term and else_term:
+                        terminated = True
             elif isinstance(stmt, ast.While):
                 _scan_expr(stmt.test, stmt_reachable)
-                dead_while = isinstance(stmt.test, ast.Constant) and not bool(stmt.test.value)
+                is_const, const_val = _eval_static_constant(stmt.test)
+                dead_while = is_const and not bool(const_val)
                 _walk_stmts(stmt.body, stmt_reachable and not dead_while)
                 _walk_stmts(stmt.orelse, stmt_reachable)
             elif isinstance(stmt, (ast.For, ast.AsyncFor)):
                 _scan_expr(stmt.iter, stmt_reachable)
-                _walk_stmts(stmt.body, stmt_reachable)
+                body_reach = stmt_reachable and not _is_empty_static_iterable(stmt.iter)
+                _walk_stmts(stmt.body, body_reach)
                 _walk_stmts(stmt.orelse, stmt_reachable)
             elif isinstance(stmt, (ast.With, ast.AsyncWith)):
                 for item in stmt.items:
@@ -317,10 +500,13 @@ def _inspect_function_assertions(
                     elif isinstance(sub, ast.Call) and _is_assertion_call(sub):
                         if not stmt_reachable:
                             has_unreachable = True
+                        elif _is_trivial_assertion_call(sub):
+                            has_trivial = True
                         else:
                             has_real = True
             if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
                 terminated = True
+        return terminated
 
     _walk_stmts(fn_node.body, reachable=True)
     return has_real, has_trivial, has_unreachable
@@ -650,32 +836,47 @@ class DogfoodingAuditBundle(CanonicalRecord):
 
 
 def _check_stable_git_integrity(s_root: Path, pinned_stable_sha: str) -> bool:
-    """Return True if Stable git checkout is mutated or HEAD mismatches pinned_stable_sha."""
-    if not (s_root / ".git").exists():
-        return False
-    env = build_sanitized_child_env()
-    head_res = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(s_root),
-        env=env,
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
-    actual_head = (head_res.stdout or "").strip().lower()
-    if head_res.returncode != 0 or actual_head != pinned_stable_sha.lower():
+    """Return True if Stable git checkout is missing, mutated, or HEAD mismatches."""
+    if not s_root.exists() or not s_root.is_dir() or not (s_root / ".git").exists():
         return True
-    status_res = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=str(s_root),
-        env=env,
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
-    if status_res.returncode != 0 or bool((status_res.stdout or "").strip()):
+    env = build_sanitized_child_env()
+    try:
+        top_res = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(s_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        top_raw = (top_res.stdout or "").strip()
+        if top_res.returncode != 0 or not top_raw or Path(top_raw).resolve() != s_root.resolve():
+            return True
+        head_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(s_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        actual_head = (head_res.stdout or "").strip().lower()
+        if head_res.returncode != 0 or actual_head != pinned_stable_sha.lower():
+            return True
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(s_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        if status_res.returncode != 0 or bool((status_res.stdout or "").strip()):
+            return True
+    except OSError:
         return True
     return False
 
@@ -755,15 +956,38 @@ class SelfDevelopmentDogfoodingCoordinator:
             blockers.append("STABLE_WORKTREE_MUTATED_OR_SHA_MISMATCH")
 
         if reviewer_gate_decision is not None:
-            if (
+            cand_sha = stable_candidate_config.candidate_sha
+            decision_mismatch = (
                 reviewer_gate_decision.task_id != task_id
-                or reviewer_gate_decision.candidate_commit_sha
-                != stable_candidate_config.candidate_sha
-                or reviewer_gate_decision.reviewed_commit_sha
-                != stable_candidate_config.candidate_sha
+                or reviewer_gate_decision.candidate_commit_sha != cand_sha
+                or reviewer_gate_decision.reviewed_commit_sha != cand_sha
                 or reviewer_gate_decision.gate_outcome != gate_verdict
                 or reviewer_gate_decision.review_result.verdict != review_verdict
-            ):
+            )
+            if not decision_mismatch and gate_verdict == "PASS":
+                bound_rev = reviewer_gate_decision.bound_review
+                gate_dec = reviewer_gate_decision.phase_gate_decision
+                sess = reviewer_gate_decision.session_audit
+                rev_id = reviewer_gate_decision.review_result.review_id
+                nested_ok = (
+                    reviewer_gate_decision.review_result.task_id == task_id
+                    and bound_rev is not None
+                    and bound_rev.review.review_id == rev_id
+                    and bound_rev.review.task_id == task_id
+                    and bound_rev.provenance.task_id == task_id
+                    and bound_rev.provenance.git_commit == cand_sha
+                    and gate_dec is not None
+                    and gate_dec.verdict == ReviewVerdict.PASS
+                    and gate_dec.task_id == task_id
+                    and gate_dec.review_id == rev_id
+                    and sess.task_id == task_id
+                    and sess.candidate_commit_sha == cand_sha
+                    and not sess.workspace_mutated
+                    and sess.fresh_isolated_session
+                )
+                if not nested_ok:
+                    decision_mismatch = True
+            if decision_mismatch:
                 blockers.append("REVIEW_GATE_DECISION_MISMATCH")
 
         if not trusted_acceptance.passed:

@@ -818,6 +818,12 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
     tmp_path: Path,
 ) -> None:
     bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
     verifier = MultiLanguageIsolatedVerifier()
 
     net_probe = (
@@ -838,6 +844,27 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
     )
     assert net_receipt.passed is True
 
+    udp_probe = (
+        "import socket\n"
+        "sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "try:\n"
+        "    sock.sendto(b'ping', ('127.0.0.1', 1))\n"
+        "except PermissionError as exc:\n"
+        "    if 'NETWORK_ISOLATION_BLOCKED' in str(exc):\n"
+        "        print('1 passed')\n"
+        "    else:\n"
+        "        raise\n"
+        "finally:\n"
+        "    sock.close()\n"
+    )
+    udp_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", udp_probe),
+    )
+    assert udp_receipt.passed is True
+
     outside_file = tmp_path / "outside_escape.txt"
     write_probe = (
         "try:\n"
@@ -857,6 +884,91 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
     )
     assert write_receipt.passed is True
     assert not outside_file.exists()
+
+    os_open_probe = (
+        "import os\n"
+        "try:\n"
+        f"    fd = os.open({str(outside_file)!r}, os.O_WRONLY | os.O_CREAT)\n"
+        "    os.close(fd)\n"
+        "except PermissionError as exc:\n"
+        "    if 'WORKSPACE_WRITE_ISOLATION_BLOCKED' in str(exc):\n"
+        "        print('1 passed')\n"
+        "    else:\n"
+        "        raise\n"
+    )
+    os_open_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", os_open_probe),
+    )
+    assert os_open_receipt.passed is True
+    assert not outside_file.exists()
+
+    child_probe = (
+        "import os, subprocess, sys\n"
+        "child_code = (\n"
+        "    'import socket\\n'\n"
+        "    'try:\\n'\n"
+        "    \"    socket.create_connection(('127.0.0.1', 1))\\n\"\n"
+        "    'except PermissionError as exc:\\n'\n"
+        "    \"    if 'NETWORK_ISOLATION_BLOCKED' in str(exc):\\n\"\n"
+        "    \"        print('CHILD_GUARDED')\\n\"\n"
+        "    '    else:\\n'\n"
+        "    '        raise\\n'\n"
+        ")\n"
+        "proc = subprocess.run(\n"
+        "    [sys.executable, '-c', child_code],\n"
+        "    env={'PATH': os.environ.get('PATH', '')},\n"
+        "    capture_output=True,\n"
+        "    text=True,\n"
+        "    check=True,\n"
+        ")\n"
+        "assert 'CHILD_GUARDED' in proc.stdout\n"
+        "print('1 passed')\n"
+    )
+    child_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", child_probe),
+    )
+    assert child_receipt.passed is True
+
+    non_py_child_probe = (
+        "import os, subprocess\n"
+        "shell_bin = 'cmd' if os.name == 'nt' else 'sh'\n"
+        "try:\n"
+        "    subprocess.run([shell_bin, '-c', 'echo hi'], check=False)\n"
+        "except PermissionError as exc:\n"
+        "    if 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(exc):\n"
+        "        print('1 passed')\n"
+        "    else:\n"
+        "        raise\n"
+    )
+    non_py_child_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", non_py_child_probe),
+    )
+    assert non_py_child_receipt.passed is True
+
+    for bad_cmd in (
+        (sys.executable, "-S", "-c", "print('1 passed')"),
+        (sys.executable, "-I", "-c", "print('1 passed')"),
+        (sys.executable, "-E", "-c", "print('1 passed')"),
+        (sys.executable, "--isolated", "-c", "print('1 passed')"),
+        ("pytest", "-q"),
+    ):
+        bad_receipt = verifier.verify_project_candidate(
+            bundle=bundle,
+            candidate_sha=head_sha,
+            isolation_mode="isolated_subprocess",
+            command_override=bad_cmd,
+        )
+        assert bad_receipt.passed is False
+        assert bad_receipt.failure_reason == "ISOLATED_SUBPROCESS_COMMAND_GUARD_BYPASS_REJECTED"
 
 
 def test_wrong_head_or_dirty_worktree_and_lint_failure_fail_closed(tmp_path: Path) -> None:
@@ -1047,3 +1159,151 @@ def test_e2e_pipeline_validates_reviewer_before_dispatch_and_marks_interrupted(
             ),
         )
     assert q_rev_err.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+
+def test_command_override_still_runs_lint_and_fails_closed(tmp_path: Path) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+
+    def lint_fail_runner(argv, **kwargs):
+        if "ruff" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="", stderr="lint error"
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", "print('1 passed')"),
+        runner=lint_fail_runner,
+    )
+    assert receipt.passed is False
+    assert receipt.failure_reason == "VALIDATION_LINT_OR_BUILD_FAILED"
+
+
+def test_e2e_pipeline_rejects_mismatched_phase_gate_decision(tmp_path: Path) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, head_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    valid = _make_gate_decision(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        verdict=ReviewVerdict.PASS,
+        gate_outcome="PASS",
+    )
+    assert valid.phase_gate_decision is not None
+
+    for idx, update in enumerate(
+        (
+            {"task_id": "other-task"},
+            {"attempt": 99},
+            {"review_id": "other-review"},
+        ),
+        start=1,
+    ):
+        q = _setup_queue(tmp_path / f"q_pg_{idx}", bundle.project_definition.project.id)
+        bad_pg = valid.phase_gate_decision.model_copy(update=update)
+        bad_decision = valid.model_copy(update={"phase_gate_decision": bad_pg})
+        res = pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q,
+            worker_step=worker_step,
+            worker_binding=worker_binding,
+            review_callback=lambda _dec=bad_decision, **kw: _dec,
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+        assert res.pr_ready is False
+        assert res.gate_verdict == "BLOCKED"
+        assert res.blockers == ("REVIEW_PROVENANCE_MISMATCH",)
+
+
+def test_e2e_pipeline_rejects_non_callable_reviewer_and_marks_post_dispatch_errors_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, head_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    def worker_step(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    # Non-callable review_callback fails before begin_dispatch (ELIGIBLE)
+    q_non_call = _setup_queue(tmp_path / "q_non_call", bundle.project_definition.project.id)
+    with pytest.raises(ControllerError, match="review_callback must be callable"):
+        pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q_non_call,
+            worker_step=worker_step,
+            worker_binding=worker_binding,
+            review_callback="not-callable",  # type: ignore[arg-type]
+        )
+    assert q_non_call.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+    # review_callback returning None transitions task to INTERRUPTED
+    q_none = _setup_queue(tmp_path / "q_none", bundle.project_definition.project.id)
+    with pytest.raises(ControllerError, match="SubscriptionReviewerGateDecision"):
+        pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q_none,
+            worker_step=worker_step,
+            worker_binding=worker_binding,
+            review_callback=lambda **kw: None,  # type: ignore[arg-type,return-value]
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+    assert q_none.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+    # Failure during record_attempt_outcome transitions task to INTERRUPTED
+    q_rec_err = _setup_queue(tmp_path / "q_rec_err", bundle.project_definition.project.id)
+    valid = _make_gate_decision(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        verdict=ReviewVerdict.PASS,
+        gate_outcome="PASS",
+    )
+
+    def failing_record(*args, **kwargs):
+        raise RuntimeError("queue write failed")
+
+    monkeypatch.setattr(q_rec_err, "record_attempt_outcome", failing_record)
+    with pytest.raises(RuntimeError, match="queue write failed"):
+        pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q_rec_err,
+            worker_step=worker_step,
+            worker_binding=worker_binding,
+            review_callback=lambda **kw: valid,
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+    assert q_rec_err.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED

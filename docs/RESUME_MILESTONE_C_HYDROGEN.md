@@ -1,347 +1,125 @@
-AIPC — TARGETED INLINE PYTHON POLICY, GEMINI 4 HYDROGEN WORKER & MILESTONE C RESUME
+AIPC 2.0 — MILESTONE C TARGETED REPAIR (1934593) & FINAL PR HANDOFF
 
-Human Commander K.TRITOD authorizes a bounded policy clarification, conditional Gemini 4 Hydrogen subscription worker integration, and continuation of the previously authorized Milestone C (C01–C03) workflow.
+HUMAN COMMANDER AUTHORIZATION
 
-Target Candidate branch: gemini/aipc-2.0-milestone-cLast reported Candidate commit: 8528dc0
+Human Commander K.TRITOD authorizes resuming AIPC 2.0 Milestone C on branch gemini/aipc-2.0-milestone-c directly from candidate commit 1934593a8d1bb80de5c9cbdafe72fddaf0d8303b (1934593) to resolve the remaining Codex Independent Review findings, achieve a verified live Codex PASS, push the branch, verify GitHub Actions CI, and open the Milestone C Pull Request.
 
 Respond in concise English.
 
-Preserve all existing work, task queues, handoffs, evidence, and authorization boundaries. Do not restart completed tasks, modify Stable Controller source, or begin Milestone D. Note: If reading this prompt from a local operator file (docs/RESUME_MILESTONE_C_HYDROGEN.md), do NOT stage or commit this operator prompt file into Git.
+CRITICAL: Do NOT restart completed C01–C03 workstreams or perform broad repository re-audits. Do NOT stage or commit this local operator file (docs/RESUME_MILESTONE_C_HYDROGEN.md) into Git. Do NOT auto-merge, deploy, modify the pinned Stable Controller, or start Milestone D.
 
-PART 1 — TARGETED INLINE PYTHON EXECUTION POLICY (2-TIER SCOPE)
+1. VERIFIED STARTING CHECKPOINT (1934593)
 
-Keep the existing 120-line-per-implementation-task Outer Supervisor authoring limit unchanged.
+The following Milestone C deliverables are already implemented, tested (1154 passed), formatted (LF normalized), and committed on gemini/aipc-2.0-milestone-c (branched from master baseline 849c86684867487f6f0ad8eb54c603cba240dd34):
 
-Verify and refine .agents/policies/OUTER_SUPERVISOR_RULES.md (and keep GEMINI.md / AGENTS.md consistent) so that:
+Permanent Outer Supervisor governance (GEMINI.md, AGENTS.md, .agents/policies/OUTER_SUPERVISOR_RULES.md) & two-tier inline Python policy.
 
-Outer Supervisor (Argon) Tier: The Outer Argon Supervisor must avoid direct inline Python execution (python -c, python.exe -c, py -c, and equivalent forms) and instead prefer existing trusted modules invoked with python -m or reviewed script files through python -m tools.sanitized_exec.
+Qualified agy 1.5.8 + gemini-4-hydrogen-medium primary subscription worker integration & CLI worker dispatch bridge (src/aipc/adapters/subscription_worker.py).
 
-AIPC Runtime / Worker / Tests Tier: Do NOT globally prohibit python -c inside AIPC runtime components, unit/integration tests, dependencies, or qualified worker verification environments where needed (e.g., import-origin probes). Do not add a blanket python -c block inside tools/sanitized_exec.py that would break legitimate inner test or verification workflows.
+C01: src/aipc/project/universal_profiles.py + unit tests.
 
-Preserve all existing environment sanitization, security approvals, and test behavior. Make minimal documentation/policy adjustments on the Candidate branch only if needed, and commit cleanly.
+C02: src/aipc/controller/milestone_c_pipeline.py + unit tests.
 
-Do not bypass interactive security confirmations or weaken existing authorization checks. If mandatory human approval is required, preserve state and report the blocker.
+C03: src/aipc/review/trusted_acceptance_harness.py + unit tests.
 
-Verify that the persistent policy remains loadable after Gemini CLI session resets. Do not attempt to execute interactive /memory commands through Shell.
+Live Codex Independent Review on 1934593: Already executed and saved in H:\AIPC_Workspace\runtime_c (*review_1934593.json). Findings R2, R3, and R8 are RESOLVED; findings R1, R4, R5, R6, R7, and R9 plus stale commit metadata in CURRENT_STATE.md remain open.
 
-PART 2 — GEMINI 4 HYDROGEN SUBSCRIPTION WORKER INTEGRATION
+Known workspace paths:
 
-2.1 Objective
+Stable Controller (pinned, read-only): H:\AIPC_Workspace\stable_c
 
-Evaluate and, only if genuinely supported, integrate Gemini 4 Hydrogen as the preferred AIPC implementation worker instead of Gemini 3.8 Flash.
+Candidate Worktree: H:\000ProjectCode\AI_Project_Controller
 
-Target operating model:
-
-Outer Supervisor: Vertex Gemini 4 Argon — planning, architecture, coordination, and verification oversight only.
-
-Primary Implementation Worker: Gemini 4 Hydrogen — Medium reasoning, if available and qualified.
-
-Fallback Implementation Worker: Gemini 3.8 Flash (gemini-3.8-flash-medium) — only when qualified.
-
-Independent Reviewer: Codex CLI (openai_codex) using subscription authentication and read_only sandbox.
-
-Orchestrator: AIPC Stable Controller.
-
-All Inner AIPC execution must remain strictly subscription_only.
-
-2.2 Read-Only Runtime Compatibility Assessment
-
-Before modifying the model-selection implementation:
-
-Inspect the currently installed Antigravity CLI executable and version.
-
-Discover the supported model-listing and model-selection commands from the installed CLI.
-
-Retrieve the actual available model identifiers.
-
-Verify whether Gemini 4 Hydrogen is available to the currently authenticated Antigravity subscription account.
-
-Discover the exact Hydrogen model identifier from the runtime. Do not invent or guess model names.
-
-Determine whether the runtime supports explicit reasoning-effort configuration, including Medium.
-
-Inspect the existing AIPC subscription qualification and model-selection implementation.
-
-Verify that the CLI execution mode, filesystem restrictions, environment sanitation, and subscription authentication remain compatible.
-
-Do not silently install or upgrade external CLI binaries.
-
-If an update is required, report the requirement and continue with the existing qualified Flash worker unless an update is separately authorized.
-
-2.3 Strict Subscription-Only Boundary
-
-Allowed:
-
-Google Antigravity CLI subscription authentication.
-
-Qualified Hydrogen or Flash subscription workers.
-
-Qualified Codex CLI subscription reviewers.
-
-Strictly prohibited inside Inner AIPC:
-
-Vertex AI credentials.
-
-GEMINI_API_KEY, GOOGLE_API_KEY, or other paid API-key authentication.
-
-Paid API fallback.
-
-Inheritance of Outer Supervisor credentials.
-
-Fabricated provider qualification results.
-
-Unverified model availability or capabilities.
-
-A manually constructed QUALIFIED report without trusted runtime evidence must never authorize worker execution.
-
-2.4 Minimal Hydrogen Integration
-
-Only if Hydrogen is confirmed available and qualified:
-
-Reuse the existing AntigravitySubscriptionWorkerAutomation and subscription adapter.
-
-Do not introduce a duplicate provider adapter.
-
-Add the exact discovered Hydrogen model identifier to the supported model-selection and qualification path.
-
-Prefer Hydrogen Medium for new authorized implementation tasks when the runtime supports this configuration.
-
-Preserve Gemini 3.8 Flash as an eligible fallback.
-
-Keep model selection configurable and compatible with existing task contracts.
-
-Record actual requested and executed model identities in Worker Automation receipts.
-
-Detect unexplained requested-versus-actual model mismatches.
-
-Preserve existing canonical contracts, provider restrictions, filesystem scope checks, and safety gates.
-
-Do not give a worker Shell, Git, network, or additional filesystem permissions merely to enable Hydrogen.
-
-Stable Controller Compatibility: The Stable Controller must remain pinned and must not import unapproved Candidate code. If Hydrogen support added in Candidate cannot safely be used by the pinned Stable Controller, report that integration limitation and continue using the already qualified Flash path rather than hot-patching Stable.
-
-2.5 Tests and Qualification Evidence
-
-Add focused tests for:
-
-Hydrogen model discovery and availability.
-
-Qualified Hydrogen selection.
-
-Flash fallback when Hydrogen is unavailable.
-
-Unqualified model rejection.
-
-Subscription-only enforcement.
-
-Requested-versus-actual model mismatch.
-
-Worker receipt accuracy and provenance.
-
-No credential leakage.
-
-Existing Flash worker regression compatibility.
-
-Distinguish clearly between:
-
-Mock/unit-test PASS.
-
-Live Antigravity subscription qualification PASS.
-
-Actual AIPC-managed worker execution PASS.
-
-Do not claim live Hydrogen qualification based only on mocks, static configuration, or direct Outer Supervisor agy.exe invocation.
-
-2.6 Unavailable Hydrogen Behavior
-
-If Hydrogen is not available, not qualified, or incompatible with the pinned Stable Controller:
-
-Do not force Hydrogen execution.
-
-Do not fabricate a successful qualification.
-
-Retain the existing qualified gemini-3.8-flash-medium worker.
-
-Record the reason and evidence as HYDROGEN_SUBSCRIPTION_UNAVAILABLE or another precise blocker status.
-
-Continue Milestone C using the qualified Flash worker.
-
-Hydrogen availability must not become an unnecessary blocker for C01–C03.
-
-PART 3 — RESUME MILESTONE C VIA AIPC-MANAGED SUBSCRIPTION WORKERS
-
-Once Part 1 is verified and Part 2 is either qualified or safely deferred, resume Milestone C from the latest valid checkpoint (previously reported commits aa49268 / 8528dc0).
-
-3.1 Checkpoint and Queue Recovery
-
-Before dispatching additional tasks:
-
-Verify the current Candidate branch and HEAD SHA.
-
-Inspect CURRENT_STATE.md, the Milestone C roadmap, and relevant execution handoffs.
-
-Inspect the existing PersistentTaskQueue, including previous C01 attempts and attempt counters.
-
-Check whether any task is RUNNING, FAILED, PENDING, ELIGIBLE, or completed.
-
-Reconcile incomplete attempts using existing supported recovery mechanisms.
-
-Preserve prior worker receipts and verification evidence.
-
-Do not blindly reinitialize, overwrite, or duplicate task queues.
-
-Current known paths:
-
-Stable Controller: H:\AIPC_Workspace\stable_c
-
-Candidate: H:\000ProjectCode\AI_Project_Controller
-
-Runtime: H:\AIPC_Workspace\runtime_c
+Runtime & Saved Review Artifacts: H:\AIPC_Workspace\runtime_c
 
 Persistent Queue: H:\AIPC_Workspace\runtime_c\queue\milestone_c_queue.json
 
-Treat these as current environment paths, not permanent universal defaults.
+2. MANDATORY OPERATING & TOKEN EFFICIENCY RULES
 
-3.2 Complete the AIPC Worker Dispatch Bridge
+Obey .agents/policies/OUTER_SUPERVISOR_RULES.md strictly:
 
-Complete the minimal AIPC-managed worker dispatch bridge connecting:
+Outer Argon Supervisor direct Python authoring cap: < 120 cumulative lines per task.
 
-HumanGoalSpec → PlannerOrchestrationEngine → PersistentTaskQueue → AntigravitySubscriptionWorkerAutomation → SafeSelfDevelopmentRunner → IndependentSubscriptionReviewerGate → MilestoneBRepairAndRecoveryOrchestrator → PhaseGate
+Outer Supervisor must NOT invoke python -c / python.exe -c / py -c or execute scripts from ~/.gemini/tmp/.
 
-Verify actual interfaces and canonical contracts rather than assuming unsupported constructor fields or method names.
+Launch all child processes (git, pytest, ruff, python, codex.cmd, gh) via python -m tools.sanitized_exec with non-interactive stdin.
 
-Avoid unnecessary architectural rewrites.
+Never use interactive gh run watch; use single-shot gh run list or gh pr checks.
 
-The bridge must:
+AIPC-Managed Hydrogen Worker Delegation:
 
-Use a qualified subscription worker.
+Delegate substantive Python source and unit-test repairs for R1, R4, R5, R6, R7, and R9 through AIPC's subscription worker automation (aipc.adapters.subscription_worker using gemini-4-hydrogen-medium, with gemini-3.8-flash-medium fallback).
 
-Dispatch an authorized bounded task through AIPC.
+Keep task prompts focused on the exact target files and exact Codex findings—do not dump unrelated files into worker prompts.
 
-Execute against the correct Candidate worktree.
+Preserve Clean LF Line Endings:
 
-Preserve sanitized environment and filesystem restrictions.
+Ensure new edits preserve LF line endings (git diff --check 849c866..HEAD must report zero warnings/errors).
 
-Capture real worker session identity and actual model.
+3. STEP-BY-STEP EXECUTION PLAN
 
-Record changed files, receipts, verification results, and exact Git SHA.
+Step 1 — Lightweight State & Review Recovery
 
-Preserve task recovery, retry limits, independent review, and PhaseGate behavior.
+Run git status -sb and git rev-parse HEAD via tools.sanitized_exec to confirm HEAD is 1934593a8d1bb80de5c9cbdafe72fddaf0d8303b and inspect any untracked operator files.
 
-Do not treat direct Outer Supervisor invocation of agy.exe as equivalent to AIPC-managed delegation.
+Read the saved Codex review artifact (*review_1934593.json) under H:\AIPC_Workspace\runtime_c and inspect only the specific line ranges in subscription_worker.py, milestone_c_pipeline.py, trusted_acceptance_harness.py, and related tests implicated by R1, R4, R5, R6, R7, and R9.
 
-3.3 Execute C01–C03
+Reconcile H:\AIPC_Workspace\runtime_c\queue\milestone_c_queue.json cleanly if needed before dispatching repair tasks.
 
-Execute the previously authorized workstreams sequentially:
+Step 2 — Bounded Repair of R1, R4, R5, R6, R7, R9
 
-C01 — Universal Project Adapters, Profiles & Templates + Stable/Candidate Isolation
+Group R1, R4, R5, R6, R7, and R9 into concise, bounded repair task contracts (e.g., worker/pipeline fixes vs. trusted acceptance harness fixes + regression unit tests covering each finding).
 
-C02 — Multi-Language Isolated Verification & E2E Pipeline
+Dispatch the repair tasks via aipc.adapters.subscription_worker (gemini-4-hydrogen-medium) and record durable worker receipts in H:\AIPC_Workspace\runtime_c.
 
-C03 — Trusted Acceptance Test Harness & Multi-Provider Self-Development Dogfooding
+Run targeted unit tests (test_b01, test_c01, test_c02, test_c03), ruff check ., and ruff format --check . via tools.sanitized_exec.
 
-Use the following implementation worker selection policy:
+Run the full regression suite via tools.sanitized_exec and verify candidate import origin resolves to H:\000ProjectCode\AI_Project_Controller\src\aipc.
 
-First: qualified Gemini 4 Hydrogen, if genuinely supported and compatible.
+Commit the verified code and test repairs cleanly on gemini/aipc-2.0-milestone-c (let this implementation repair commit be <IMPL_SHA>).
 
-Otherwise: qualified Gemini 3.8 Flash (gemini-3.8-flash-medium).
+Step 3 — Documentation Synchronization & Clean Worktree Freeze
 
-All substantive implementation and unit-test writing must be dispatched through AIPC-managed subscription workers.
+Update CURRENT_STATE.md, MASTER_PLAN.md, docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md, docs/AIPC_2_0_MILESTONE_C_EVIDENCE.md, and docs/AIPC_2_0_MILESTONE_C_COMPLETION_REPORT.md so all commit SHAs (referencing <IMPL_SHA> as the latest implementation commit), test counts, and R1–R9 resolution summaries are 100% accurate and contain no stale eae7689 references.
 
-The Outer Argon Supervisor must respect the existing less-than-120-lines cumulative direct Python authoring limit per implementation task.
+Remove or move docs/RESUME_MILESTONE_C_HYDROGEN.md (and any other temporary local operator prompt file) out of the Candidate repository before final freeze so git status --porcelain is 100% clean.
 
-Do not split one implementation task artificially to bypass the limit.
+Verify ruff check ., ruff format --check ., and git diff --check 849c866..HEAD pass with zero issues, then commit the documentation updates to produce the frozen <CANDIDATE_HEAD_SHA>.
 
-Preserve all original Milestone C Roadmap v0.5 acceptance criteria, trusted test isolation, and evidence requirements.
+Step 4 — Live Cross-Provider Codex Re-Review (Exact SHA Bound)
 
-3.4 Independent Review and Final Git Handoff
+Execute live OpenAI Codex subscription review (codex.cmd exec --sandbox read-only --ephemeral) via tools.sanitized_exec against the exact frozen <CANDIDATE_HEAD_SHA> (comparing 849c86684867487f6f0ad8eb54c603cba240dd34..<CANDIDATE_HEAD_SHA>) and save the full JSON receipt in H:\AIPC_Workspace\runtime_c.
 
-After C01–C03 verification and documentation updates (CURRENT_STATE.md and roadmap):
+Confirm that HEAD remained unchanged and the worktree remained clean during review.
 
-Run targeted and regression verification.
+If Codex returns REVISE: Repeat bounded Hydrogen worker repair -> verification -> doc sync -> commit -> live Codex re-review on the new frozen SHA until Codex returns PASS.
 
-Verify trusted acceptance tests and isolation boundaries.
+Once Codex returns PASS: Do NOT create any further commits unless explicitly recording the final review receipt under the exact same verified PR convention used in Milestone B (and only if required; otherwise preserve the exact PASS-reviewed <CANDIDATE_HEAD_SHA> as the pushed PR HEAD and include the Codex PASS receipt details in the PR body and runtime_c evidence).
 
-Confirm actual AIPC-managed subscription worker execution evidence.
+Step 5 — Push, CI Verification & Pull Request
 
-Create the final Candidate commit.
+Push gemini/aipc-2.0-milestone-c to origin via tools.sanitized_exec.
 
-Freeze the exact HEAD SHA.
+Poll GitHub Actions CI status using single-shot gh run list --branch gemini/aipc-2.0-milestone-c / gh pr checks (never gh run watch) until both Python 3.12 and Python 3.13 jobs succeed.
 
-Run live independent Codex review (openai_codex in read_only sandbox) against that exact SHA.
+Create the Milestone C Pull Request targeting master with a comprehensive summary (scope C01–C03, Gemini 4 Hydrogen worker receipts, R1–R9 resolution, test counts, and exact Codex PASS SHA/confidence).
 
-If the Candidate changes after review, repeat the required verification and review against the new SHA.
+Stop at the Human Commander merge boundary. Do NOT auto-merge.
 
-Push gemini/aipc-2.0-milestone-c.
+4. FINAL REPORT
 
-Verify GitHub Actions for Python 3.12 and 3.13.
+Provide a concise report covering:
 
-Prepare the Milestone C PR, or Draft PR when mandatory qualification remains blocked.
+Resolution summary for each Codex finding (R1, R4, R5, R6, R7, R9) and CURRENT_STATE.md synchronization.
 
-Do not auto-merge, deploy, or begin Milestone D.
+AIPC-managed Gemini 4 Hydrogen worker dispatch receipts used for the repairs.
 
-PART 4 — FINAL REPORT
+Final ruff and regression pytest counts.
 
-Provide a concise operational report covering:
+Live Codex Independent Review verdict, confidence, and exact reviewed HEAD SHA.
 
-Persistent policy verification and changed files.
+GitHub Actions CI status (Python 3.12 & 3.13) and Milestone C PR URL.
 
-Inline Python execution policy and Runtime Guard decision.
-
-Candidate branch and current HEAD.
-
-Antigravity CLI version.
-
-Actual Hydrogen model ID, if discovered.
-
-Hydrogen subscription qualification status.
-
-Selected Primary and Fallback Worker models.
-
-Whether Medium reasoning is supported.
-
-Actual AIPC-managed worker execution evidence.
-
-C01/C02/C03 Task Queue statuses.
-
-Test and regression results.
-
-Stable/Candidate isolation status.
-
-Independent Codex review and exact reviewed SHA.
-
-CI and PR status.
-
-Remaining blockers requiring Human Commander action.
-
-Use precise evidence-backed statuses:
-
-POLICY_VERIFIED / POLICY_BLOCKED
-
-HYDROGEN_QUALIFIED / HYDROGEN_SUBSCRIPTION_UNAVAILABLE
-
-AIPC_WORKER_DISPATCH_VERIFIED / DISPATCH_BLOCKED
-
-MILESTONE_C_PASS / MILESTONE_C_BLOCKED
-
-Never claim PASS without actual supporting evidence.
+Final Human Commander merge approval request.
 
 Attribution: K.TRITOD.
-
-START
-
-Recover the current Milestone C checkpoint and durable queue.
-
-Verify and refine the targeted two-tier inline Python policy.
-
-Conduct the read-only Hydrogen compatibility assessment.
-
-If qualified, implement the minimal Hydrogen worker integration without modifying pinned Stable Controller.
-
-If unavailable, retain the qualified Flash worker.
-
-Resume C01–C03 through actual AIPC-managed subscription worker dispatch.
-
-Complete independent verification and PR handoff.
-
-Stop at the Human Commander merge-approval boundary.

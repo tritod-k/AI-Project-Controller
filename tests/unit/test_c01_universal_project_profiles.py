@@ -108,6 +108,9 @@ def test_builtin_profiles_cover_required_stacks() -> None:
     static_profile = get_builtin_project_profile("static_web_frontend")
     assert static_profile.validation_pack.default_verification_isolation == "container"
 
+    py_profile = get_builtin_project_profile("python_cli_or_package")
+    assert py_profile.validation_pack.default_verification_isolation == "container"
+
     with pytest.raises(ValueError, match="No built-in universal profile"):
         get_builtin_project_profile("custom_toolchain")
 

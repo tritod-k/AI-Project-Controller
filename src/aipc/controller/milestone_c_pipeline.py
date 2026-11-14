@@ -135,6 +135,22 @@ def _parse_int_match(pattern: str, text: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _validate_isolated_python_command(cmd: tuple[str, ...]) -> str | None:
+    """Validate that an isolated_subprocess command invokes Python without site bypass flags."""
+    if not cmd:
+        return "empty command"
+    exe_name = Path(cmd[0]).name.lower().removesuffix(".exe")
+    if not exe_name.startswith("python"):
+        return f"non-python executable prohibited in isolated_subprocess: {cmd[0]}"
+    for token in cmd[1:]:
+        if token == "--isolated":
+            return f"isolated python flag prohibited: {token}"
+        if token.startswith("-") and not token.startswith("--"):
+            if any(ch in token[1:] for ch in ("S", "I", "E")):
+                return f"site/env bypass flag prohibited: {token}"
+    return None
+
+
 def _write_isolated_python_guard(
     boot_dir: Path,
     workspace_path: Path,
@@ -154,13 +170,19 @@ def _write_isolated_python_guard(
         "import io",
         "import os",
         "import socket",
+        "import subprocess",
         "import sys",
         "import tempfile",
+        "from collections.abc import Mapping",
         "from pathlib import Path",
+        "",
+        "if sys.flags.no_site or sys.flags.isolated or sys.flags.ignore_environment:",
+        "    raise RuntimeError('ISOLATED_GUARD_DISABLED')",
         "",
         f"_WS_ROOT = Path({ws_str!r}).resolve()",
         "_WS_SRC = (_WS_ROOT / 'src').resolve()",
         f"_TMP_ROOT = Path({tmp_str!r}).resolve()",
+        "_BOOT_DIR = str(Path(__file__).resolve().parent)",
         "os.environ['TMPDIR'] = str(_TMP_ROOT)",
         "os.environ['TEMP'] = str(_TMP_ROOT)",
         "os.environ['TMP'] = str(_TMP_ROOT)",
@@ -173,7 +195,12 @@ def _write_isolated_python_guard(
         "        raise PermissionError('NETWORK_ISOLATION_BLOCKED: external network disabled')",
         "    socket.socket.connect = _blocked_network",
         "    socket.socket.connect_ex = _blocked_network",
+        "    socket.socket.sendto = _blocked_network",
+        "    socket.socket.sendmsg = _blocked_network",
+        "    socket.socket.bind = _blocked_network",
         "    socket.create_connection = _blocked_network",
+        "    socket.getaddrinfo = _blocked_network",
+        "    socket.gethostbyname = _blocked_network",
         "",
         "_orig_open = builtins.open",
         "",
@@ -182,20 +209,96 @@ def _write_isolated_python_guard(
         "        return True",
         "    return target.is_relative_to(_WS_ROOT) or target.is_relative_to(_TMP_ROOT)",
         "",
+        "def _check_write_target(p) -> None:",
+        "    if not isinstance(p, (str, bytes, os.PathLike)):",
+        "        return",
+        "    target = Path(os.fsdecode(p)).resolve()",
+        "    if not _is_allowed_write_path(target):",
+        "        raise PermissionError(f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {target}')",
+        "",
         "def _guarded_open(file, *args, **kwargs):",
         "    eff_mode = args[0] if args else kwargs.get('mode', 'r')",
         "    if not isinstance(file, int) and any(",
         "        ch in str(eff_mode) for ch in ('w', 'a', 'x', '+')",
         "    ):",
-        "        target = Path(os.fsdecode(file)).resolve()",
-        "        if not _is_allowed_write_path(target):",
-        "            raise PermissionError(",
-        "                f'WORKSPACE_WRITE_ISOLATION_BLOCKED: {target}'",
-        "            )",
+        "        _check_write_target(file)",
         "    return _orig_open(file, *args, **kwargs)",
         "",
         "builtins.open = _guarded_open",
         "io.open = _guarded_open",
+        "",
+        "_orig_os_open = os.open",
+        "_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND",
+        "",
+        "def _guarded_os_open(path, flags, *args, **kwargs):",
+        "    if flags & _WRITE_FLAGS:",
+        "        _check_write_target(path)",
+        "    return _orig_os_open(path, flags, *args, **kwargs)",
+        "",
+        "os.open = _guarded_os_open",
+        "",
+        "def _wrap_single_path_mutator(fn):",
+        "    def _wrapped(path, *args, **kwargs):",
+        "        _check_write_target(path)",
+        "        return fn(path, *args, **kwargs)",
+        "    return _wrapped",
+        "",
+        "for _fn_name in ('remove', 'unlink', 'mkdir', 'rmdir', 'chmod', 'truncate'):",
+        "    setattr(os, _fn_name, _wrap_single_path_mutator(getattr(os, _fn_name)))",
+        "",
+        "def _wrap_two_path_mutator(fn):",
+        "    def _wrapped(src, dst, *args, **kwargs):",
+        "        _check_write_target(src)",
+        "        _check_write_target(dst)",
+        "        return fn(src, dst, *args, **kwargs)",
+        "    return _wrapped",
+        "",
+        "for _fn_name in ('rename', 'replace', 'link', 'symlink'):",
+        "    setattr(os, _fn_name, _wrap_two_path_mutator(getattr(os, _fn_name)))",
+        "",
+        "_orig_popen_init = subprocess.Popen.__init__",
+        "",
+        "def _guarded_popen_init(self, *p_args, **kwargs):",
+        "    cmd_arg = p_args[0] if p_args else kwargs.get('args')",
+        "    if isinstance(cmd_arg, (str, bytes, os.PathLike)):",
+        "        argv = [os.fsdecode(cmd_arg)]",
+        "    elif cmd_arg is not None:",
+        "        argv = [os.fsdecode(tok) for tok in cmd_arg]",
+        "    else:",
+        "        argv = []",
+        "    if not argv:",
+        "        raise PermissionError(",
+        "            'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: '",
+        "            'non-Python or unguarded child process prohibited'",
+        "        )",
+        "    exe_target = kwargs.get('executable') or argv[0]",
+        "    exe_name = Path(os.fsdecode(exe_target)).name.lower().removesuffix('.exe')",
+        "    blocked = not exe_name.startswith('python')",
+        "    if not blocked:",
+        "        for tok in argv[1:]:",
+        "            if tok == '--isolated' or (",
+        "                tok.startswith('-')",
+        "                and not tok.startswith('--')",
+        "                and any(ch in tok[1:] for ch in ('S', 'I', 'E'))",
+        "            ):",
+        "                blocked = True",
+        "                break",
+        "    if blocked:",
+        "        raise PermissionError(",
+        "            'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: '",
+        "            'non-Python or unguarded child process prohibited'",
+        "        )",
+        "    env = kwargs.get('env')",
+        "    if isinstance(env, Mapping):",
+        "        new_env = dict(env)",
+        "        cur_pypath = new_env.get('PYTHONPATH', '')",
+        "        new_env['PYTHONPATH'] = (",
+        "            f'{_BOOT_DIR}{os.pathsep}{cur_pypath}' if cur_pypath else _BOOT_DIR",
+        "        )",
+        "        kwargs['env'] = new_env",
+        "    return _orig_popen_init(self, *p_args, **kwargs)",
+        "",
+        "subprocess.Popen.__init__ = _guarded_popen_init",
         "",
         "if _STABLE_STR:",
         "    _STABLE = Path(_STABLE_STR).resolve()",
@@ -403,23 +506,26 @@ class MultiLanguageIsolatedVerifier:
         sanitized_env = build_sanitized_child_env()
         assert_child_env_isolated(sanitized_env)
 
+        pack = bundle.profile.validation_pack
+        for raw_cmd in (*pack.lint_commands, *pack.build_commands):
+            if "unsafe_host_opt_in" in raw_cmd.lower():
+                raise ValueError("unsafe_host_opt_in is prohibited in verification commands")
+        extra_commands: list[tuple[str, ...]] = [
+            tuple(shlex.split(cmd)) for cmd in (*pack.lint_commands, *pack.build_commands)
+        ]
+
         if command_override is not None:
             if not command_override:
                 raise ValueError("command_override must not be empty")
-            for token in command_override:
-                if "unsafe_host_opt_in" in token.lower():
+            for tok in command_override:
+                if "unsafe_host_opt_in" in tok.lower():
                     raise ValueError("unsafe_host_opt_in is prohibited in verification commands")
             test_commands: list[tuple[str, ...]] = [tuple(command_override)]
-            extra_commands: list[tuple[str, ...]] = []
         else:
-            pack = bundle.profile.validation_pack
-            for raw_cmd in (*pack.test_commands, *pack.lint_commands, *pack.build_commands):
+            for raw_cmd in pack.test_commands:
                 if "unsafe_host_opt_in" in raw_cmd.lower():
                     raise ValueError("unsafe_host_opt_in is prohibited in verification commands")
             test_commands = [tuple(shlex.split(cmd)) for cmd in pack.test_commands]
-            extra_commands = [
-                tuple(shlex.split(cmd)) for cmd in (*pack.lint_commands, *pack.build_commands)
-            ]
 
         commands_to_run = [*test_commands, *extra_commands]
         primary_command = commands_to_run[0]
@@ -478,6 +584,11 @@ class MultiLanguageIsolatedVerifier:
             "python_web_or_api",
         ):
             return _fail_receipt("UNSANDBOXED_HOST_SUBPROCESS_REJECTED")
+
+        if effective_mode == "isolated_subprocess":
+            for cmd in commands_to_run:
+                if _validate_isolated_python_command(cmd) is not None:
+                    return _fail_receipt("ISOLATED_SUBPROCESS_COMMAND_GUARD_BYPASS_REJECTED")
 
         workspace_path = Path(bundle.workspace_root).resolve()
         if verify_git_head and not _verify_candidate_git_worktree(
@@ -741,6 +852,12 @@ class MilestoneCEndToEndPipeline:
 
         if review_callback is None and reviewer_gate is None:
             raise ControllerError("Either reviewer_gate or review_callback must be provided")
+        if review_callback is not None and not callable(review_callback):
+            raise ControllerError("review_callback must be callable")
+        if review_callback is None and (
+            reviewer_gate is None or not callable(getattr(reviewer_gate, "evaluate", None))
+        ):
+            raise ControllerError("reviewer_gate must provide a callable evaluate method")
 
         queued_task = task_queue.next_eligible_task()
         if queued_task is None:
@@ -816,6 +933,97 @@ class MilestoneCEndToEndPipeline:
                         reviewer_binding.binding_id if reviewer_binding is not None else None
                     ),
                 )
+
+            if not isinstance(gate_decision, SubscriptionReviewerGateDecision):
+                raise ControllerError("reviewer must return a SubscriptionReviewerGateDecision")
+
+            review_verdict = gate_decision.review_result.verdict
+            provenance_ok = (
+                gate_decision.task_id == task_id
+                and gate_decision.candidate_commit_sha == worker_outcome.candidate_sha
+                and gate_decision.reviewed_commit_sha == worker_outcome.candidate_sha
+                and gate_decision.review_result.task_id == task_id
+                and gate_decision.bound_review is not None
+                and gate_decision.bound_review.review.review_id
+                == gate_decision.review_result.review_id
+                and gate_decision.bound_review.review.task_id == task_id
+                and gate_decision.bound_review.provenance.task_id == task_id
+                and gate_decision.bound_review.provenance.git_commit == worker_outcome.candidate_sha
+                and gate_decision.bound_review.provenance.project_id == project_id
+                and gate_decision.bound_review.provenance.phase_id == resolved_phase_id
+                and gate_decision.bound_review.provenance.attempt == attempt_num
+                and gate_decision.phase_gate_decision is not None
+                and gate_decision.phase_gate_decision.verdict == ReviewVerdict.PASS
+                and gate_decision.phase_gate_decision.task_id == task_id
+                and gate_decision.phase_gate_decision.project_id == project_id
+                and gate_decision.phase_gate_decision.phase_id == resolved_phase_id
+                and gate_decision.phase_gate_decision.attempt == attempt_num
+                and gate_decision.phase_gate_decision.review_id
+                == gate_decision.review_result.review_id
+                and gate_decision.session_audit.task_id == task_id
+                and gate_decision.session_audit.candidate_commit_sha == worker_outcome.candidate_sha
+                and not gate_decision.session_audit.workspace_mutated
+                and gate_decision.session_audit.fresh_isolated_session
+            )
+            if gate_decision.gate_outcome == "PASS" and review_verdict == ReviewVerdict.PASS:
+                if not provenance_ok:
+                    review_verdict = ReviewVerdict.BLOCKED
+                    gate_verdict: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
+                    pr_ready = False
+                    next_action: HandoffNextAuthorizedAction = "HALT_ON_BLOCKER"
+                    blockers: tuple[str, ...] = ("REVIEW_PROVENANCE_MISMATCH",)
+                    q_review: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
+                    q_gate: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
+                else:
+                    gate_verdict = "PASS"
+                    pr_ready = True
+                    next_action = "HUMAN_MERGE_REVIEW"
+                    blockers = ()
+                    q_review = "PASS"
+                    q_gate = "PASS"
+            elif gate_decision.gate_outcome == "REVISE" or review_verdict == ReviewVerdict.REVISE:
+                gate_verdict = "REVISE"
+                pr_ready = False
+                next_action = "DISPATCH_BOUNDED_REPAIR"
+                blockers = tuple(gate_decision.reasons) or ("REVIEW_REVISE_REQUIRED",)
+                q_review = "REVISE"
+                q_gate = "REVISE"
+            else:
+                gate_verdict = "BLOCKED"
+                pr_ready = False
+                next_action = "HALT_ON_BLOCKER"
+                blockers = tuple(gate_decision.reasons) or (
+                    f"REVIEW_GATE_{gate_decision.gate_outcome}",
+                )
+                q_review = "BLOCKED"
+                q_gate = "BLOCKED"
+
+            task_queue.record_attempt_outcome(
+                task_id,
+                candidate_sha=worker_outcome.candidate_sha,
+                checkpoint_id=f"chk-{task_id}-attempt",
+                evidence_root=resolved_evidence_root,
+                review_id=gate_decision.review_result.review_id,
+                review_verdict=q_review,
+                gate_verdict=q_gate,
+                failure_reason=blockers[0] if blockers else None,
+            )
+
+            return PRReadinessBundle(
+                bundle_id=f"prb-{uuid4().hex[:12]}",
+                project_id=project_id,
+                milestone_id=milestone_id,
+                phase_id=resolved_phase_id,
+                task_id=task_id,
+                candidate_sha=worker_outcome.candidate_sha,
+                stack_type=bundle.profile.stack_type,
+                verification_receipt=receipt,
+                review_verdict=review_verdict,
+                gate_verdict=gate_verdict,
+                pr_ready=pr_ready,
+                next_authorized_action=next_action,
+                blockers=blockers,
+            )
         except Exception as exc:
             task_queue.mark_interrupted(
                 task_id,
@@ -823,78 +1031,6 @@ class MilestoneCEndToEndPipeline:
                 quota_exhausted=False,
             )
             raise
-
-        review_verdict = gate_decision.review_result.verdict
-        provenance_ok = (
-            gate_decision.task_id == task_id
-            and gate_decision.candidate_commit_sha == worker_outcome.candidate_sha
-            and gate_decision.reviewed_commit_sha == worker_outcome.candidate_sha
-            and gate_decision.review_result.task_id == task_id
-            and gate_decision.bound_review is not None
-            and gate_decision.bound_review.provenance.git_commit == worker_outcome.candidate_sha
-            and gate_decision.bound_review.provenance.project_id == project_id
-            and gate_decision.bound_review.provenance.phase_id == resolved_phase_id
-            and gate_decision.bound_review.provenance.attempt == attempt_num
-        )
-        if gate_decision.gate_outcome == "PASS" and review_verdict == ReviewVerdict.PASS:
-            if not provenance_ok:
-                review_verdict = ReviewVerdict.BLOCKED
-                gate_verdict: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
-                pr_ready = False
-                next_action: HandoffNextAuthorizedAction = "HALT_ON_BLOCKER"
-                blockers: tuple[str, ...] = ("REVIEW_PROVENANCE_MISMATCH",)
-                q_review: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
-                q_gate: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
-            else:
-                gate_verdict = "PASS"
-                pr_ready = True
-                next_action = "HUMAN_MERGE_REVIEW"
-                blockers = ()
-                q_review = "PASS"
-                q_gate = "PASS"
-        elif gate_decision.gate_outcome == "REVISE" or review_verdict == ReviewVerdict.REVISE:
-            gate_verdict = "REVISE"
-            pr_ready = False
-            next_action = "DISPATCH_BOUNDED_REPAIR"
-            blockers = tuple(gate_decision.reasons) or ("REVIEW_REVISE_REQUIRED",)
-            q_review = "REVISE"
-            q_gate = "REVISE"
-        else:
-            gate_verdict = "BLOCKED"
-            pr_ready = False
-            next_action = "HALT_ON_BLOCKER"
-            blockers = tuple(gate_decision.reasons) or (
-                f"REVIEW_GATE_{gate_decision.gate_outcome}",
-            )
-            q_review = "BLOCKED"
-            q_gate = "BLOCKED"
-
-        task_queue.record_attempt_outcome(
-            task_id,
-            candidate_sha=worker_outcome.candidate_sha,
-            checkpoint_id=f"chk-{task_id}-attempt",
-            evidence_root=resolved_evidence_root,
-            review_id=gate_decision.review_result.review_id,
-            review_verdict=q_review,
-            gate_verdict=q_gate,
-            failure_reason=blockers[0] if blockers else None,
-        )
-
-        return PRReadinessBundle(
-            bundle_id=f"prb-{uuid4().hex[:12]}",
-            project_id=project_id,
-            milestone_id=milestone_id,
-            phase_id=resolved_phase_id,
-            task_id=task_id,
-            candidate_sha=worker_outcome.candidate_sha,
-            stack_type=bundle.profile.stack_type,
-            verification_receipt=receipt,
-            review_verdict=review_verdict,
-            gate_verdict=gate_verdict,
-            pr_ready=pr_ready,
-            next_authorized_action=next_action,
-            blockers=blockers,
-        )
 
 
 __all__ = [

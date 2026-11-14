@@ -203,7 +203,7 @@ BUILTIN_UNIVERSAL_PROFILES: dict[ProjectStackType, UniversalProjectProfile] = {
             required_toolchains=("python", "pytest"),
             test_commands=("python -m pytest -q",),
             lint_commands=("python -m ruff check .",),
-            default_verification_isolation="isolated_subprocess",
+            default_verification_isolation="container",
             recommended_container_image="python:3.11-slim",
             offline_mock_only=False,
         ),
