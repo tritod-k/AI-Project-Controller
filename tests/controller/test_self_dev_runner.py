@@ -24,6 +24,10 @@ from aipc.controller import (
     assert_stable_process_free_of_candidate_imports,
     verify_candidate_import_origin,
 )
+from aipc.hardening.env_isolation import (
+    assert_child_env_isolated,
+    build_sanitized_child_env,
+)
 
 STABLE_SHA = "1" * 40
 CANDIDATE_SHA = "2" * 40
@@ -848,6 +852,23 @@ def test_isolated_subprocess_seals_popen_and_blocks_scratch_pythonpath(
                 "    assert p.wait() == 0",
                 "    with pytest.raises(PermissionError):",
                 "        _ = p.__init__.__closure__",
+                "    import gc",
+                "    caught = None",
+                "    try:",
+                "        gc.get_objects()",
+                "    except PermissionError as exc:",
+                "        caught = exc",
+                "    assert caught is not None",
+                "    tb = caught.__traceback__",
+                "    tb_blocked = False",
+                "    while tb is not None:",
+                "        try:",
+                "            locs = tb.tb_frame.f_locals",
+                "            assert '_a_boot' not in locs and '_a_tmp' not in locs",
+                "        except PermissionError:",
+                "            tb_blocked = True",
+                "        tb = tb.tb_next",
+                "    assert tb_blocked",
                 "",
             ]
         ),
@@ -1009,11 +1030,16 @@ def test_container_child_verify_ctrlplugin_compat_and_smap_retarget_rejection(
     child_path = tmp_path / "child_verify.py"
     child_path.write_text(child_script, encoding="utf-8")
 
+    sanitized_env = build_sanitized_child_env({**os.environ, "OPENAI_API_KEY": SYNTHETIC_API_KEY})
+    assert "OPENAI_API_KEY" not in sanitized_env
+    assert_child_env_isolated(sanitized_env)
+
     ok_test = candidate_root / "tests" / "test_pluggy_compat.py"
     ok_test.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
     ok_proc = subprocess.run(
         [sys.executable, "-B", str(child_path), str(ok_test)],
         cwd=str(candidate_root),
+        env=sanitized_env,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -1041,6 +1067,7 @@ def test_container_child_verify_ctrlplugin_compat_and_smap_retarget_rejection(
     bad_proc = subprocess.run(
         [sys.executable, "-B", str(child_path), str(retarget_test)],
         cwd=str(candidate_root),
+        env=sanitized_env,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -1049,3 +1076,46 @@ def test_container_child_verify_ctrlplugin_compat_and_smap_retarget_rejection(
     assert bad_proc.returncode != 0
     assert "AIPC_CONTAINER_ORIGIN_" not in bad_proc.stdout
     assert "IMPORT_ORIGIN_MISMATCH" in (bad_proc.stdout + bad_proc.stderr)
+
+    traceback_test = candidate_root / "tests" / "test_traceback_walk.py"
+    traceback_test.write_text(
+        "\n".join(
+            [
+                "import gc",
+                "def test_traceback_walk_cannot_expose_vault():",
+                "    caught = None",
+                "    try:",
+                "        gc.get_objects()",
+                "    except PermissionError as exc:",
+                "        caught = exc",
+                "    assert caught is not None",
+                "    tb = caught.__traceback__",
+                "    blocked = False",
+                "    while tb is not None:",
+                "        try:",
+                "            locs = tb.tb_frame.f_locals",
+                "            for val in locs.values():",
+                "                if isinstance(val, dict) and 'ran' in val:",
+                "                    val['ran'] = True",
+                "        except PermissionError:",
+                "            blocked = True",
+                "        tb = tb.tb_next",
+                "    assert blocked",
+                "    raise RuntimeError('EXPECTED_TEST_FAILURE_AFTER_TB_CHECK')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tb_proc = subprocess.run(
+        [sys.executable, "-B", str(child_path), str(traceback_test)],
+        cwd=str(candidate_root),
+        env=sanitized_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tb_proc.returncode != 0
+    assert "AIPC_CONTAINER_ORIGIN_" not in tb_proc.stdout
+    assert "EXPECTED_TEST_FAILURE_AFTER_TB_CHECK" in (tb_proc.stdout + tb_proc.stderr)

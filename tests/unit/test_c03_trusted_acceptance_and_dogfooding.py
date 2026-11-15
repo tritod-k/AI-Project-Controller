@@ -3262,6 +3262,7 @@ def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspecti
     closure_ok_test.write_text(
         "\n".join(
             [
+                "import sys",
                 "import _pytest.python",
                 "import pytest",
                 "",
@@ -3280,6 +3281,13 @@ def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspecti
                 "        )",
                 "        with pytest.raises(PermissionError):",
                 "            pytestconfig.pluginmanager.register(fake_cls())",
+                "        with pytest.raises(PermissionError) as exc_info:",
+                "            sys.audit('aipc.rt_in', 'x', None)",
+                "        tb = exc_info.value.__traceback__",
+                "        assert tb is not None",
+                "        assert tb.tb_next is not None",
+                "        with pytest.raises(PermissionError):",
+                "            _ = tb.tb_next.tb_frame",
                 "    request.addfinalizer(_verify_sealed)",
                 "    assert len(request.node.nodeid) > 0",
                 "",
@@ -3383,6 +3391,60 @@ def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspecti
     assert len(dmap_pass_receipts) == 1
     assert dmap_pass_receipts[0].passed is False
     assert dmap_pass_receipts[0].exit_code != 0
+
+    tb_fail_test = candidate_root / "tests" / "unit" / "test_tb_frame_walk.py"
+    tb_fail_node = "tests/unit/test_tb_frame_walk.py::test_tb_frame_walk_after_failure"
+    tb_fail_test.write_text(
+        "\n".join(
+            [
+                "import gc",
+                "import sys",
+                "",
+                "def test_tb_frame_walk_after_failure(request) -> None:",
+                "    secret_keys = (",
+                "        '_fn_passed',",
+                "        '_passed_nodes',",
+                "        '_expected_dmap',",
+                "        '_auth_nonce',",
+                "    )",
+                "    for trigger in (",
+                "        lambda: gc.get_objects(),",
+                "        lambda: sys.audit('aipc.rt_in', 'x', None),",
+                "    ):",
+                "        try:",
+                "            trigger()",
+                "        except PermissionError as exc:",
+                "            tb = exc.__traceback__",
+                "            hook_blocked = False",
+                "            while tb is not None:",
+                "                try:",
+                "                    locs = tb.tb_frame.f_locals",
+                "                except PermissionError:",
+                "                    hook_blocked = True",
+                "                    break",
+                "                for k in secret_keys:",
+                "                    assert k not in locs",
+                "                tb = tb.tb_next",
+                "            assert hook_blocked",
+                "    actual = len(request.node.nodeid)",
+                "    assert actual == -1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tb_fail_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": tb_fail_node},
+        phase_id="c03",
+        task_id="task-c03-tb-fail",
+        attempt=1,
+    )
+    assert len(tb_fail_receipts) == 1
+    assert tb_fail_receipts[0].passed is False
+    assert tb_fail_receipts[0].exit_code != 0
 
     pos_receipts = validator.execute_and_record_criteria(
         manifest=manifest,
