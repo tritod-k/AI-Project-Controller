@@ -25,7 +25,7 @@ MILESTONE_C_READY_FOR_REVIEW (Final merge authority belongs exclusively to Human
 `gemini/aipc-2.0-milestone-c`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-`206cd48` (`206cd48a77806a25bf5b86f72af9893173781f8a` / `8f99035aed9b719d193b3837343851a5eee69f48` — Milestone C `C01`–`C03` fifteenth-pass C15-SEC-01, C15-SEC-02, C15-ARCH-03, C15-SEC-04, C15-ARCH-05, and C15-ARCH-06 hardening: unexposed enforcement closures and `sys._getframe` blocking of bootstrap audit frames, shared C02 parent/child container `child_seal.json` and parent-side HMAC receipt signing, AST-bound trusted criterion callable extraction and parent-side vault signing without candidate-interpreter secrets, persisted `MilestoneCAuthorizationRecord` scope validation across `PlannerOrchestrationEngine` and `PersistentTaskQueue`, and durable keyring-backed `TrustedExecutionKeyring` retained criterion verification across controller restarts; following `5dc62f7`, `ccdf012`, `e7de506`, `965057a`, `e9fde2e`, `cd5e982`, `7399643`, `0c5b5c8`, `05645ec`, `2065313`, `b9c821a`, `18bf6c8`, `d12f152`, `7ffccd4`, `1934593`, `eae7689` `C03`, `2c0a84b` `C02`, `2df59c7` `C01`, `4db2134` / `4c1aab3` Gemini 4 Hydrogen worker integration, and `f997783` targeted 2-tier inline Python execution policy).
+`206cd48` (`206cd48a77806a25bf5b86f72af9893173781f8a` / `8f99035aed9b719d193b3837343851a5eee69f48` — Milestone C `C01`–`C03` fifteenth-pass C15-SEC-01, C15-SEC-02, C15-ARCH-03, C15-SEC-04, C15-ARCH-05, and C15-ARCH-06 hardening, plus sixteenth-pass `MC-RR-01`–`MC-RR-07` hardening across `milestone_c_pipeline.py`, `self_dev_runner.py`, `trusted_acceptance_harness.py`, and `subscription_worker.py`: non-reentrant C descriptor slot getters, canonical `_trusted_exes` and `_winapi.CreateProcess` blocking, `_SealedMeta` vault-dispatched calls with immutable `_trusted_test_codes`/`_pinned_rw_co` and `_bound_fn.__code__` verification, C02 parent/child `_ctrl_key`/`_auth_nonce` separation, queue contract project/phase/workspace/path-scope and validation command binding, canonical `RecoveryManager.inspect`/`execute` recovery, and durable `.aipc_controller_keyring.json` `TrustedExecutionKeyring` with `key_id` rotation; following `5dc62f7`, `ccdf012`, `e7de506`, `965057a`, `e9fde2e`, `cd5e982`, `7399643`, `0c5b5c8`, `05645ec`, `2065313`, `b9c821a`, `18bf6c8`, `d12f152`, `7ffccd4`, `1934593`, `eae7689` `C03`, `2c0a84b` `C02`, `2df59c7` `C01`, `4db2134` / `4c1aab3` Gemini 4 Hydrogen worker integration, and `f997783` targeted 2-tier inline Python execution policy).
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -56,7 +56,7 @@ MILESTONE_C_READY_FOR_REVIEW (Final merge authority belongs exclusively to Human
 - Phase 24 — Self-Development Automation & Independent Reviewer Integration: PASS (Commander final merge authorization; PR #4 merged into `master` at `26f455fd40d7728d99dcf5494c1cad9353e45988`; 380 regression tests PASS; live Antigravity Flash subagents & live Codex subscription Independent Reviewer qualified in sanitized child environments).
 - AIPC 2.0 — Milestone A (`A01`–`A04`: Subscription-Only Multi-Provider Foundations): PASS (Commander final merge authorization; PR #5 merged into `master` at `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`; 895 + 343 passing tests, live subscription-authenticated independent review `rev-aipc2-milestone-a-12efdcc7` `PASS`).
 - AIPC 2.0 — Milestone B (`B01`–`B03`: Autonomous Multi-Provider Development Loop): PASS (Commander final merge authorization; PR #6 merged into `master` at `849c866`; live cross-provider Codex `read-only` subscription independent review verdict `PASS` with confidence `0.95`; 14 B01–B03 unit/boundary tests + 65 Milestone A/B/Phase 24 regression tests + 122 review/consensus tests + 31 Antigravity/Docker container isolation tests PASS).
-- AIPC 2.0 — Milestone C (`C01`–`C03`: Universal Project Support, End-to-End Automation & Self-Development Dogfooding): READY FOR COMMANDER MERGE REVIEW (`f997783` targeted 2-tier inline Python execution policy; `4c1aab3` / `4db2134` `agy 1.5.8` & `gemini-4-hydrogen-medium` subscription worker integration; `C01` `2df59c7` / `1115726` `17 passed`; `C02` `2c0a84b` / `8f99035` `31 passed` + `19 passed` `test_self_dev_runner.py`; `C03` `eae7689` / `8f99035` `82 passed`; `1251 passed` full CI regression, `ruff check` and `ruff format --check` clean, domain and project schemas verified).
+- AIPC 2.0 — Milestone C (`C01`–`C03`: Universal Project Support, End-to-End Automation & Self-Development Dogfooding): READY FOR COMMANDER MERGE REVIEW (`f997783` targeted 2-tier inline Python execution policy; `4c1aab3` / `4db2134` `agy 1.5.8` & `gemini-4-hydrogen-medium` subscription worker integration; `C01` `2df59c7` / `1115726` `17 passed`; `C02` `2c0a84b` / `8f99035` `34 passed` + `21 passed` `test_self_dev_runner.py`; `C03` `eae7689` / `8f99035` `84 passed`; `35 passed` across `test_a01`/`test_a03`/`test_b01` with `15 passed` in `test_b01_subscription_worker_automation.py`; `MC-RR-01`–`MC-RR-07` sixteenth-pass hardening verified; `1261 passed` full CI regression, `ruff check` and `ruff format --check` clean, domain and project schemas verified).
 
 ## Documentation Alignment
 COMPLETED — Updated Milestone C (`C01`–`C03`) and Gemini 4 Hydrogen subscription worker integration records in `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md` (v0.6), `CURRENT_STATE.md`, `docs/AIPC_2_0_MILESTONE_C_EVIDENCE.md`, and `docs/AIPC_2_0_MILESTONE_C_COMPLETION_REPORT.md` (leaving `MASTER_PLAN.md` untouched).
@@ -165,13 +165,14 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 
 ## Tests
 - **Milestone C & Hydrogen Worker Suites (`gemini/aipc-2.0-milestone-c`)**:
-  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `32 passed` (`8f99035`).
+  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `35 passed` (`15 passed` in `test_b01_subscription_worker_automation.py`).
   - `tests/unit/test_a04_planner_engine.py`, `tests/controller/test_task_queue.py`: `10 passed` (`8f99035`).
   - `tests/unit/test_c01_universal_project_profiles.py`: `17 passed` (`2df59c7`, `1115726`).
-  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `31 passed` (`2c0a84b`, `8f99035`).
-  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `82 passed` (`eae7689`, `8f99035`).
-  - `tests/controller/test_self_dev_runner.py`: `19 passed` (`8f99035`).
-  - **Full CI Regression**: `1251 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
+  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `34 passed`.
+  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `84 passed`.
+  - `tests/controller/test_self_dev_runner.py`: `21 passed`.
+  - **Sixteenth-Pass Hardening (`MC-RR-01`–`MC-RR-07`)**: Verified across `milestone_c_pipeline.py`, `self_dev_runner.py`, `trusted_acceptance_harness.py`, and `subscription_worker.py` (non-reentrant C descriptor slot getters, canonical `_trusted_exes` + `_winapi.CreateProcess` blocking, `_SealedMeta` vault dispatch + immutable `_trusted_test_codes`/`_pinned_rw_co` + `_bound_fn.__code__` verification, C02 parent/child `_ctrl_key`/`_auth_nonce` separation, queue contract project/phase/workspace/path-scope and validation command binding, canonical `RecoveryManager.inspect`/`execute` recovery, and durable `.aipc_controller_keyring.json` `TrustedExecutionKeyring` with `key_id` rotation).
+  - **Full CI Regression**: `1261 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
   - `ruff check` and `ruff format --check`: clean (`0 errors`, `319 files already formatted`).
   - Domain and project JSON schemas: verified (`Checked 4 canonical schemas`, `Checked 2 project schemas`).
 
@@ -192,5 +193,5 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 Submit `gemini/aipc-2.0-milestone-c` Pull Request (`C01`–`C03` + Gemini 4 Hydrogen subscription worker integration) for Human Commander review and merge decision. Do not start Milestone D (`D01`–`D03`) without explicit Human Commander authorization.
 
 ## Timestamp
-2026-11-13T21:10:00+07:00
+2026-11-15T21:25:00+07:00
 
