@@ -3033,6 +3033,25 @@ class MilestoneCEndToEndPipeline:
         if not queued_task.contract.in_scope:
             raise ControllerError("Task contract in_scope must not be empty")
 
+        ws_path = Path(bundle.workspace_root).resolve()
+        sanitized_git_env = build_sanitized_child_env()
+        assert_child_env_isolated(sanitized_git_env)
+        _pre_head_proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(ws_path),
+            env=sanitized_git_env,
+        )
+        _pre_dispatch_sha = _pre_head_proc.stdout.strip()
+        _pre_head_ok = (
+            _pre_head_proc.returncode == 0
+            and len(_pre_dispatch_sha) == 40
+            and all(c in "0123456789abcdefABCDEF" for c in _pre_dispatch_sha)
+        )
+
         task_queue.begin_dispatch(
             task_id,
             worker_id=worker_binding.binding_id,
@@ -3047,51 +3066,107 @@ class MilestoneCEndToEndPipeline:
                 *(fc.path for fc in r_ctx.agent_result.files_changed),
                 *(c.path for c in r_ctx.evidence.git.changes),
             ]
-            ws_path = Path(bundle.workspace_root).resolve()
-            actual_git_paths: list[str] = []
-            _status_proc = subprocess.run(
-                ["git", "status", "--porcelain"],
+            _post_head_proc = subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 check=False,
                 cwd=str(ws_path),
+                env=sanitized_git_env,
             )
-            if _status_proc.returncode == 0:
-                for _raw_line in _status_proc.stdout.splitlines():
-                    if len(_raw_line) > 3:
-                        _p_str = _raw_line[3:].strip()
-                        if " -> " in _p_str:
-                            _p_str = _p_str.split(" -> ", 1)[1].strip()
-                        _p_str = _p_str.strip('"')
-                        if _p_str:
-                            actual_git_paths.append(_p_str)
-            _base_sha = r_ctx.evidence.git.baseline
+            _post_head_sha = _post_head_proc.stdout.strip()
             _cand_sha = worker_outcome.candidate_sha
-            if (
-                isinstance(_base_sha, str)
-                and isinstance(_cand_sha, str)
-                and len(_base_sha) == 40
+            _cand_sha_valid = (
+                isinstance(_cand_sha, str)
                 and len(_cand_sha) == 40
-                and all(c in "0123456789abcdefABCDEF" for c in _base_sha)
                 and all(c in "0123456789abcdefABCDEF" for c in _cand_sha)
-                and _base_sha != _cand_sha
-            ):
+            )
+            _git_inspect_ok = (
+                _pre_head_ok
+                and _cand_sha_valid
+                and _post_head_proc.returncode == 0
+                and _post_head_sha.lower() == _cand_sha.lower()
+            )
+            actual_git_paths: list[str] = []
+            _status_proc = subprocess.run(
+                ["git", "status", "--porcelain", "-z"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(ws_path),
+                env=sanitized_git_env,
+            )
+            if _status_proc.returncode != 0:
+                _git_inspect_ok = False
+            else:
+                _status_tokens = _status_proc.stdout.split("\0")
+                if _status_tokens[-1] != "":
+                    _git_inspect_ok = False
+                else:
+                    _idx = 0
+                    while _idx < len(_status_tokens) - 1:
+                        _entry = _status_tokens[_idx]
+                        if len(_entry) < 4 or _entry[2] != " ":
+                            _git_inspect_ok = False
+                            break
+                        _xy = _entry[:2]
+                        _path1 = _entry[3:]
+                        if not _path1:
+                            _git_inspect_ok = False
+                            break
+                        actual_git_paths.append(_path1)
+                        if _xy[0] in ("R", "C") or _xy[1] in ("R", "C"):
+                            if _idx + 1 >= len(_status_tokens) - 1 or not _status_tokens[_idx + 1]:
+                                _git_inspect_ok = False
+                                break
+                            actual_git_paths.append(_status_tokens[_idx + 1])
+                            _idx += 2
+                        else:
+                            _idx += 1
+            if _git_inspect_ok:
                 _diff_proc = subprocess.run(
-                    ["git", "diff", "--name-only", _base_sha, _cand_sha],
+                    ["git", "diff", "--name-status", "-z", _pre_dispatch_sha, _post_head_sha],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     check=False,
                     cwd=str(ws_path),
+                    env=sanitized_git_env,
                 )
-                if _diff_proc.returncode == 0:
-                    for _d_line in _diff_proc.stdout.splitlines():
-                        _d_str = _d_line.strip()
-                        if _d_str:
-                            actual_git_paths.append(_d_str)
+                if _diff_proc.returncode != 0:
+                    _git_inspect_ok = False
+                else:
+                    _diff_tokens = _diff_proc.stdout.split("\0")
+                    if _diff_proc.stdout and _diff_tokens[-1] != "":
+                        _git_inspect_ok = False
+                    else:
+                        _idx = 0
+                        while _idx < len(_diff_tokens) - 1:
+                            _st = _diff_tokens[_idx]
+                            if not _st:
+                                _git_inspect_ok = False
+                                break
+                            if _st[0] in ("R", "C"):
+                                if (
+                                    _idx + 2 >= len(_diff_tokens) - 1
+                                    or not _diff_tokens[_idx + 1]
+                                    or not _diff_tokens[_idx + 2]
+                                ):
+                                    _git_inspect_ok = False
+                                    break
+                                actual_git_paths.append(_diff_tokens[_idx + 1])
+                                actual_git_paths.append(_diff_tokens[_idx + 2])
+                                _idx += 3
+                            else:
+                                if _idx + 1 >= len(_diff_tokens) - 1 or not _diff_tokens[_idx + 1]:
+                                    _git_inspect_ok = False
+                                    break
+                                actual_git_paths.append(_diff_tokens[_idx + 1])
+                                _idx += 2
             _declared_norm = {p.replace("\\", "/") for p in changed_paths}
-            _all_git_declared = all(
+            _all_git_declared = _git_inspect_ok and all(
                 p.replace("\\", "/") in _declared_norm for p in actual_git_paths
             )
             scope_paths_ok = _all_git_declared and all(
@@ -3099,7 +3174,7 @@ class MilestoneCEndToEndPipeline:
                 and not any(
                     _matches_path_pattern(p, pat) for pat in queued_task.contract.out_of_scope
                 )
-                for p in changed_paths
+                for p in (*changed_paths, *actual_git_paths)
             )
             req_cmds = tuple(
                 tuple(shlex.split(c)) for c in queued_task.contract.validation_commands if c.strip()

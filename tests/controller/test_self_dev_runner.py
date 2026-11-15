@@ -1595,3 +1595,97 @@ def test_c16_mc_rr2_01_02_blocks_addaudithook_and_symlinked_python_in_isolated_a
     )
     assert proc.returncode == 0
     assert "AIPC_CONTAINER_ORIGIN_" in proc.stdout
+
+
+def test_c19_mc_ir_01_forged_compile_name_and_filename_cannot_register_audithook_or_leak_locals(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_mc_ir_01")
+
+    forged_check_lines = [
+        "import os, pathlib, sys",
+        "_sc_mod = sys.modules.get('sitecustomize')",
+        "_sc_file = getattr(_sc_mod, '__file__', '') if _sc_mod is not None else ''",
+        "_base_dir = os.environ.get('TMPDIR') or os.environ.get('PYTHONPATH', '.')",
+        "_spoof_files = [str(pathlib.Path(_base_dir) / 'spoof.py')]",
+        "if _sc_file:",
+        "    _spoof_files.append(_sc_file)",
+        "for _sf in _spoof_files:",
+        "    for _fn_name in ('_install_crit_vault', '_guarded_addaudithook'):",
+        "        _ns_ah = {'sys': sys}",
+        "        _co_ah = compile(",
+        "            f'def {_fn_name}():\\n    sys.addaudithook(lambda _e, _a: None)\\n',",
+        "            _sf,",
+        "            'exec',",
+        "        )",
+        "        exec(_co_ah, _ns_ah)",
+        "        _blocked_ah = False",
+        "        try:",
+        "            _ns_ah[_fn_name]()",
+        "        except PermissionError:",
+        "            _blocked_ah = True",
+        "        assert _blocked_ah, (_sf, _fn_name)",
+        "        if _sf == _sc_file:",
+        "            _ns_gf = {'sys': sys}",
+        "            _co_gf = compile(",
+        "                f'def {_fn_name}():\\n    return sys._getframe(0)\\n',",
+        "                _sf,",
+        "                'exec',",
+        "            )",
+        "            exec(_co_gf, _ns_gf)",
+        "            _blocked_gf = False",
+        "            try:",
+        "                _ns_gf[_fn_name]()",
+        "            except PermissionError:",
+        "                _blocked_gf = True",
+        "            assert _blocked_gf, (_sf, _fn_name)",
+        "    _blocked_tb = False",
+        "    try:",
+        "        sys._getframe(0)",
+        "    except PermissionError as _exc:",
+        "        try:",
+        "            _ = _exc.__traceback__.tb_next.tb_frame",
+        "        except PermissionError:",
+        "            _blocked_tb = True",
+        "    assert _blocked_tb",
+    ]
+
+    (candidate_root / "src" / "aipc" / "__init__.py").write_text(
+        "\n".join(
+            [
+                "__version__ = '0.24.0-candidate'",
+                *forged_check_lines,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    test_file = candidate_root / "tests" / "test_mc_ir_01.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "import aipc",
+                "",
+                "def test_forged_compile_blocked():",
+                "    assert aipc.__version__ == '0.24.0-candidate'",
+                *("    " + line for line in forged_check_lines),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg_iso = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    receipt = SafeSelfDevelopmentRunner(cfg_iso).run_candidate_verification(
+        pytest_targets=("tests/test_mc_ir_01.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0

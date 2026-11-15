@@ -4646,3 +4646,97 @@ def test_c16_mc_rr2_01_03_criterion_runner_blocks_addaudithook_and_runner_frame_
     )
     assert any("UNREACHABLE_ASSERTION" in str(f) for f in match_findings), match_findings
     assert any("VACUOUS_TEST_WITHOUT_ASSERT" in str(f) for f in match_findings), match_findings
+
+
+def test_c19_mc_ir_02_forged_stdlib_filenames_and_frame_walking_blocked_in_criterion_vault(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    trusted_test = candidate_root / "tests" / "trusted" / "test_contract.py"
+    trusted_test.write_text(
+        "\n".join(
+            [
+                "import inspect",
+                "import os",
+                "import pathlib",
+                "import sys",
+                "import pytest",
+                "",
+                "",
+                "def test_trusted_contract() -> None:",
+                "    spoof_files = [",
+                "        os.__file__,",
+                "        pytest.__file__,",
+                "        '<frozen importlib._bootstrap>',",
+                "        'sitecustomize.py',",
+                "        str(pathlib.Path(os.environ['TMPDIR']) / 'spoof.py'),",
+                "    ]",
+                "    checks = 0",
+                "    passed_blocks = 0",
+                "    for sf in spoof_files:",
+                "        for fn_name in ('_install_crit_vault', '_spoof_fn'):",
+                "            snippets = [",
+                "                '    sys.addaudithook(lambda _e, _a: None)',",
+                "                '    sys._getframe(0)',",
+                "                '    sys._getframe(1)',",
+                "                '    inspect.currentframe()',",
+                (
+                    "                '    try:\\n        raise ValueError(1)\\n"
+                    "    except ValueError as e:\\n        _ = e.__traceback__.tb_frame',"
+                ),
+                (
+                    "                '    try:\\n        sys._getframe(0)\\n"
+                    "    except PermissionError as e:\\n        _ = e.__traceback__.tb_next',"
+                ),
+                "                '    g = (x for x in (1,))\\n    _ = g.gi_frame',",
+                (
+                    "                '    async def _c():\\n        return 1\\n"
+                    "    c = _c()\\n    try:\\n        _ = c.cr_frame\\n"
+                    "    finally:\\n        c.close()',"
+                ),
+                (
+                    "                '    async def _ag():\\n        yield 1\\n"
+                    "    a = _ag()\\n    _ = a.ag_frame',"
+                ),
+                "            ]",
+                "            for body in snippets:",
+                "                checks += 1",
+                "                ns = {'sys': sys, 'inspect': inspect}",
+                "                co = compile(f'def {fn_name}():\\n{body}\\n', sf, 'exec')",
+                "                exec(co, ns)",
+                "                try:",
+                "                    ns[fn_name]()",
+                "                except PermissionError:",
+                "                    passed_blocks += 1",
+                "    assert checks > 0 and passed_blocks == checks",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha = _init_git_repo(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=(
+            "src/aipc/review/gate.py",
+            "tests/trusted/test_contract.py",
+        ),
+        manifest_id="manifest-c19-mc-ir-02",
+        required_criterion_ids=("AC-01",),
+        criterion_test_nodes={
+            "AC-01": "tests/trusted/test_contract.py::test_trusted_contract",
+        },
+    )
+    exec_receipts = TrustedAcceptanceHarnessValidator().execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        phase_id="c03",
+        task_id="task-c19-mc-ir-02",
+        attempt=1,
+    )
+    assert len(exec_receipts) == 1
+    assert exec_receipts[0].passed is True
+    assert exec_receipts[0].exit_code == 0

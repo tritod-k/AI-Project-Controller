@@ -3130,3 +3130,251 @@ def test_c16_mc_rr2_01_02_blocks_addaudithook_and_symlinked_python_in_isolated_a
     assert "probe introspection prohibited" in probe_results[0].stderr
     assert cont_receipt.passed is False
     assert cont_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+
+def test_c19_mc_ir_03_04_pre_dispatch_head_rename_fail_closed_and_sanitized_git_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prohibited_env_name = "OpenAi_" + "Api_Key"
+    monkeypatch.setenv(prohibited_env_name, "REDACTED_TEST_MARKER")
+
+    real_subprocess_run = subprocess.run
+    recorded_git_envs: list[tuple[list[str], dict[str, str] | None]] = []
+    in_worker_step = False
+    fail_git_status = False
+    fail_git_diff = False
+
+    def _wrapped_run(argv, *args, **kwargs):
+        if (
+            not in_worker_step
+            and isinstance(argv, (list, tuple))
+            and len(argv) >= 2
+            and argv[0] == "git"
+            and argv[1] in ("rev-parse", "status", "diff")
+            and kwargs.get("env") is not None
+            or (
+                not in_worker_step
+                and isinstance(argv, (list, tuple))
+                and len(argv) >= 2
+                and argv[0] == "git"
+                and ("--porcelain" in argv or "--name-status" in argv or "--verify" in argv)
+            )
+        ):
+            recorded_git_envs.append((list(argv), kwargs.get("env")))
+            if fail_git_status and len(argv) >= 2 and argv[1] == "status":
+                return subprocess.CompletedProcess(
+                    args=argv, returncode=1, stdout="", stderr="simulated status failure"
+                )
+            if fail_git_diff and len(argv) >= 2 and argv[1] == "diff":
+                return subprocess.CompletedProcess(
+                    args=argv, returncode=1, stdout="", stderr="simulated diff failure"
+                )
+        return real_subprocess_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _wrapped_run)
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    def pass_review(bundle_obj: OnboardedProjectBundle, candidate_sha: str):
+        return lambda **kwargs: _make_gate_decision(
+            bundle=bundle_obj,
+            candidate_sha=candidate_sha,
+            verdict=ReviewVerdict.PASS,
+            gate_outcome="PASS",
+        )
+
+    pipeline = MilestoneCEndToEndPipeline()
+
+    # 1. Committed out-of-scope change with forged evidence.git.baseline == candidate_sha
+    bundle1, _ = _make_onboarded_python_project(tmp_path / "case1")
+    ws1 = Path(bundle1.workspace_root).resolve()
+    queue1 = _setup_queue(tmp_path / "q1", bundle1.project_definition.project.id)
+    worker_binding = _make_worker_binding()
+
+    def worker_step_forged_commit(binding: RoleModelBinding, attempt: int, repair_plan):
+        nonlocal in_worker_step
+        in_worker_step = True
+        try:
+            (ws1 / "src").mkdir(parents=True, exist_ok=True)
+            (ws1 / "src" / "secret_out_of_scope.py").write_text(
+                "UNDECLARED = 1\n", encoding="utf-8"
+            )
+            new_sha = _commit_all_clean(ws1, "sneaky out of scope commit")
+        finally:
+            in_worker_step = False
+        ctx = _make_review_context(bundle1, new_sha)
+        forged_git = ctx.evidence.git.model_copy(
+            update={"baseline": new_sha, "head": new_sha, "changes": ()}
+        )
+        forged_ctx = ctx.model_copy(
+            update={
+                "agent_result": ctx.agent_result.model_copy(update={"files_changed": []}),
+                "evidence": ctx.evidence.model_copy(update={"git": forged_git}),
+            }
+        )
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=new_sha,
+            verification_passed=True,
+            review_context=forged_ctx,
+        )
+
+    pr1 = pipeline.run_e2e_cycle(
+        bundle=bundle1,
+        task_queue=queue1,
+        worker_step=worker_step_forged_commit,
+        worker_binding=worker_binding,
+        review_callback=pass_review(bundle1, "0" * 40),
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert pr1.gate_verdict == "BLOCKED"
+    assert pr1.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+
+    # 2a. Uncommitted rename from out-of-scope README.md -> in-scope src/app.py
+    bundle2a, _ = _make_onboarded_python_project(tmp_path / "case2a")
+    ws2a = Path(bundle2a.workspace_root).resolve()
+    (ws2a / "README.md").write_text("readme\n", encoding="utf-8")
+    head2a = _commit_all_clean(ws2a, "add readme")
+    queue2a = _setup_queue(tmp_path / "q2a", bundle2a.project_definition.project.id)
+
+    def worker_step_uncommitted_rename(binding: RoleModelBinding, attempt: int, repair_plan):
+        nonlocal in_worker_step
+        in_worker_step = True
+        try:
+            (ws2a / "src").mkdir(parents=True, exist_ok=True)
+            _git(ws2a, "mv", "README.md", "src/app.py")
+        finally:
+            in_worker_step = False
+        ctx = _make_review_context(bundle2a, head2a)
+        fc = FileChange(path="src/app.py", change_type=ChangeType.ADDED)
+        updated_ctx = ctx.model_copy(
+            update={
+                "agent_result": ctx.agent_result.model_copy(update={"files_changed": [fc]}),
+                "evidence": ctx.evidence.model_copy(
+                    update={"git": ctx.evidence.git.model_copy(update={"changes": (fc,)})}
+                ),
+            }
+        )
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=head2a,
+            verification_passed=True,
+            review_context=updated_ctx,
+        )
+
+    pr2a = pipeline.run_e2e_cycle(
+        bundle=bundle2a,
+        task_queue=queue2a,
+        worker_step=worker_step_uncommitted_rename,
+        worker_binding=worker_binding,
+        review_callback=pass_review(bundle2a, head2a),
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert pr2a.gate_verdict == "BLOCKED"
+    assert pr2a.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+
+    # 2b. Committed rename from out-of-scope README.md -> in-scope src/app.py
+    bundle2b, _ = _make_onboarded_python_project(tmp_path / "case2b")
+    ws2b = Path(bundle2b.workspace_root).resolve()
+    (ws2b / "README.md").write_text("readme\n", encoding="utf-8")
+    _commit_all_clean(ws2b, "add readme")
+    queue2b = _setup_queue(tmp_path / "q2b", bundle2b.project_definition.project.id)
+
+    def worker_step_committed_rename(binding: RoleModelBinding, attempt: int, repair_plan):
+        nonlocal in_worker_step
+        in_worker_step = True
+        try:
+            (ws2b / "src").mkdir(parents=True, exist_ok=True)
+            _git(ws2b, "mv", "README.md", "src/app.py")
+            new_sha = _commit_all_clean(ws2b, "rename readme to src/app.py")
+        finally:
+            in_worker_step = False
+        ctx = _make_review_context(bundle2b, new_sha)
+        fc = FileChange(path="src/app.py", change_type=ChangeType.ADDED)
+        updated_ctx = ctx.model_copy(
+            update={
+                "agent_result": ctx.agent_result.model_copy(update={"files_changed": [fc]}),
+                "evidence": ctx.evidence.model_copy(
+                    update={"git": ctx.evidence.git.model_copy(update={"changes": (fc,)})}
+                ),
+            }
+        )
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=new_sha,
+            verification_passed=True,
+            review_context=updated_ctx,
+        )
+
+    pr2b = pipeline.run_e2e_cycle(
+        bundle=bundle2b,
+        task_queue=queue2b,
+        worker_step=worker_step_committed_rename,
+        worker_binding=worker_binding,
+        review_callback=pass_review(bundle2b, "0" * 40),
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert pr2b.gate_verdict == "BLOCKED"
+    assert pr2b.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+
+    # 3a. Failed git status --porcelain -z -> fail closed
+    bundle3a, head3a = _make_onboarded_python_project(tmp_path / "case3a")
+    queue3a = _setup_queue(tmp_path / "q3a", bundle3a.project_definition.project.id)
+    ctx3a = _make_review_context(bundle3a, head3a)
+
+    fail_git_status = True
+    try:
+        pr3a = pipeline.run_e2e_cycle(
+            bundle=bundle3a,
+            task_queue=queue3a,
+            worker_step=lambda b, a, rp: WorkerAttemptExecutionOutcome(
+                candidate_sha=head3a,
+                verification_passed=True,
+                review_context=ctx3a,
+            ),
+            worker_binding=worker_binding,
+            review_callback=pass_review(bundle3a, head3a),
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+    finally:
+        fail_git_status = False
+    assert pr3a.gate_verdict == "BLOCKED"
+    assert pr3a.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+
+    # 3b. Failed git diff --name-status -z -> fail closed
+    bundle3b, head3b = _make_onboarded_python_project(tmp_path / "case3b")
+    queue3b = _setup_queue(tmp_path / "q3b", bundle3b.project_definition.project.id)
+    ctx3b = _make_review_context(bundle3b, head3b)
+
+    fail_git_diff = True
+    try:
+        pr3b = pipeline.run_e2e_cycle(
+            bundle=bundle3b,
+            task_queue=queue3b,
+            worker_step=lambda b, a, rp: WorkerAttemptExecutionOutcome(
+                candidate_sha=head3b,
+                verification_passed=True,
+                review_context=ctx3b,
+            ),
+            worker_binding=worker_binding,
+            review_callback=pass_review(bundle3b, head3b),
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+    finally:
+        fail_git_diff = False
+    assert pr3b.gate_verdict == "BLOCKED"
+    assert pr3b.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+
+    # 4. Every C02 git subprocess call explicitly passed sanitized env without OpenAi_Api_Key
+    assert len(recorded_git_envs) >= 16
+    for argv, env_arg in recorded_git_envs:
+        assert env_arg is not None, f"git call {argv!r} did not pass explicit env"
+        assert all(k.lower() != "openai_api_key" for k in env_arg), (
+            f"prohibited key leaked into git call {argv!r}"
+        )
