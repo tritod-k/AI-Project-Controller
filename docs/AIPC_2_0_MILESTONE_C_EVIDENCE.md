@@ -45,8 +45,8 @@
   - Enforces `ExternalSystemSafetyPolicy` (fail-closed `external_network_allowed=False`, `live_trading_or_financial_ops_allowed=False`, `live_external_deployment_allowed=False`, external system denylist, and offline GAS simulation disclaimer), with `default_verification_isolation="container"` across all built-in network-denied profiles.
   - Enforces repository-relative instruction path validation (`_validate_relative_repo_path`), stack-specific `ValidationPackSpec` definitions, and lossless round-trip profile bundle persistence (`load_onboarded_project_bundle` / `<PROJECT>.aipc_profile.json`, **R8**).
 
-### Workstream C02 — Multi-Language Isolated Verification & End-to-End Pipeline (`2c0a84b`, `8f99035`)
-- **Commits**: `2c0a84b`, `3d757c2`, `0c5b5c8`, `7399643`, `cd5e982`, `e9fde2e`, `965057a`, `e7de506`, `ccdf012`, `5dc62f7`, `8f99035`
+### Workstream C02 — Multi-Language Isolated Verification & End-to-End Pipeline (`2c0a84b`, `8f99035`, `206cd48`)
+- **Commits**: `2c0a84b`, `3d757c2`, `0c5b5c8`, `7399643`, `cd5e982`, `e9fde2e`, `965057a`, `e7de506`, `ccdf012`, `5dc62f7`, `8f99035`, `206cd48`
 - **Implementation**: `src/aipc/controller/milestone_c_pipeline.py`, `src/aipc/controller/self_dev_runner.py`, `src/aipc/controller/planner_engine.py`, `src/aipc/controller/task_queue.py`
 - **Tests**: `tests/unit/test_c02_multilang_e2e_pipeline.py` (**`31 passed`**), `tests/controller/test_self_dev_runner.py` (**`19 passed`**), `tests/unit/test_a04_planner_engine.py` (**`4 passed`**), `tests/controller/test_task_queue.py` (**`6 passed`**)
 - **Fifteenth-Pass Hydrogen Worker Session**: `task-repair-c15-tests-polish-v15` (`model_used="gemini-4-hydrogen-medium"`)
