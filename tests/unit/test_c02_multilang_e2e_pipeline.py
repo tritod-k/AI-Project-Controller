@@ -37,6 +37,7 @@ from aipc.controller.task_queue import (
 from aipc.domain.enums import AgentStatus, ChangeType, CriterionStatus, ReviewVerdict
 from aipc.domain.models import (
     AgentResult,
+    CommandResult,
     CriterionResult,
     EvidenceReferences,
     FileChange,
@@ -2774,6 +2775,30 @@ def test_c16_mc_rr_05_e2e_pipeline_enforces_approved_contract_scope_and_phase(
     assert res_scope.pr_ready is False
     assert res_scope.blockers == ("CONTRACT_SCOPE_VIOLATION",)
 
+    # 4. Non-empty agent_result.commands omitting contract validation_commands fails closed
+    q_cmd = _setup_queue(tmp_path / "q_cmd", bundle.project_definition.project.id)
+    bad_cmd_ar = review_ctx.agent_result.model_copy(
+        update={"commands": [CommandResult(command="echo ok", exit_code=0)]}
+    )
+    bad_cmd_ctx = review_ctx.model_copy(update={"agent_result": bad_cmd_ar})
+    res_cmd = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=q_cmd,
+        worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=bad_cmd_ctx,
+        ),
+        worker_binding=worker_binding,
+        review_callback=pass_review,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert res_cmd.gate_verdict == "BLOCKED"
+    assert res_cmd.verification_receipt.passed is False
+    assert res_cmd.pr_ready is False
+    assert res_cmd.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+
 
 def test_c16_mc_rr_01_02_synthetic_audit_and_fake_python_and_winapi_blocked(
     tmp_path: Path,
@@ -2999,6 +3024,16 @@ def test_c16_mc_rr2_01_02_blocks_addaudithook_and_symlinked_python_in_isolated_a
             "except PermissionError:",
             "    _hook_blocked = True",
             "assert _hook_blocked",
+            "_tb_next_blocked = False",
+            "try:",
+            "    open(str(pathlib.Path(sys.executable).parent / 'aipc_tb_probe.txt'), 'w')",
+            "except PermissionError as _exc:",
+            "    _tb = _exc.__traceback__",
+            "    try:",
+            "        _ = _tb.tb_next.tb_frame",
+            "    except PermissionError:",
+            "        _tb_next_blocked = True",
+            "assert _tb_next_blocked",
             "scratch = pathlib.Path(os.environ['TMPDIR'])",
             "sym_py = scratch / ('python_sym.exe' if os.name == 'nt' else 'python_sym')",
             "try:",

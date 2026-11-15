@@ -877,6 +877,12 @@ def _is_pytest_skip_or_xfail_decorator(dec: ast.expr) -> bool:
     return False
 
 
+def _expr_contains_pytest_skip_or_xfail_mark(expr: ast.expr | None) -> bool:
+    if expr is None:
+        return False
+    return any(_is_pytest_skip_or_xfail_decorator(sub) for sub in ast.walk(expr))
+
+
 def _is_assertion_call(node: ast.Call) -> bool:
     func = node.func
     if isinstance(func, ast.Attribute):
@@ -1218,11 +1224,40 @@ def _inspect_function_assertions(
                 if final_term or ((body_term or else_term) and broad_seen and all(handlers_term)):
                     terminated = True
             elif isinstance(stmt, ast.Match):
-                case_terms = [_walk_stmts(c.body, stmt_reachable) for c in stmt.cases]
-                has_wildcard = any(
-                    isinstance(c.pattern, ast.MatchAs) and c.pattern.pattern is None
-                    for c in stmt.cases
-                )
+                _scan_expr(stmt.subject, stmt_reachable)
+                sub_const, sub_val = _eval_static_constant(stmt.subject)
+                case_terms: list[bool] = []
+                has_wildcard = False
+                matched_prior = False
+                for c in stmt.cases:
+                    if c.guard is not None:
+                        _scan_expr(c.guard, stmt_reachable and not matched_prior)
+                    is_wild = (
+                        isinstance(c.pattern, ast.MatchAs)
+                        and c.pattern.pattern is None
+                        and c.guard is None
+                    )
+                    c_reach = stmt_reachable and not matched_prior
+                    c_matched_all = is_wild
+                    if sub_const and not matched_prior and not is_wild:
+                        if isinstance(c.pattern, ast.MatchValue):
+                            p_ok, p_val = _eval_static_constant(c.pattern.value)
+                            if p_ok:
+                                if sub_val != p_val:
+                                    c_reach = False
+                                elif c.guard is None:
+                                    c_matched_all = True
+                        elif isinstance(c.pattern, ast.MatchSingleton):
+                            if sub_val is not c.pattern.value:
+                                c_reach = False
+                            elif c.guard is None:
+                                c_matched_all = True
+                    c_term = _walk_stmts(c.body, c_reach)
+                    if c_reach:
+                        case_terms.append(c_term)
+                    if c_matched_all:
+                        has_wildcard = True
+                        matched_prior = True
                 if case_terms and all(case_terms) and has_wildcard:
                     terminated = True
             else:
@@ -1347,6 +1382,27 @@ class TrustedAcceptanceHarnessValidator:
                         ),
                     )
                 )
+            if not skip_flagged and (
+                (
+                    isinstance(node, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)
+                    and _expr_contains_pytest_skip_or_xfail_mark(node.value)
+                )
+                or (
+                    isinstance(node, (ast.AnnAssign, ast.AugAssign))
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == "pytestmark"
+                    and _expr_contains_pytest_skip_or_xfail_mark(node.value)
+                )
+            ):
+                findings.append(
+                    RewardHackingFinding(
+                        rule_id="PYTEST_SKIP_OR_XFAIL_INJECTED",
+                        file_path=rel_path,
+                        description=f"Detected pytestmark skip/xfail assignment in '{rel_path}'",
+                    )
+                )
+                skip_flagged = True
             if not skip_flagged and isinstance(node, ast.Call):
                 if _is_pytest_skip_or_xfail_call(node):
                     findings.append(
@@ -1576,6 +1632,7 @@ class TrustedAcceptanceHarnessValidator:
                             "    _fr_f_code = _FrameType.f_code.__get__",
                             "    _fr_f_back = _FrameType.f_back.__get__",
                             "    _tb_frame_get = _TracebackType.tb_frame.__get__",
+                            "    _tb_next_get = _TracebackType.tb_next.__get__",
                             "    _gi_frame_get = _GeneratorType.gi_frame.__get__",
                             "    _cr_frame_get = _CoroutineType.cr_frame.__get__",
                             "    _ag_frame_get = _AsyncGeneratorType.ag_frame.__get__",
@@ -1960,8 +2017,8 @@ class TrustedAcceptanceHarnessValidator:
                             "                and not _in_getattr[0]",
                             "                and _b_len(args) >= 2",
                             "                and args[1] in (",
-                            "                    'tb_frame', 'f_back', 'f_locals',",
-                            "                    'f_globals', 'f_builtins',",
+                            "                    'tb_frame', 'tb_next', 'f_back', 'f_locals',",
+                            "                    'f_globals', 'f_builtins', 'f_code',",
                             "                    'gi_frame', 'cr_frame', 'ag_frame',",
                             "                )",
                             "            ):",
@@ -1980,7 +2037,15 @@ class TrustedAcceptanceHarnessValidator:
                             "                        if args[1] == 'f_back':",
                             "                            _f2 = _fr_f_back(_f)",
                             "                    elif _t is _TracebackType:",
-                            "                        _f = _tb_frame_get(args[0])",
+                            "                        if args[1] == 'tb_next':",
+                            "                            _tn = _tb_next_get(args[0])",
+                            "                            _f = (",
+                            "                                _tb_frame_get(_tn)",
+                            "                                if _tn is not None",
+                            "                                else None",
+                            "                            )",
+                            "                        else:",
+                            "                            _f = _tb_frame_get(args[0])",
                             "                    elif _t is _GeneratorType:",
                             "                        _f = _gi_frame_get(args[0])",
                             "                    elif _t is _CoroutineType:",
@@ -1994,25 +2059,33 @@ class TrustedAcceptanceHarnessValidator:
                             "                        else None",
                             "                    )",
                             "                    _cf_attr = _c_getframe(2)",
+                            "                    _cf_attr_file = (",
+                            "                        _fr_f_code(_cf_attr).co_filename",
+                            "                        if _cf_attr is not None",
+                            "                        else ''",
+                            "                    )",
                             "                finally:",
                             "                    _in_getattr[0] = False",
+                            "                _cf_is_trusted_hook = (",
+                            "                    not _is_under_ws(_cf_attr_file)",
+                            "                    and os.path.basename(_cf_attr_file)",
+                            "                    == 'sitecustomize.py'",
+                            "                )",
                             "                _vc_core = (_crit_audit_code, _vault_step_code)",
-                            "                if _c1 in _vc_core or _c2 in _vc_core:",
+                            "                if (",
+                            "                    (_c1 in _vc_core or _c2 in _vc_core)",
+                            "                    and not _cf_is_trusted_hook",
+                            "                ):",
                             "                    return (",
                             "                        'perm',",
                             "                        'vault traceback frame access prohibited',",
                             "                    )",
                             "                _vc_runner = (",
                             "                    _code_rt, _code_body, _code_proto, _code_reg,",
-                            "                    _code_sb_call, _code_sb_del,",
+                            "                    _code_rc, _code_sb_call, _code_sb_del,",
                             "                    _code_sm_get, _code_sm_call,",
                             "                )",
                             "                if _c1 in _vc_runner or _c2 in _vc_runner:",
-                            "                    _cf_attr_file = (",
-                            "                        _cf_attr.f_code.co_filename",
-                            "                        if _cf_attr is not None",
-                            "                        else ''",
-                            "                    )",
                             "                    _cf_attr_real = (",
                             "                        _normcase(_realpath(_cf_attr_file))",
                             "                        if _cf_attr_file",
@@ -2023,6 +2096,8 @@ class TrustedAcceptanceHarnessValidator:
                             "                        or _cf_attr_file == '<string>'",
                             "                        or (",
                             "                            not _cf_attr_file.startswith('<frozen ')",
+                            "                            and not _cf_is_trusted_hook",
+                            "                            and _cf_attr_file != _runner_file",
                             "                            and not _cf_attr_real.startswith(",
                             "                                _stdlib_dir + os.sep",
                             "                            )",
@@ -2045,31 +2120,42 @@ class TrustedAcceptanceHarnessValidator:
                             "                _in_getattr[0] = True",
                             "                try:",
                             "                    _cf = _c_getframe(2)",
+                            "                    _cf_file = _fr_f_code(_cf).co_filename",
+                            "                    _depth = (",
+                            "                        args[0]",
+                            "                        if (args and _b_isinstance(args[0], _b_int))",
+                            "                        else 0",
+                            "                    )",
+                            "                    try:",
+                            "                        _target_f = _c_getframe(_depth + 2)",
+                            "                    except _b_ValueError:",
+                            "                        _target_f = None",
+                            "                    _tf_co = (",
+                            "                        _fr_f_code(_target_f)",
+                            "                        if _target_f is not None",
+                            "                        else None",
+                            "                    )",
                             "                finally:",
                             "                    _in_getattr[0] = False",
-                            "                _cf_file = _cf.f_code.co_filename",
                             "                _cf_real = os.path.normcase(",
                             "                    os.path.realpath(_cf_file)",
                             "                )",
-                            "                _tf_file = (",
-                            "                    _fr_f_code(args[0]).co_filename",
-                            "                    if (args and _b_type(args[0]) is _FrameType)",
-                            "                    else ''",
-                            "                )",
-                            "                if (",
-                            "                    _is_under_ws(_cf_file)",
-                            "                    or _cf_file == '<string>'",
-                            "                    or _tf_file == _runner_file",
-                            "                    or (",
-                            "                        not _cf_file.startswith('<frozen ')",
-                            "                        and not _cf_real.startswith(",
-                            "                            _stdlib_dir + os.sep",
-                            "                        )",
-                            "                        and not _cf_real.startswith(",
-                            "                            _site_dir + os.sep",
-                            "                        )",
-                            "                        and _cf_file != _runner_file",
+                            "                _cf_trusted = (",
+                            "                    not _is_under_ws(_cf_file)",
+                            "                    and _cf_file != '<string>'",
+                            "                    and (",
+                            "                        _cf_file.startswith('<frozen ')",
+                            "                        or _cf_real.startswith(_stdlib_dir + os.sep)",
+                            "                        or _cf_real.startswith(_site_dir + os.sep)",
+                            "                        or _cf_file == _runner_file",
+                            "                        or os.path.basename(_cf_file)",
+                            "                        == 'sitecustomize.py'",
                             "                    )",
+                            "                )",
+                            "                if not _cf_trusted or (",
+                            "                    os.path.basename(_cf_file) != 'sitecustomize.py'",
+                            "                    and _tf_co",
+                            "                    in (_crit_audit_code, _vault_step_code)",
                             "                ):",
                             "                    return ('perm', 'introspection prohibited')",
                             "                return None",

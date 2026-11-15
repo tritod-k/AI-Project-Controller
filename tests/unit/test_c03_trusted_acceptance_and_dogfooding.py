@@ -4551,7 +4551,7 @@ def test_c16_mc_rr2_01_03_criterion_runner_blocks_addaudithook_and_runner_frame_
                 "",
                 "",
                 "def test_trusted_contract() -> None:",
-                "    b1 = b2 = b3 = b4 = False",
+                "    b1 = b2 = b3 = b4 = b5 = False",
                 "    try:",
                 "        sys.addaudithook(lambda _ev, _args: None)",
                 "    except PermissionError:",
@@ -4576,6 +4576,14 @@ def test_c16_mc_rr2_01_03_criterion_runner_blocks_addaudithook_and_runner_frame_
                 "        except PermissionError:",
                 "            b4 = True",
                 "    assert b4",
+                "    try:",
+                "        sys._getframe(0)",
+                "    except PermissionError as e_hook:",
+                "        try:",
+                "            _ = e_hook.__traceback__.tb_next.tb_frame",
+                "        except PermissionError:",
+                "            b5 = True",
+                "    assert b5",
             ]
         ),
         encoding="utf-8",
@@ -4605,3 +4613,36 @@ def test_c16_mc_rr2_01_03_criterion_runner_blocks_addaudithook_and_runner_frame_
     )
     assert len(exec_receipts) == 1
     assert exec_receipts[0].passed is True
+    validator = TrustedAcceptanceHarnessValidator()
+    for skip_src in (
+        (
+            "import os\nimport pytest\n\n"
+            "@pytest.mark.skipif(os.getenv('CI') is None, reason='skip')\n"
+            "def test_s():\n    assert True\n"
+        ),
+        (
+            "import pytest\n\n"
+            "@pytest.mark.skipif(condition=True, reason='skip')\n"
+            "def test_s():\n    assert True\n"
+        ),
+        (
+            "import os\nimport pytest\n\n"
+            "pytestmark = pytest.mark.skipif(os.getenv('CI') is None, reason='skip')\n"
+            "def test_s():\n    assert True\n"
+        ),
+    ):
+        findings = validator.inspect_python_test_source("tests/unit/test_skip.py", skip_src)
+        assert any("PYTEST_SKIP_OR_XFAIL_INJECTED" in str(f) for f in findings), findings
+    match_src = (
+        "def test_match_dead():\n"
+        "    match 1:\n"
+        "        case 1:\n"
+        "            return\n"
+        "        case 2:\n"
+        "            assert 1 + 1 == 2\n"
+    )
+    match_findings = validator.inspect_python_test_source(
+        "tests/unit/test_match_dead.py", match_src
+    )
+    assert any("UNREACHABLE_ASSERTION" in str(f) for f in match_findings), match_findings
+    assert any("VACUOUS_TEST_WITHOUT_ASSERT" in str(f) for f in match_findings), match_findings

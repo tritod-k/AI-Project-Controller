@@ -1330,7 +1330,8 @@ def _write_isolated_python_guard(
         "        _hook_depth = [0]",
         "        _protected_codes = _b_set()",
         "        _frame_attrs = (",
-        "            'tb_frame', 'f_back', 'f_locals', 'gi_frame', 'cr_frame', 'ag_frame',",
+        "            'tb_frame', 'tb_next', 'f_back', 'f_locals', 'f_code',",
+        "            'gi_frame', 'cr_frame', 'ag_frame',",
         "        )",
         "        def _check_audit(event, args):",
         "            if event == 'sys.addaudithook':",
@@ -3103,10 +3104,18 @@ class MilestoneCEndToEndPipeline:
             req_cmds = tuple(
                 tuple(shlex.split(c)) for c in queued_task.contract.validation_commands if c.strip()
             )
+            recorded_cmds = {
+                tuple(shlex.split(cmd.command))
+                for cmd in r_ctx.agent_result.commands
+                if cmd.command.strip()
+            }
             commands_ok = (
                 not req_cmds
                 or not r_ctx.agent_result.commands
-                or all(cmd.exit_code == 0 for cmd in r_ctx.agent_result.commands)
+                or (
+                    all(cmd.exit_code == 0 for cmd in r_ctx.agent_result.commands)
+                    and all(rc in recorded_cmds for rc in req_cmds)
+                )
             )
             contract_scope_ok = (
                 r_ctx.project.project.id == project_id
@@ -3168,6 +3177,38 @@ class MilestoneCEndToEndPipeline:
                 stable_root=stable_root,
                 required_commands=req_cmds,
             )
+            if (
+                req_cmds
+                and not r_ctx.agent_result.commands
+                and int(receipt.tool_versions.get("commands_count", "0")) < len(req_cmds)
+            ):
+                task_queue.record_attempt_outcome(
+                    task_id,
+                    candidate_sha=worker_outcome.candidate_sha,
+                    checkpoint_id=f"chk-{task_id}-verify-fail",
+                    evidence_root=resolved_evidence_root,
+                    review_id=f"rev-skip-{task_id}",
+                    review_verdict="BLOCKED",
+                    gate_verdict="BLOCKED",
+                    failure_reason="CONTRACT_SCOPE_VIOLATION",
+                )
+                return PRReadinessBundle(
+                    bundle_id=f"prb-{uuid4().hex[:12]}",
+                    project_id=project_id,
+                    milestone_id=milestone_id,
+                    phase_id=resolved_phase_id,
+                    task_id=task_id,
+                    candidate_sha=worker_outcome.candidate_sha,
+                    stack_type=bundle.profile.stack_type,
+                    verification_receipt=receipt.model_copy(
+                        update={"passed": False, "failure_reason": "CONTRACT_SCOPE_VIOLATION"}
+                    ),
+                    review_verdict=ReviewVerdict.BLOCKED,
+                    gate_verdict="BLOCKED",
+                    pr_ready=False,
+                    next_authorized_action="HALT_ON_BLOCKER",
+                    blockers=("CONTRACT_SCOPE_VIOLATION",),
+                )
 
             ws_has_aipc = (
                 Path(bundle.workspace_root).resolve() / "src" / "aipc" / "__init__.py"
