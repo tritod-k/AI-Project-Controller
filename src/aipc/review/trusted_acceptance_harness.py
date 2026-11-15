@@ -7,6 +7,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -438,6 +439,38 @@ def _retained_exec_record_filename(
     return f"exec_{criterion_id}_{phase_id}_{task_id}_{attempt}_{candidate_sha[:12]}.json"
 
 
+_CONTROLLER_EXECUTION_HMAC_KEY: bytes = os.urandom(32)
+
+
+def _compute_execution_record_mac(
+    manifest: TrustedHarnessManifest,
+    receipt: CriterionExecutionReceipt,
+) -> str:
+    """Compute controller-held HMAC-SHA256 over a CriterionExecutionReceipt."""
+    norm_test_file = _normalize_rel_path(receipt.test_node_id.split("::")[0])
+    payload = (
+        manifest.manifest_id,
+        manifest.manifest_digest,
+        receipt.criterion_id,
+        receipt.candidate_sha,
+        receipt.test_node_id,
+        manifest.pinned_file_sha256.get(norm_test_file, ""),
+        bool(receipt.passed),
+        int(receipt.exit_code),
+        receipt.log_sha256,
+        receipt.phase_id,
+        receipt.task_id,
+        receipt.attempt,
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hmac.new(_CONTROLLER_EXECUTION_HMAC_KEY, encoded, hashlib.sha256).hexdigest()
+
+
 def record_trusted_criterion_execution(
     manifest: TrustedHarnessManifest,
     *,
@@ -486,6 +519,7 @@ def record_trusted_criterion_execution(
     payload = {
         "receipt": receipt.model_dump(mode="json"),
         "execution_log": execution_log,
+        "controller_mac": _compute_execution_record_mac(manifest, receipt),
     }
     assert_no_secrets(payload)
     record_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1194,6 +1228,19 @@ class TrustedAcceptanceHarnessValidator:
             test_path = (workspace_root / norm_test_file).resolve()
             if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
                 raise ValueError(f"Test file not found for criterion '{cid}': '{norm_test_file}'")
+            if (
+                norm_test_file not in manifest.pinned_file_sha256
+                or not any(
+                    fnmatch.fnmatchcase(norm_test_file, glob_pat)
+                    for glob_pat in manifest.protected_harness_globs
+                )
+                or hashlib.sha256(test_path.read_bytes()).hexdigest()
+                != manifest.pinned_file_sha256[norm_test_file]
+            ):
+                raise ValueError(
+                    f"{TRUSTED_HARNESS_TAMPER_DETECTED}: criterion test file "
+                    f"'{norm_test_file}' must be pinned in manifest"
+                )
             source = test_path.read_text(encoding="utf-8")
             if not _test_function_exists_in_source(source, func_name):
                 raise ValueError(
@@ -1846,12 +1893,12 @@ class TrustedAcceptanceHarnessValidator:
                 )
                 tamper_detected = True
 
+        declared_changed_files = {_normalize_rel_path(fc.path) for fc in changed_files}
         if manifest.pre_workspace_snapshot:
             current_snap = _snapshot_workspace_files(workspace_root)
-            declared_set = {_normalize_rel_path(fc.path) for fc in changed_files}
             for rel_path, cur_digest in current_snap.items():
                 prev_digest = manifest.pre_workspace_snapshot.get(rel_path)
-                if prev_digest != cur_digest and rel_path not in declared_set:
+                if prev_digest != cur_digest and rel_path not in declared_changed_files:
                     findings.append(
                         RewardHackingFinding(
                             rule_id="UNDECLARED_WORKSPACE_MODIFICATION",
@@ -1864,7 +1911,7 @@ class TrustedAcceptanceHarnessValidator:
                     )
                     reward_hacking_detected = True
             for rel_path in manifest.pre_workspace_snapshot:
-                if rel_path not in current_snap and rel_path not in declared_set:
+                if rel_path not in current_snap and rel_path not in declared_changed_files:
                     findings.append(
                         RewardHackingFinding(
                             rule_id="UNDECLARED_WORKSPACE_MODIFICATION",
@@ -1939,32 +1986,7 @@ class TrustedAcceptanceHarnessValidator:
                 )
                 reward_hacking_detected = True
 
-            def _parse_summary_receipts(summary: str) -> list[CriterionExecutionReceipt]:
-                stripped = summary.strip()
-                if not stripped or stripped[0] not in ("{", "["):
-                    return []
-                try:
-                    parsed = json.loads(stripped)
-                except ValueError:
-                    return []
-                raw_items: object = (
-                    parsed.get("criterion_execution_receipts")
-                    if isinstance(parsed, dict)
-                    else parsed
-                )
-                if not isinstance(raw_items, list):
-                    return []
-                out: list[CriterionExecutionReceipt] = []
-                for item in raw_items:
-                    try:
-                        out.append(CriterionExecutionReceipt.model_validate(item))
-                    except ValueError:
-                        continue
-                return out
-
             all_exec_receipts = list(criterion_execution_receipts)
-            if verification_receipt is not None:
-                all_exec_receipts.extend(_parse_summary_receipts(verification_receipt.summary))
 
             failed_receipt_cids = {
                 rec.criterion_id
@@ -1985,10 +2007,21 @@ class TrustedAcceptanceHarnessValidator:
                     Path(norm_test_file).is_absolute()
                     or not norm_test_file.startswith("tests/")
                     or not norm_test_file.endswith(".py")
+                    or norm_test_file not in manifest.pinned_file_sha256
+                    or not any(
+                        fnmatch.fnmatchcase(norm_test_file, glob_pat)
+                        for glob_pat in manifest.protected_harness_globs
+                    )
+                    or norm_test_file in declared_changed_files
                 ):
                     return None
                 test_path = (workspace_root / norm_test_file).resolve()
                 if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
+                    return None
+                if (
+                    hashlib.sha256(test_path.read_bytes()).hexdigest()
+                    != manifest.pinned_file_sha256[norm_test_file]
+                ):
                     return None
                 source = test_path.read_text(encoding="utf-8")
                 if not _test_function_exists_in_source(source, func_name):
@@ -2045,40 +2078,51 @@ class TrustedAcceptanceHarnessValidator:
                     return None
                 retained_receipt = retained.get("receipt")
                 retained_log = retained.get("execution_log")
-                if not isinstance(retained_receipt, dict) or not isinstance(retained_log, str):
+                controller_mac = retained.get("controller_mac")
+                if (
+                    not isinstance(retained_receipt, dict)
+                    or not isinstance(retained_log, str)
+                    or not isinstance(controller_mac, str)
+                    or not controller_mac.strip()
+                ):
+                    return None
+                try:
+                    retained_rec = CriterionExecutionReceipt.model_validate(retained_receipt)
+                except ValueError:
+                    return None
+                expected_mac = _compute_execution_record_mac(manifest, retained_rec)
+                if not hmac.compare_digest(controller_mac, expected_mac):
                     return None
                 retained_log_sha = hashlib.sha256(retained_log.encode("utf-8")).hexdigest()
-                for exec_rec in all_exec_receipts:
-                    if (
-                        exec_rec.criterion_id != cid
-                        or exec_rec.candidate_sha != candidate_sha
-                        or exec_rec.manifest_digest != manifest.manifest_digest
-                        or not exec_rec.passed
-                        or exec_rec.exit_code != 0
-                        or exec_rec.log_sha256 is None
-                        or exec_rec.phase_id is None
-                        or not exec_rec.phase_id.strip()
-                        or exec_rec.phase_id != review_context.task.phase_id
-                        or exec_rec.task_id is None
-                        or not exec_rec.task_id.strip()
-                        or exec_rec.task_id != task_id
-                        or exec_rec.task_id != review_context.task.task_id
-                        or exec_rec.attempt is None
-                        or exec_rec.attempt != review_context.task.attempt
-                    ):
-                        continue
-                    norm_test_file = _verify_test_node(exec_rec.test_node_id)
-                    if norm_test_file is None:
-                        continue
-                    if (
-                        retained_receipt != exec_rec.model_dump(mode="json")
-                        or retained_log_sha != exec_rec.log_sha256
-                        or exec_rec.test_node_id not in retained_log
-                        or "PASSED" not in retained_log
-                    ):
-                        continue
-                    return exec_rec, norm_test_file
-                return None
+                if retained_rec.log_sha256 is None or retained_log_sha != retained_rec.log_sha256:
+                    return None
+                if (
+                    retained_rec.criterion_id != cid
+                    or retained_rec.candidate_sha != candidate_sha
+                    or retained_rec.manifest_digest != manifest.manifest_digest
+                    or retained_rec.passed is not True
+                    or retained_rec.exit_code != 0
+                    or retained_rec.phase_id is None
+                    or not retained_rec.phase_id.strip()
+                    or retained_rec.phase_id != review_context.task.phase_id
+                    or retained_rec.task_id is None
+                    or not retained_rec.task_id.strip()
+                    or retained_rec.task_id != task_id
+                    or retained_rec.task_id != review_context.task.task_id
+                    or retained_rec.attempt is None
+                    or retained_rec.attempt != review_context.task.attempt
+                ):
+                    return None
+                norm_test_file = _verify_test_node(retained_rec.test_node_id)
+                if norm_test_file is None:
+                    return None
+                cid_exec_receipts = [rec for rec in all_exec_receipts if rec.criterion_id == cid]
+                if cid_exec_receipts:
+                    if any(not rec.passed or rec.exit_code != 0 for rec in cid_exec_receipts):
+                        return None
+                    if not any(rec == retained_rec for rec in cid_exec_receipts):
+                        return None
+                return retained_rec, norm_test_file
 
             def _is_verified_context_artifact_for_criterion(
                 ev: str,

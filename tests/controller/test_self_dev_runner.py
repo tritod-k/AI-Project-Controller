@@ -1119,3 +1119,187 @@ def test_container_child_verify_ctrlplugin_compat_and_smap_retarget_rejection(
     assert tb_proc.returncode != 0
     assert "AIPC_CONTAINER_ORIGIN_" not in tb_proc.stdout
     assert "EXPECTED_TEST_FAILURE_AFTER_TB_CHECK" in (tb_proc.stdout + tb_proc.stderr)
+
+
+def test_isolated_subprocess_blocks_builtin_isinstance_mutation_and_native_open(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    ext_sentinel = tmp_path / "external_sentinel.txt"
+    (candidate_root / "tests" / "test_isinstance_native_open.py").write_text(
+        "\n".join(
+            [
+                "import builtins, os, pathlib, pytest",
+                "def test_isinstance_mutation_and_native_open_blocked():",
+                "    orig_isinstance = builtins.isinstance",
+                "    builtins.isinstance = (",
+                "        lambda obj, cls: False if cls is int else orig_isinstance(obj, cls)",
+                "    )",
+                "    try:",
+                "        nat = __import__('nt' if os.name == 'nt' else 'posix')",
+                f"        target = {str(ext_sentinel)!r}",
+                "        with pytest.raises(PermissionError):",
+                "            fd = nat.open(target, os.O_WRONLY | os.O_CREAT, 0o600)",
+                "            nat.close(fd)",
+                "        with pytest.raises(PermissionError):",
+                "            with open(target, 'w', encoding='utf-8') as fh:",
+                "                fh.write('pwned')",
+                "        assert not pathlib.Path(target).exists()",
+                "    finally:",
+                "        builtins.isinstance = orig_isinstance",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    runner = SafeSelfDevelopmentRunner(cfg)
+    receipt = runner.run_candidate_verification(
+        pytest_targets=("tests/test_isinstance_native_open.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0
+    assert not ext_sentinel.exists()
+
+
+def test_container_verification_fails_closed_on_bypass_and_forged_origin_exit_zero(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    init_sha = hashlib.sha256(
+        (candidate_root / "src" / "aipc" / "__init__.py").read_bytes()
+    ).hexdigest()
+    captured: dict[str, str] = {}
+
+    def capture_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        probe_dir = Path("")
+        ctrl_out = Path("")
+        for item in argv:
+            if item.endswith(":/aipc_probe:ro"):
+                probe_dir = Path(item[: -len(":/aipc_probe:ro")])
+            elif item.endswith(":/aipc_ctrl_out:rw"):
+                ctrl_out = Path(item[: -len(":/aipc_ctrl_out:rw")])
+        captured["child"] = (probe_dir / "child_verify.py").read_text(encoding="utf-8")
+        captured["parent"] = (probe_dir / "run_verify.py").read_text(encoding="utf-8")
+        captured["nonce"] = (ctrl_out / "nonce.json").read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="capture")
+
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="container",
+    )
+    SafeSelfDevelopmentRunner(cfg, subprocess_runner=capture_runner).run_candidate_verification(
+        pytest_targets=("tests/test_candidate_smoke.py",),
+    )
+    assert "child" in captured and "parent" in captured
+    m_o = re.search(r"AIPC_CONTAINER_ORIGIN_([0-9a-f]+):", captured["parent"])
+    m_d = re.search(r"AIPC_CONTAINER_DONE_([0-9a-f]+):0", captured["parent"])
+    assert m_o and m_d
+
+    exec_probe = tmp_path / "exec_probe"
+    exec_ctrl = tmp_path / "exec_ctrl"
+    exec_probe.mkdir()
+    exec_ctrl.mkdir()
+    (exec_ctrl / "nonce.json").write_text(captured["nonce"], encoding="utf-8")
+
+    child_src = (
+        captured["child"]
+        .replace("/aipc_probe", exec_probe.as_posix())
+        .replace("/aipc_ctrl_out", exec_ctrl.as_posix())
+    )
+    parent_src = (
+        captured["parent"]
+        .replace("/aipc_probe", exec_probe.as_posix())
+        .replace("/aipc_ctrl_out", exec_ctrl.as_posix())
+        .replace("'-I', '-S', '-B'", "'-B'")
+    )
+    child_file = exec_probe / "child_verify.py"
+    parent_file = exec_probe / "run_verify.py"
+    child_file.write_text(child_src, encoding="utf-8")
+    parent_file.write_text(parent_src, encoding="utf-8")
+
+    forged_payload = json.dumps(
+        {
+            "file": "/workspace/src/aipc/__init__.py",
+            "sha256": init_sha,
+            "path": ["/workspace/src"],
+        }
+    )
+    forged_line = f"{m_o.group(0)}{forged_payload}\\n".encode()
+    bypass_test = candidate_root / "tests" / "test_container_bypass_attempts.py"
+    bypass_test.write_text(
+        "\n".join(
+            [
+                "import os, pytest, subprocess, sys",
+                "def test_container_blocks_descendant_and_native_exit():",
+                "    with pytest.raises(PermissionError):",
+                "        subprocess.Popen([sys.executable, '-c', 'pass'])",
+                "    with pytest.raises(PermissionError):",
+                f"        open({str(child_file)!r}, 'r', encoding='utf-8')",
+                "    nat = __import__('nt' if os.name == 'nt' else 'posix')",
+                f"    os.write(1, {forged_line!r})",
+                "    with pytest.raises(PermissionError):",
+                "        nat._exit(0)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    sanitized_env = build_sanitized_child_env({**os.environ, "OPENAI_API_KEY": SYNTHETIC_API_KEY})
+    assert_child_env_isolated(sanitized_env)
+    proc = subprocess.run(
+        [sys.executable, "-B", str(parent_file), str(bypass_test)],
+        cwd=str(candidate_root),
+        env=sanitized_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert not (exec_ctrl / "receipt.json").exists()
+    assert not (exec_ctrl / "child_seal.json").exists()
+    assert m_d.group(0) not in proc.stdout
+
+    # Even if a compromised child emits forged AIPC_CONTAINER_ORIGIN_ on fd 1 and exits 0,
+    # run_verify.py must still fail closed without child_seal.json.
+    (exec_ctrl / "nonce.json").write_text(captured["nonce"], encoding="utf-8")
+    child_file.write_text(
+        "\n".join(
+            [
+                "import os",
+                f"os.write(1, {forged_line!r})",
+                "os._exit(0)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    forged_proc = subprocess.run(
+        [sys.executable, "-B", str(parent_file), str(bypass_test)],
+        cwd=str(candidate_root),
+        env=sanitized_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert forged_proc.returncode != 0
+    assert not (exec_ctrl / "receipt.json").exists()
+    assert m_d.group(0) not in forged_proc.stdout

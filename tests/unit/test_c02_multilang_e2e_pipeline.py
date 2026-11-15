@@ -2430,3 +2430,52 @@ def test_c02_isolated_subprocess_popen_closure_mutation_does_not_bypass_audit(
         command_override=(sys.executable, "-c", probe),
     )
     assert receipt.passed is True
+
+
+def test_isolated_subprocess_blocks_builtin_isinstance_mutation_and_native_open(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    ext_sentinel = tmp_path / "external_sentinel.txt"
+    verifier = MultiLanguageIsolatedVerifier()
+    probe = "\n".join(
+        [
+            "import builtins, os, pathlib",
+            "_orig_isinstance = builtins.isinstance",
+            "builtins.isinstance = (",
+            "    lambda obj, cls: False if cls is int else _orig_isinstance(obj, cls)",
+            ")",
+            "_nat = __import__('nt' if os.name == 'nt' else 'posix')",
+            f"_target = {str(ext_sentinel)!r}",
+            "_nat_blocked = False",
+            "try:",
+            "    _fd = _nat.open(_target, os.O_WRONLY | os.O_CREAT, 0o600)",
+            "    _nat.close(_fd)",
+            "except PermissionError:",
+            "    _nat_blocked = True",
+            "assert _nat_blocked",
+            "_open_blocked = False",
+            "try:",
+            "    with open(_target, 'w', encoding='utf-8') as _fh:",
+            "        _fh.write('pwned')",
+            "except PermissionError:",
+            "    _open_blocked = True",
+            "assert _open_blocked",
+            "assert not pathlib.Path(_target).exists()",
+            "print('1 passed')",
+        ]
+    )
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", probe),
+    )
+    assert receipt.passed is True
+    assert not ext_sentinel.exists()
