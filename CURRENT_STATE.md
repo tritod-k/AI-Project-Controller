@@ -168,11 +168,11 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
   - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `35 passed` (`15 passed` in `test_b01_subscription_worker_automation.py`).
   - `tests/unit/test_a04_planner_engine.py`, `tests/controller/test_task_queue.py`: `10 passed` (`8f99035`).
   - `tests/unit/test_c01_universal_project_profiles.py`: `17 passed` (`2df59c7`, `1115726`).
-  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `34 passed`.
-  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `84 passed`.
-  - `tests/controller/test_self_dev_runner.py`: `21 passed`.
-  - **Sixteenth-Pass Hardening (`MC-RR-01`–`MC-RR-07`)**: Verified across `milestone_c_pipeline.py`, `self_dev_runner.py`, `trusted_acceptance_harness.py`, and `subscription_worker.py` (non-reentrant C descriptor slot getters, canonical `_trusted_exes` + `_winapi.CreateProcess` blocking, `_SealedMeta` vault dispatch + immutable `_trusted_test_codes`/`_pinned_rw_co` + `_bound_fn.__code__` verification, C02 parent/child `_ctrl_key`/`_auth_nonce` separation, queue contract project/phase/workspace/path-scope and validation command binding, canonical `RecoveryManager.inspect`/`execute` recovery, and durable `.aipc_controller_keyring.json` `TrustedExecutionKeyring` with `key_id` rotation).
-  - **Full CI Regression**: `1261 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
+  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `35 passed` (`3b6c890`).
+  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `85 passed` (`3b6c890`).
+  - `tests/controller/test_self_dev_runner.py`: `22 passed` (`3b6c890`).
+  - **Sixteenth-Pass & Seventeenth-Pass Hardening (`MC-RR-01`–`MC-RR-07`, `MC-RR2-01`–`MC-RR2-05`, `6857b52`, `3b6c890`)**: Verified across `milestone_c_pipeline.py`, `self_dev_runner.py`, `trusted_acceptance_harness.py`, `subscription_worker.py`, and `recovery/manager.py` (non-reentrant C descriptor slot getters, `sys.addaudithook` blocking across all 5 audit hooks + sealed module wrappers, canonical `_trusted_exes` + ancestor symlink/reparse point rejection + `args[0]`/`executable` validation + `_winapi.CreateProcess` blocking, `_SealedMeta` vault dispatch + runner frame `_vc_runner` protection against test frame-walk, C02 parent/child `_ctrl_key`/`_auth_nonce` separation, queue contract project/phase/workspace/path-scope + actual git diff/porcelain verification + `validation_commands` execution binding, canonical `RecoveryManager.plan`/`inspect`/`execute` journal verification with pre-action `PLANNED` status and post-recovery review gate requirement, and durable `.aipc_controller_keyring.json` `TrustedExecutionKeyring` with `key_id` rotation).
+  - **Full CI Regression**: `1264 passed` across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites.
   - `ruff check` and `ruff format --check`: clean (`0 errors`, `319 files already formatted`).
   - Domain and project JSON schemas: verified (`Checked 4 canonical schemas`, `Checked 2 project schemas`).
 

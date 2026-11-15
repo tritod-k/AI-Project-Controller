@@ -7,13 +7,13 @@
 
 ## 2. Status
 - **Implementation & Full CI Regression Verification**: `PASS` (`READY FOR COMMANDER MERGE REVIEW`)
-  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`35 passed`** (`15 passed` in `test_b01_subscription_worker_automation.py`, `6857b52`)
+  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`35 passed`** (`15 passed` in `test_b01_subscription_worker_automation.py`, `3b6c890`)
   - **Planner & Persistent Queue Scope Authorization Tests** (`test_a04`, `test_task_queue`): **`10 passed`** (`8f99035`)
   - **Workstream C01** (`test_c01_universal_project_profiles.py`): **`17 passed`** (`2df59c7`, `1115726`)
-  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`34 passed`** (`6857b52`)
-  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`84 passed`** (`6857b52`)
-  - **Self-Development Runner** (`test_self_dev_runner.py`): **`21 passed`** (`6857b52`)
-  - **Full CI Regression**: **`1261 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites (`6857b52`)
+  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`35 passed`** (`3b6c890`)
+  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`85 passed`** (`3b6c890`)
+  - **Self-Development Runner** (`test_self_dev_runner.py`): **`22 passed`** (`3b6c890`)
+  - **Full CI Regression**: **`1264 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites (`3b6c890`)
   - **Static Analysis & Schemas**: `ruff check .` clean, `ruff format --check .` clean (`319 files already formatted`), domain and project JSON schemas verified
 
 ## 3. Summary
