@@ -866,3 +866,186 @@ def test_isolated_subprocess_seals_popen_and_blocks_scratch_pythonpath(
     )
     assert receipt.passed is True
     assert receipt.exit_code == 0
+
+
+def test_isolated_subprocess_popen_closure_mutation_does_not_bypass_audit(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    (candidate_root / "tests" / "test_popen_closure_unshared.py").write_text(
+        "\n".join(
+            [
+                "import gc, os, pathlib, subprocess, sys, pytest",
+                "def test_popen_closure_cells_unshared_from_audit_hook():",
+                "    scratch = pathlib.Path(os.environ['TMPDIR'])",
+                "    d = subprocess.Popen.__dict__['__init__']",
+                "    sealed_fns = None",
+                "    for cell in type(d).__init__.__closure__ or ():",
+                "        if isinstance(cell.cell_contents, dict) and id(d) in cell.cell_contents:",
+                "            sealed_fns = cell.cell_contents",
+                "            break",
+                "    assert sealed_fns is not None",
+                "    guarded = sealed_fns[id(d)]",
+                "    for cell in guarded.__closure__ or ():",
+                "        if isinstance(cell.cell_contents, str):",
+                "            cell.cell_contents = str(scratch)",
+                "    with pytest.raises(",
+                "        PermissionError,",
+                "        match='SUBPROCESS_SANDBOX_BYPASS_BLOCKED: untrusted child environment',",
+                "    ):",
+                "        subprocess.Popen([sys.executable, '-c', 'pass'])",
+                "    with pytest.raises(",
+                "        PermissionError,",
+                "        match='WORKSPACE_WRITE_ISOLATION_BLOCKED: gc introspection',",
+                "    ):",
+                "        gc.get_objects()",
+                "    with pytest.raises(",
+                "        PermissionError,",
+                "        match='WORKSPACE_WRITE_ISOLATION_BLOCKED: gc introspection',",
+                "    ):",
+                "        gc.get_referrers(d)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    runner = SafeSelfDevelopmentRunner(cfg)
+    receipt = runner.run_candidate_verification(
+        pytest_targets=("tests/test_popen_closure_unshared.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0
+
+
+def test_container_child_verify_ctrlplugin_compat_and_smap_retarget_rejection(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    init_sha = hashlib.sha256(
+        (candidate_root / "src" / "aipc" / "__init__.py").read_bytes()
+    ).hexdigest()
+    captured_child: list[str] = []
+
+    def capture_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        probe_dir = Path("")
+        ctrl_out = Path("")
+        for item in argv:
+            if item.endswith(":/aipc_probe:ro"):
+                probe_dir = Path(item[: -len(":/aipc_probe:ro")])
+            elif item.endswith(":/aipc_ctrl_out:rw"):
+                ctrl_out = Path(item[: -len(":/aipc_ctrl_out:rw")])
+        parent_script = (probe_dir / "run_verify.py").read_text(encoding="utf-8")
+        captured_child.append((probe_dir / "child_verify.py").read_text(encoding="utf-8"))
+        m_o = re.search(r"AIPC_CONTAINER_ORIGIN_([0-9a-f]+):", parent_script)
+        m_d = re.search(r"AIPC_CONTAINER_DONE_([0-9a-f]+):0", parent_script)
+        assert m_o and m_d
+        auth_nonce_b = json.loads((ctrl_out / "nonce.json").read_text(encoding="utf-8"))[
+            "auth_nonce"
+        ].encode("utf-8")
+        sig = hmac.new(
+            auth_nonce_b,
+            f"/workspace/src/aipc/__init__.py|{init_sha}|0".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        (ctrl_out / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "file": "/workspace/src/aipc/__init__.py",
+                    "sha256": init_sha,
+                    "path": ["/workspace/src"],
+                    "rc": 0,
+                    "hmac": sig,
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = json.dumps(
+            {
+                "file": "/workspace/src/aipc/__init__.py",
+                "sha256": init_sha,
+                "path": ["/workspace/src"],
+            }
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=(
+                f"AIPC_CONTAINER_ORIGIN_{m_o.group(1)}:{payload}\n"
+                f"1 passed\nAIPC_CONTAINER_DONE_{m_d.group(1)}:0\n"
+            ),
+            stderr="",
+        )
+
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="container",
+    )
+    SafeSelfDevelopmentRunner(cfg, subprocess_runner=capture_runner).run_candidate_verification(
+        pytest_targets=("tests/test_candidate_smoke.py",),
+    )
+    assert len(captured_child) == 1
+    child_script = captured_child[0]
+    assert "def pytest_runtest_logreport(self, report):" in child_script
+    assert "def pytest_sessionfinish(self, session, exitstatus):" in child_script
+    assert "pytest_runtest_logreport = _seal_method" not in child_script
+    assert "pytest_sessionfinish = _seal_method" not in child_script
+
+    child_path = tmp_path / "child_verify.py"
+    child_path.write_text(child_script, encoding="utf-8")
+
+    ok_test = candidate_root / "tests" / "test_pluggy_compat.py"
+    ok_test.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    ok_proc = subprocess.run(
+        [sys.executable, "-B", str(child_path), str(ok_test)],
+        cwd=str(candidate_root),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ok_proc.returncode == 0
+    assert "AIPC_CONTAINER_ORIGIN_" in ok_proc.stdout
+
+    retarget_test = candidate_root / "tests" / "test_smap_retarget.py"
+    retarget_test.write_text(
+        "\n".join(
+            [
+                "import _pytest.python",
+                "def test_retarget_smap_runtest():",
+                "    d = _pytest.python.Function.__dict__['runtest']",
+                "    for cell in type(d).__init__.__closure__ or ():",
+                "        if isinstance(cell.cell_contents, dict) and id(d) in cell.cell_contents:",
+                "            cell.cell_contents[id(d)] = lambda self_item: None",
+                "            break",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bad_proc = subprocess.run(
+        [sys.executable, "-B", str(child_path), str(retarget_test)],
+        cwd=str(candidate_root),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bad_proc.returncode != 0
+    assert "AIPC_CONTAINER_ORIGIN_" not in bad_proc.stdout
+    assert "IMPORT_ORIGIN_MISMATCH" in (bad_proc.stdout + bad_proc.stderr)

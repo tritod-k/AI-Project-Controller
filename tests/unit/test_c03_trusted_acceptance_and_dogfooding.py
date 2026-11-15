@@ -3300,6 +3300,103 @@ def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspecti
     assert ok_receipts[0].passed is True
     assert ok_receipts[0].exit_code == 0
 
+    dmap_fail_test = candidate_root / "tests" / "unit" / "test_dmap_retarget_fail.py"
+    dmap_fail_node = "tests/unit/test_dmap_retarget_fail.py::test_dmap_retarget_after_failure"
+    dmap_fail_test.write_text(
+        "\n".join(
+            [
+                "import _pytest.python",
+                "",
+                "def test_dmap_retarget_after_failure(request) -> None:",
+                "    def _retarget_dmap() -> None:",
+                "        d = _pytest.python.Function.__dict__['runtest']",
+                "        key = object.__getattribute__(d, '_k')",
+                "        dmap = None",
+                "        for cell in type(d).__call__.__closure__ or ():",
+                "            val = cell.cell_contents",
+                "            if isinstance(val, dict) and key in val:",
+                "                dmap = val",
+                "                break",
+                "        assert dmap is not None",
+                "        guarded = dmap[key]",
+                "        for cell in guarded.__closure__ or ():",
+                "            val = cell.cell_contents",
+                "            assert not isinstance(val, set)",
+                "            assert not (isinstance(val, str) and len(val) == 64)",
+                "        dmap[key] = lambda self_item: None",
+                "    request.addfinalizer(_retarget_dmap)",
+                "    actual = len(request.node.nodeid)",
+                "    assert actual == -1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dmap_fail_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": dmap_fail_node},
+        phase_id="c03",
+        task_id="task-c03-dmap-fail",
+        attempt=1,
+    )
+    assert len(dmap_fail_receipts) == 1
+    assert dmap_fail_receipts[0].passed is False
+    assert dmap_fail_receipts[0].exit_code != 0
+
+    dmap_pass_test = candidate_root / "tests" / "unit" / "test_dmap_retarget_pass.py"
+    dmap_pass_node = "tests/unit/test_dmap_retarget_pass.py::test_dmap_retarget_before_ok"
+    dmap_pass_test.write_text(
+        "\n".join(
+            [
+                "import _pytest.python",
+                "",
+                "def test_dmap_retarget_before_ok(request) -> None:",
+                "    d = _pytest.python.Function.__dict__['runtest']",
+                "    key = object.__getattribute__(d, '_k')",
+                "    for cell in type(d).__call__.__closure__ or ():",
+                "        val = cell.cell_contents",
+                "        if isinstance(val, dict) and key in val:",
+                "            guarded = val[key]",
+                "            for gcell in guarded.__closure__ or ():",
+                "                gval = gcell.cell_contents",
+                "                assert not isinstance(gval, set)",
+                "                assert not (isinstance(gval, str) and len(gval) == 64)",
+                "            val[key] = lambda self_item: None",
+                "            break",
+                "    assert len(request.node.nodeid) > 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dmap_pass_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": dmap_pass_node},
+        phase_id="c03",
+        task_id="task-c03-dmap-pass",
+        attempt=1,
+    )
+    assert len(dmap_pass_receipts) == 1
+    assert dmap_pass_receipts[0].passed is False
+    assert dmap_pass_receipts[0].exit_code != 0
+
+    pos_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": "tests/unit/test_feature.py::test_feature_behavior"},
+        phase_id="c03",
+        task_id="task-c03-dmap-pos",
+        attempt=1,
+    )
+    assert len(pos_receipts) == 1
+    assert pos_receipts[0].passed is True
+    assert pos_receipts[0].exit_code == 0
+
 
 def test_evaluate_candidate_rejects_missing_review_context_on_direct_evidence(
     tmp_path: Path,

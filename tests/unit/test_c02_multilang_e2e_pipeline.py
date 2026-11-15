@@ -2357,3 +2357,59 @@ def test_c02_isolated_subprocess_seals_popen_and_blocks_scratch_pythonpath(
         command_override=(sys.executable, "-c", probe),
     )
     assert receipt.passed is True
+
+
+def test_c02_isolated_subprocess_popen_closure_mutation_does_not_bypass_audit(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+    probe = "\n".join(
+        [
+            "import gc, os, pathlib, subprocess, sys",
+            "scratch = pathlib.Path(os.environ['TMPDIR'])",
+            "d = subprocess.Popen.__dict__['__init__']",
+            "sealed_fns = None",
+            "for cell in type(d).__init__.__closure__ or ():",
+            "    if isinstance(cell.cell_contents, dict) and id(d) in cell.cell_contents:",
+            "        sealed_fns = cell.cell_contents",
+            "        break",
+            "assert sealed_fns is not None",
+            "guarded = sealed_fns[id(d)]",
+            "for cell in guarded.__closure__ or ():",
+            "    if isinstance(cell.cell_contents, str):",
+            "        cell.cell_contents = str(scratch)",
+            "popen_blocked = False",
+            "try:",
+            "    subprocess.Popen([sys.executable, '-c', 'pass'])",
+            "except PermissionError as exc:",
+            "    popen_blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: untrusted child' in str(exc)",
+            "assert popen_blocked",
+            "gc_blocked = False",
+            "try:",
+            "    gc.get_objects()",
+            "except PermissionError as exc:",
+            "    gc_blocked = 'WORKSPACE_WRITE_ISOLATION_BLOCKED: gc introspection' in str(exc)",
+            "assert gc_blocked",
+            "ref_blocked = False",
+            "try:",
+            "    gc.get_referrers(d)",
+            "except PermissionError as exc:",
+            "    ref_blocked = 'WORKSPACE_WRITE_ISOLATION_BLOCKED: gc introspection' in str(exc)",
+            "assert ref_blocked",
+            "print('1 passed')",
+        ]
+    )
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", probe),
+    )
+    assert receipt.passed is True
