@@ -1855,7 +1855,7 @@ def test_b01_cli_worker_job_recovery_uses_canonical_recovery_manager(tmp_path: P
     from aipc.recovery.models import FailureClassification, RecoveryRequest
     from aipc.version.manager import VersionManager
 
-    def _setup_interrupted_repo(case_name: str):
+    def _setup_interrupted_repo(case_name: str, *, defer_review: bool = True):
         case_dir = tmp_path / case_name
         wt = case_dir / "candidate_wt"
         head_sha = _init_git_repo(wt)
@@ -1896,7 +1896,7 @@ def test_b01_cli_worker_job_recovery_uses_canonical_recovery_manager(tmp_path: P
         recovery_mgr = RecoveryManager(project, state_mgr, versions)
         recovery_mgr.register_attempt(pre.checkpoint_id, work.worktree_id)
         state_mgr.transition(project, "INTERRUPTED")
-        dec = recovery_mgr.inspect(
+        dec = recovery_mgr.plan(
             RecoveryRequest(
                 recovery_id="rec-01",
                 classification=FailureClassification.WORKER_INTERRUPTED,
@@ -1916,25 +1916,26 @@ def test_b01_cli_worker_job_recovery_uses_canonical_recovery_manager(tmp_path: P
         q.begin_dispatch("task-b01-1", worker_id="w1", provider="gemini")
         q.mark_interrupted("task-b01-1", reason="crash", quota_exhausted=False)
         job_path = case_dir / "job.json"
+        job_payload: dict[str, object] = {
+            "queue_path": str(q_path),
+            "recovery_decision_path": str(rec_path),
+            "project_definition_path": str(proj_path),
+            "project_state_path": str(state_path),
+            "worktree_root": str(wt_root),
+            "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
+            "worker_config": {
+                "candidate_worktree": str(wt),
+                "evidence_output_dir": str(case_dir / "evidence"),
+                "in_scope_paths": ["src/module.py"],
+                "validation_commands": [val_cmd],
+                "auto_commit_candidate": False,
+                "require_non_empty_diff": False,
+            },
+        }
+        if defer_review:
+            job_payload["defer_review_to_waiting_provider"] = True
         job_path.write_text(
-            json.dumps(
-                {
-                    "queue_path": str(q_path),
-                    "recovery_decision_path": str(rec_path),
-                    "project_definition_path": str(proj_path),
-                    "project_state_path": str(state_path),
-                    "worktree_root": str(wt_root),
-                    "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
-                    "worker_config": {
-                        "candidate_worktree": str(wt),
-                        "evidence_output_dir": str(case_dir / "evidence"),
-                        "in_scope_paths": ["src/module.py"],
-                        "validation_commands": [val_cmd],
-                        "auto_commit_candidate": False,
-                        "require_non_empty_diff": False,
-                    },
-                }
-            ),
+            json.dumps(job_payload),
             encoding="utf-8",
         )
         return case_dir, wt, head_sha, project, dec, rec_path, proj_path, q, job_path
@@ -1951,6 +1952,17 @@ def test_b01_cli_worker_job_recovery_uses_canonical_recovery_manager(tmp_path: P
             summary="Noop.",
         )
 
+    _, _, _, _, _, _, _, q_no_gate, job_no_gate = _setup_interrupted_repo(
+        "rec_missing_gate", defer_review=False
+    )
+    with pytest.raises(ControllerError):
+        run_cli_worker_job(
+            job_no_gate,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+    assert q_no_gate.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
     _, _, _, _, _, _, _, q_ok, job_ok = _setup_interrupted_repo("rec_valid")
     rc = run_cli_worker_job(
         job_ok,
@@ -1958,7 +1970,7 @@ def test_b01_cli_worker_job_recovery_uses_canonical_recovery_manager(tmp_path: P
         worker_invoker=noop_invoker,
     )
     assert rc == 0
-    assert q_ok.load().tasks[0].status == QueuedTaskStatus.RUNNING
+    assert q_ok.load().tasks[0].status == QueuedTaskStatus.WAITING_PROVIDER
 
     _, _, head_sha, _, dec_forged, rec_forged_path, _, q_forged, job_forged = (
         _setup_interrupted_repo("rec_forged")

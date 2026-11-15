@@ -741,27 +741,35 @@ def _write_isolated_python_guard(
         "                    'SUBPROCESS_SANDBOX_BYPASS_BLOCKED: shell=True prohibited'",
         "                )",
         "            _exe_kw = p_args[2] if _b_len(p_args) > 2 else kwargs.get('executable')",
-        "            if _b_isinstance(_exe_kw, _b_str) and _exe_kw in _BARE_PY:",
+        "            _allow_cmd_rewrite = (",
+        "                _exe_kw is None",
+        "                or (",
+        "                    _b_isinstance(_exe_kw, _b_str)",
+        "                    and (_exe_kw.lower() in _BARE_PY or _exe_kw == _p_exe)",
+        "                )",
+        "            )",
+        "            if _b_isinstance(_exe_kw, _b_str) and _exe_kw.lower() in _BARE_PY:",
         "                if _b_len(p_args) > 2:",
         "                    p_args = p_args[:2] + (_p_exe,) + p_args[3:]",
         "                else:",
         "                    kwargs['executable'] = _p_exe",
         "            _cmd_arg = p_args[0] if p_args else kwargs.get('args')",
         "            if (",
-        "                _b_isinstance(_cmd_arg, (_b_list, _b_tuple))",
+        "                _allow_cmd_rewrite",
+        "                and _b_isinstance(_cmd_arg, (_b_list, _b_tuple))",
         "                and _b_len(_cmd_arg) > 0",
         "                and _b_isinstance(_cmd_arg[0], _b_str)",
-        "                and _cmd_arg[0] in _BARE_PY",
+        "                and _cmd_arg[0].lower() in _BARE_PY",
         "            ):",
         "                _new_cmd = [_p_exe, *_cmd_arg[1:]]",
         "                if p_args:",
         "                    p_args = (_new_cmd,) + p_args[1:]",
         "                else:",
         "                    kwargs['args'] = _new_cmd",
-        "            elif _b_isinstance(_cmd_arg, _b_str):",
+        "            elif _allow_cmd_rewrite and _b_isinstance(_cmd_arg, _b_str):",
         "                _cs = _cmd_arg.lstrip()",
         "                _sp = _cs.split(None, 1)",
-        "                if _sp and _sp[0] in _BARE_PY:",
+        "                if _sp and _sp[0].lower() in _BARE_PY:",
         "                    _q_exe = f'\"{_p_exe}\"' if ' ' in _p_exe else _p_exe",
         "                    _new_cmd = _q_exe + (' ' + _sp[1] if _b_len(_sp) > 1 else '')",
         "                    if p_args:",
@@ -1121,20 +1129,185 @@ def _write_isolated_python_guard(
         "        _boot_norm = _canon_existing(_lex_norm(_a_boot))",
         "        _boot_prefix = _boot_norm if _boot_norm.endswith(_sep) else _boot_norm + _sep",
         "        _self_norm = _canon_existing(_lex_norm(_boot_norm + _sep + 'sitecustomize.py'))",
-        "        _trusted_py_exe = _canon_existing(_lex_norm(sys.executable))",
-        "        _trusted_base_exe = _canon_existing(",
-        "            _lex_norm(",
-        "                _b_getattr(sys, '_base_executable', sys.executable) or sys.executable",
-        "            )",
+        "        _trusted_base_raw = (",
+        "            _b_getattr(sys, '_base_executable', sys.executable) or sys.executable",
         "        )",
+        "        _trusted_py_lex = _c_normcase(_lex_norm(sys.executable))",
+        "        _trusted_base_lex = _c_normcase(_lex_norm(_trusted_base_raw))",
+        "        def _has_untrusted_component(_raw_p, _hops):",
+        "            if _hops >= 16:",
+        "                return True",
+        "            _s = _to_path_str(_raw_p)",
+        "            if '\\x00' in _s:",
+        "                return True",
+        "            _sl_chk = _s.lower() if _is_win else _s",
+        "            if _sl_chk in _nulls:",
+        "                return False",
+        "            if _is_win:",
+        "                _s = _s.replace('/', '\\\\')",
+        "                _sl = _s.lower()",
+        "                if _sl.startswith('\\\\\\\\?\\\\unc\\\\'):",
+        "                    _s = '\\\\\\\\' + _s[8:]",
+        "                elif _s.startswith('\\\\\\\\?\\\\') or _s.startswith('\\\\??\\\\'):",
+        "                    _s = _s[4:]",
+        "                if _s.startswith('\\\\\\\\'):",
+        "                    pass",
+        "                elif _b_len(_s) >= 2 and _s[1] == ':' and _s[0].isalpha():",
+        "                    if _b_len(_s) < 3 or _s[2] != '\\\\':",
+        "                        return True",
+        "                elif _s.startswith('\\\\'):",
+        "                    return True",
+        "                else:",
+        "                    _cwd = _c_getcwd()",
+        "                    _s = _cwd + ('' if _cwd.endswith('\\\\') else '\\\\') + _s",
+        "                if _s.startswith('\\\\\\\\'):",
+        "                    _parts = _s[2:].split('\\\\')",
+        "                    if _b_len(_parts) >= 2:",
+        "                        _cur = '\\\\\\\\' + _parts[0] + '\\\\' + _parts[1]",
+        "                        _tokens = _parts[2:]",
+        "                    else:",
+        "                        _cur = '\\\\\\\\' + (_parts[0] if _parts else '')",
+        "                        _tokens = []",
+        "                else:",
+        "                    _cur = _s[:3]",
+        "                    _tokens = _s[3:].split('\\\\')",
+        "            else:",
+        "                _s = _s.replace('\\\\', '/')",
+        "                if not _s.startswith('/'):",
+        "                    _cwd = _c_getcwd()",
+        "                    _s = _cwd + ('' if _cwd.endswith('/') else '/') + _s",
+        "                _cur = '/'",
+        "                _tokens = _s.split('/')",
+        "            _cur_norm = _c_normcase(_lex_norm(_cur))",
+        "            if (",
+        "                _in_tree(_cur_norm, _ws_norm, _ws_prefix)",
+        "                or _in_tree(_cur_norm, _tmp_norm, _tmp_prefix)",
+        "                or _in_tree(_cur_norm, _boot_norm, _boot_prefix)",
+        "            ):",
+        "                return True",
+        "            for _tok in _tokens:",
+        "                if not _tok or _tok == '.':",
+        "                    continue",
+        "                if _tok == '..':",
+        "                    try:",
+        "                        _st = _c_lstat(_cur)",
+        "                    except _b_OSError:",
+        "                        _st = None",
+        "                    if _st is not None and (",
+        "                        _s_islnk(_st.st_mode)",
+        "                        or _b_bool(",
+        "                            _b_getattr(_st, 'st_file_attributes', 0) & _reparse_flag",
+        "                        )",
+        "                    ):",
+        "                        try:",
+        "                            _cur = _resolve_link(_cur, _hops, False)",
+        "                        except _b_PermissionError:",
+        "                            return True",
+        "                        if _has_untrusted_component(_cur, _hops + 1):",
+        "                            return True",
+        "                    _cur = _parent_of(_cur)",
+        "                    continue",
+        "                _cur = _cur + _tok if _cur.endswith(_sep) else _cur + _sep + _tok",
+        "                _cur_norm = _c_normcase(_lex_norm(_cur))",
+        "                if (",
+        "                    _in_tree(_cur_norm, _ws_norm, _ws_prefix)",
+        "                    or _in_tree(_cur_norm, _tmp_norm, _tmp_prefix)",
+        "                    or _in_tree(_cur_norm, _boot_norm, _boot_prefix)",
+        "                ):",
+        "                    return True",
+        "                try:",
+        "                    _st = _c_lstat(_cur)",
+        "                except _b_OSError:",
+        "                    _st = None",
+        "                if _st is not None and (",
+        "                    _s_islnk(_st.st_mode)",
+        "                    or _b_bool(",
+        "                        _b_getattr(_st, 'st_file_attributes', 0) & _reparse_flag",
+        "                    )",
+        "                ):",
+        "                    _cur_prefix = (",
+        "                        _cur_norm if _cur_norm.endswith(_sep) else _cur_norm + _sep",
+        "                    )",
+        "                    if (",
+        "                        not _in_tree(_trusted_py_lex, _cur_norm, _cur_prefix)",
+        "                        and not _in_tree(_trusted_base_lex, _cur_norm, _cur_prefix)",
+        "                    ):",
+        "                        return True",
+        "                    _tgt = None",
+        "                    if _c_readlink is not None:",
+        "                        try:",
+        "                            _rl = _c_readlink(_cur)",
+        "                            _rl_s = _rl.replace('/', _sep).replace('\\\\', _sep)",
+        "                            if _is_win:",
+        "                                _is_abs = (",
+        "                                    _rl_s.startswith('\\\\\\\\')",
+        "                                    or _rl_s.startswith('\\\\??\\\\')",
+        "                                    or (",
+        "                                        _b_len(_rl_s) >= 3",
+        "                                        and _rl_s[0].isalpha()",
+        "                                        and _rl_s[1] == ':'",
+        "                                        and _rl_s[2] == '\\\\'",
+        "                                    )",
+        "                                )",
+        "                            else:",
+        "                                _is_abs = _rl_s.startswith('/')",
+        "                            if not _is_abs:",
+        "                                _par = _parent_of(_cur)",
+        "                                _psep = '' if _par.endswith(_sep) else _sep",
+        "                                _rl_s = _par + _psep + _rl_s",
+        "                            _tgt = _rl_s",
+        "                        except _b_OSError:",
+        "                            return True",
+        "                    elif _is_win and _c_final is not None:",
+        "                        try:",
+        "                            _tgt = _lex_norm(_c_final(_cur))",
+        "                        except _b_OSError:",
+        "                            return True",
+        "                    else:",
+        "                        return True",
+        "                    if _has_untrusted_component(_tgt, _hops + 1):",
+        "                        return True",
+        "                    try:",
+        "                        _cur = _canon_impl(_tgt, _hops + 1, False)",
+        "                    except _b_PermissionError:",
+        "                        return True",
+        "            return False",
+        "        _has_untrusted_component.__defaults__ = None",
+        "        _has_untrusted_component.__kwdefaults__ = None",
+        "        _trusted_py_exe = _canon_existing(_lex_norm(sys.executable))",
+        "        _trusted_base_exe = _canon_existing(_lex_norm(_trusted_base_raw))",
         "        _trusted_exes = (_trusted_py_exe, _trusted_base_exe)",
-        "        def _is_trusted_py(_np):",
-        "            return (",
-        "                _np in _trusted_exes",
-        "                and not _in_tree(_np, _ws_norm, _ws_prefix)",
-        "                and not _in_tree(_np, _tmp_norm, _tmp_prefix)",
-        "                and not _in_tree(_np, _boot_norm, _boot_prefix)",
-        "            )",
+        "        _trusted_all_lexes = (",
+        "            _trusted_py_lex,",
+        "            _trusted_base_lex,",
+        "            _trusted_py_exe,",
+        "            _trusted_base_exe,",
+        "        )",
+        "        _trusted_exes_ok = (",
+        "            not _has_untrusted_component(sys.executable, 0)",
+        "            and not _has_untrusted_component(_trusted_base_raw, 0)",
+        "        )",
+        "        def _is_trusted_py(_np, _raw_p):",
+        "            if not _trusted_exes_ok or _np not in _trusted_exes:",
+        "                return False",
+        "            if (",
+        "                _in_tree(_np, _ws_norm, _ws_prefix)",
+        "                or _in_tree(_np, _tmp_norm, _tmp_prefix)",
+        "                or _in_tree(_np, _boot_norm, _boot_prefix)",
+        "            ):",
+        "                return False",
+        "            if _raw_p is None:",
+        "                return False",
+        "            _raw_lex = _c_normcase(_lex_norm(_to_path_str(_raw_p)))",
+        "            if (",
+        "                _raw_lex not in _trusted_all_lexes",
+        "                or _in_tree(_raw_lex, _ws_norm, _ws_prefix)",
+        "                or _in_tree(_raw_lex, _tmp_norm, _tmp_prefix)",
+        "                or _in_tree(_raw_lex, _boot_norm, _boot_prefix)",
+        "                or _has_untrusted_component(_raw_p, 0)",
+        "            ):",
+        "                return False",
+        "            return True",
         "        _is_trusted_py.__defaults__ = None",
         "        _is_trusted_py.__kwdefaults__ = None",
         "        _BARE_PY = ('python', 'python3', 'python.exe', 'python3.exe')",
@@ -1160,6 +1333,8 @@ def _write_isolated_python_guard(
         "            'tb_frame', 'f_back', 'f_locals', 'gi_frame', 'cr_frame', 'ag_frame',",
         "        )",
         "        def _check_audit(event, args):",
+        "            if event == 'sys.addaudithook':",
+        "                return 'WORKSPACE_WRITE_ISOLATION_BLOCKED: sys.addaudithook prohibited'",
         "            if (",
         "                event == 'object.__getattr__'",
         "                and not _in_slot_read[0]",
@@ -1332,18 +1507,17 @@ def _write_isolated_python_guard(
         "                    _eff_s = _to_path_str(_eff_exe)",
         "                    if _sep in _eff_s or '/' in _eff_s:",
         "                        _eff_norm = _canon_existing(_eff_s)",
-        "                        _blocked = not _is_trusted_py(_eff_norm)",
+        "                        _blocked = not _is_trusted_py(_eff_norm, _eff_s)",
         "                    else:",
         "                        _blocked = True",
         "                    if not _blocked and _exe_target is not None:",
         "                        _a0_s = _to_path_str(_argv[0])",
-        "                        if _a0_s not in _BARE_PY:",
-        "                            if _sep in _a0_s or '/' in _a0_s:",
-        "                                _a0_norm = _canon_existing(_a0_s)",
-        "                                if not _is_trusted_py(_a0_norm):",
-        "                                    _blocked = True",
-        "                            else:",
+        "                        if _sep in _a0_s or '/' in _a0_s:",
+        "                            _a0_norm = _canon_existing(_a0_s)",
+        "                            if not _is_trusted_py(_a0_norm, _a0_s):",
         "                                _blocked = True",
+        "                        else:",
+        "                            _blocked = True",
         "                except _b_PermissionError as _exc:",
         "                    return _b_str(_exc)",
         "                if not _blocked:",
@@ -1478,6 +1652,8 @@ def _write_isolated_python_guard(
         "            _canon_impl.__code__,",
         "            _canon_existing.__code__,",
         "            _is_allowed_path.__code__,",
+        "            _is_trusted_py.__code__,",
+        "            _has_untrusted_component.__code__,",
         "            _in_tree.__code__,",
         "        ))",
         "        _check_audit.__defaults__ = None",
@@ -1485,6 +1661,16 @@ def _write_isolated_python_guard(
         "        _audit_hook.__defaults__ = None",
         "        _audit_hook.__kwdefaults__ = None",
         "        sys.addaudithook(_audit_hook)",
+        "        def _make_blocked_addaudithook(_pe):",
+        "            def _blocked_addaudithook(*_a, **_kw):",
+        "                raise _pe(",
+        "                    'WORKSPACE_WRITE_ISOLATION_BLOCKED: sys.addaudithook prohibited'",
+        "                )",
+        "            _blocked_addaudithook.__defaults__ = None",
+        "            _blocked_addaudithook.__kwdefaults__ = None",
+        "            return _blocked_addaudithook",
+        "        sys.addaudithook = _make_blocked_addaudithook(_b_PermissionError)",
+        "        del _make_blocked_addaudithook",
         "        del _audit_hook",
         "",
         "    _install_audit_hook(",
@@ -1763,6 +1949,7 @@ class MultiLanguageIsolatedVerifier:
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         verify_git_head: bool = True,
         stable_root: Path | None = None,
+        required_commands: tuple[tuple[str, ...], ...] = (),
     ) -> MultiLanguageVerificationReceipt:
         """Execute isolated verification on a project candidate and return an audited receipt."""
         assert_subscription_only_mode(
@@ -1794,6 +1981,13 @@ class MultiLanguageIsolatedVerifier:
                     raise ValueError("unsafe_host_opt_in is prohibited in verification commands")
             test_commands = [tuple(shlex.split(cmd)) for cmd in pack.test_commands]
 
+        if required_commands:
+            for rcmd in required_commands:
+                if rcmd not in test_commands and rcmd not in extra_commands:
+                    if any("pytest" in tok or "test" in tok for tok in rcmd):
+                        test_commands.append(rcmd)
+                    else:
+                        extra_commands.append(rcmd)
         commands_to_run = [*test_commands, *extra_commands]
         primary_command = commands_to_run[0]
 
@@ -2121,6 +2315,8 @@ class MultiLanguageIsolatedVerifier:
                             "        'ctypes.dlopen', 'ctypes.dlsym',",
                             "    )",
                             "    def _vault_step(ev, args):",
+                            "        if ev == 'sys.addaudithook':",
+                            "            return 'probe introspection prohibited'",
                             "        if (",
                             "            ev == 'object.__getattr__'",
                             "            and not _in_slot_read[0]",
@@ -2252,6 +2448,14 @@ class MultiLanguageIsolatedVerifier:
                             "        _top_code,",
                             "    ))",
                             "    sys.addaudithook(_audit)",
+                            "    def _make_blocked_addaudithook(_pe):",
+                            "        def _blocked_addaudithook(*_a, **_kw):",
+                            "            raise _pe('probe introspection prohibited')",
+                            "        _blocked_addaudithook.__defaults__ = None",
+                            "        _blocked_addaudithook.__kwdefaults__ = None",
+                            "        return _blocked_addaudithook",
+                            "    sys.addaudithook = _make_blocked_addaudithook(_b_PermissionError)",
+                            "    del _make_blocked_addaudithook",
                             "    return None",
                             "import sys",
                             "_install_c02_vault(sys._getframe(0).f_code)",
@@ -2585,19 +2789,18 @@ class MultiLanguageIsolatedVerifier:
             if test_exit == 0 and int(proc.returncode) != 0:
                 test_exit = int(proc.returncode)
 
-        tests_summary = TestSummary(
-            total=total_passed + total_failed + total_skipped,
-            passed=total_passed,
-            failed=total_failed,
-            skipped=total_skipped,
-        )
-
         extra_exit = 0
         for cmd in extra_commands:
             proc = run_fn(cmd)
             if int(proc.returncode) != 0:
                 extra_exit = int(proc.returncode)
                 break
+        tests_summary = TestSummary(
+            total=total_passed + total_failed + total_skipped,
+            passed=total_passed,
+            failed=total_failed,
+            skipped=total_skipped,
+        )
 
         post_digests = snapshot_workspace_digests(workspace_path)
         return pre_digests, post_digests, test_exit, tests_summary, extra_exit
@@ -2826,6 +3029,9 @@ class MilestoneCEndToEndPipeline:
                     "command_override conflicts with approved contract validation_commands"
                 )
 
+        if not queued_task.contract.in_scope:
+            raise ControllerError("Task contract in_scope must not be empty")
+
         task_queue.begin_dispatch(
             task_id,
             worker_id=worker_binding.binding_id,
@@ -2840,12 +3046,67 @@ class MilestoneCEndToEndPipeline:
                 *(fc.path for fc in r_ctx.agent_result.files_changed),
                 *(c.path for c in r_ctx.evidence.git.changes),
             ]
-            scope_paths_ok = all(
+            ws_path = Path(bundle.workspace_root).resolve()
+            actual_git_paths: list[str] = []
+            _status_proc = subprocess.run(
+                ["git", "status", "--porcelain"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(ws_path),
+            )
+            if _status_proc.returncode == 0:
+                for _raw_line in _status_proc.stdout.splitlines():
+                    if len(_raw_line) > 3:
+                        _p_str = _raw_line[3:].strip()
+                        if " -> " in _p_str:
+                            _p_str = _p_str.split(" -> ", 1)[1].strip()
+                        _p_str = _p_str.strip('"')
+                        if _p_str:
+                            actual_git_paths.append(_p_str)
+            _base_sha = r_ctx.evidence.git.baseline
+            _cand_sha = worker_outcome.candidate_sha
+            if (
+                isinstance(_base_sha, str)
+                and isinstance(_cand_sha, str)
+                and len(_base_sha) == 40
+                and len(_cand_sha) == 40
+                and all(c in "0123456789abcdefABCDEF" for c in _base_sha)
+                and all(c in "0123456789abcdefABCDEF" for c in _cand_sha)
+                and _base_sha != _cand_sha
+            ):
+                _diff_proc = subprocess.run(
+                    ["git", "diff", "--name-only", _base_sha, _cand_sha],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    cwd=str(ws_path),
+                )
+                if _diff_proc.returncode == 0:
+                    for _d_line in _diff_proc.stdout.splitlines():
+                        _d_str = _d_line.strip()
+                        if _d_str:
+                            actual_git_paths.append(_d_str)
+            _declared_norm = {p.replace("\\", "/") for p in changed_paths}
+            _all_git_declared = all(
+                p.replace("\\", "/") in _declared_norm for p in actual_git_paths
+            )
+            scope_paths_ok = _all_git_declared and all(
                 any(_matches_path_pattern(p, pat) for pat in queued_task.contract.in_scope)
                 and not any(
                     _matches_path_pattern(p, pat) for pat in queued_task.contract.out_of_scope
                 )
                 for p in changed_paths
+            )
+            req_cmds = tuple(
+                tuple(shlex.split(c)) for c in queued_task.contract.validation_commands if c.strip()
+            )
+            commands_ok = (
+                not req_cmds
+                or not r_ctx.agent_result.commands
+                or all(cmd.exit_code == 0 for cmd in r_ctx.agent_result.commands)
             )
             contract_scope_ok = (
                 r_ctx.project.project.id == project_id
@@ -2853,6 +3114,7 @@ class MilestoneCEndToEndPipeline:
                 and r_ctx.task.phase_id == resolved_phase_id
                 and Path(r_ctx.task.workspace).resolve() == Path(bundle.workspace_root).resolve()
                 and scope_paths_ok
+                and commands_ok
             )
             if not contract_scope_ok:
                 is_gas = bundle.profile.stack_type == "google_apps_script_offline_mock"
@@ -2904,6 +3166,7 @@ class MilestoneCEndToEndPipeline:
                 container_runtime_bin=container_runtime_bin,
                 runner=runner,
                 stable_root=stable_root,
+                required_commands=req_cmds,
             )
 
             ws_has_aipc = (

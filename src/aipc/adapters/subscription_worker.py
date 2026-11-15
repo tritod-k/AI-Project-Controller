@@ -1761,6 +1761,14 @@ def run_cli_worker_job(
                 ):
                     raise ControllerError(err_msg)
                 recovery_mgr = RecoveryManager(project, state_mgr, versions)
+                existing_rec = recovery_mgr.journal.load(dec.request.recovery_id)
+                if (
+                    existing_rec.decision != dec
+                    or existing_rec.project_id != snap.project_id
+                    or existing_rec.phase_id != rec.contract.phase_id
+                    or existing_rec.task_id not in (None, tid)
+                ):
+                    raise ControllerError(err_msg)
                 inspected = recovery_mgr.inspect(dec.request)
                 if (
                     dec.safe_to_automate is not True
@@ -1774,6 +1782,11 @@ def run_cli_worker_job(
                     raise ControllerError(err_msg)
             except (RecoveryError, VersionManagerError, StateError, ValueError, OSError) as exc:
                 raise ControllerError(err_msg) from exc
+            if not (
+                job.get("review_gate_decision_path")
+                or job.get("defer_review_to_waiting_provider", False)
+            ):
+                raise ControllerError(err_msg)
             q.resume_after_recovery(tid, dec)
         q.begin_dispatch(
             tid,

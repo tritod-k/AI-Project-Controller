@@ -2770,6 +2770,7 @@ def test_c16_mc_rr_05_e2e_pipeline_enforces_approved_contract_scope_and_phase(
         runner=ok_runner,
     )
     assert res_scope.gate_verdict == "BLOCKED"
+    assert res_scope.verification_receipt.passed is False
     assert res_scope.pr_ready is False
     assert res_scope.blockers == ("CONTRACT_SCOPE_VIOLATION",)
 
@@ -2957,3 +2958,140 @@ def test_c16_mc_rr_04_c02_probe_blocks_traceback_frame_access_and_separates_auth
     assert "probe introspection prohibited" in probe_results[0].stderr
     assert receipt.passed is False
     assert receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+
+def test_c16_mc_rr2_01_02_blocks_addaudithook_and_symlinked_python_in_isolated_and_container(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    ws_path = Path(bundle.workspace_root)
+    aipc_dir = ws_path / "src" / "aipc"
+    aipc_dir.mkdir(parents=True, exist_ok=True)
+    hostile_init = "\n".join(
+        [
+            "import sys",
+            "_blocked = False",
+            "try:",
+            "    sys.addaudithook(lambda _e, _a: None)",
+            "except PermissionError:",
+            "    _blocked = True",
+            "if not _blocked:",
+            "    raise RuntimeError('expected PermissionError for sys.addaudithook')",
+            "",
+        ]
+    )
+    (aipc_dir / "__init__.py").write_text(hostile_init, encoding="utf-8")
+    head_sha = _commit_all_clean(ws_path, "add addaudithook probe aipc")
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+
+    iso_probe = "\n".join(
+        [
+            "import os, pathlib, subprocess, sys",
+            "_hook_blocked = False",
+            "try:",
+            "    sys.addaudithook(lambda _e, _a: None)",
+            "except PermissionError:",
+            "    _hook_blocked = True",
+            "assert _hook_blocked",
+            "scratch = pathlib.Path(os.environ['TMPDIR'])",
+            "sym_py = scratch / ('python_sym.exe' if os.name == 'nt' else 'python_sym')",
+            "try:",
+            "    os.symlink(sys.executable, sym_py)",
+            "except OSError:",
+            "    sym_py = None",
+            "if sym_py is not None:",
+            "    _sym_blocked = False",
+            "    try:",
+            "        subprocess.Popen([str(sym_py), '-c', 'pass'])",
+            "    except PermissionError as _exc:",
+            "        _sym_blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(_exc)",
+            "    assert _sym_blocked",
+            "print('1 passed')",
+        ]
+    )
+    iso_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", iso_probe),
+    )
+    assert iso_receipt.passed is True
+
+    (aipc_dir / "__init__.py").write_text(
+        "\n".join(
+            [
+                "import sys",
+                "sys.addaudithook(lambda _e, _a: None)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    head_sha = _commit_all_clean(ws_path, "uncaught addaudithook in aipc")
+
+    ws = ws_path.resolve()
+    ws_init_posix = (ws / "src" / "aipc" / "__init__.py").as_posix()
+    ws_src_posix = (ws / "src").as_posix()
+    child_tmp_posix = (tmp_path / "aipc_c02_child_rr2.py").as_posix()
+
+    def _adapt_probe(raw_probe: str, out_dir_posix: str) -> str:
+        adapted = raw_probe.replace("/workspace/src/aipc/__init__.py", ws_init_posix)
+        adapted = adapted.replace("/workspace/src", ws_src_posix)
+        adapted = adapted.replace("/workspace-out", out_dir_posix)
+        adapted = adapted.replace("/tmp/.aipc_c02_child.py", child_tmp_posix)
+        adapted = adapted.replace("/out/.aipc_", f"{out_dir_posix}/.aipc_")
+        adapted = adapted.replace("'/out'", f"{out_dir_posix!r}")
+        if os.name == "nt":
+            adapted = adapted.replace(
+                "if not _s.startswith('/'):",
+                "if not _s.startswith('/') and not (len(_s) >= 2 and _s[1] == ':'):",
+            )
+            adapted = adapted.replace(
+                "return '/' + '/'.join(_stack)",
+                "return ('/' if _s.startswith('/') else '') + '/'.join(_stack)",
+            )
+        return adapted
+
+    def _extract_out_dir(argv: list[str]) -> str:
+        for tok in argv:
+            if isinstance(tok, str) and tok.endswith(":/workspace-out:rw"):
+                return Path(tok[: -len(":/workspace-out:rw")]).as_posix()
+        raise AssertionError("missing workspace-out mount in container argv")
+
+    probe_results: list[subprocess.CompletedProcess[str]] = []
+
+    def _runner(argv, **kwargs):
+        if len(argv) >= 2 and "_c02_probe" in str(argv[-1]):
+            out_dir_posix = _extract_out_dir(list(argv))
+            adapted = _adapt_probe(str(argv[-1]), out_dir_posix)
+            res = subprocess.run(
+                [sys.executable, "-I", "-S", "-B", "-c", adapted],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            probe_results.append(res)
+            return res
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    cont_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=_runner,
+    )
+    assert len(probe_results) == 1
+    assert probe_results[0].returncode != 0
+    assert "probe introspection prohibited" in probe_results[0].stderr
+    assert cont_receipt.passed is False
+    assert cont_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"

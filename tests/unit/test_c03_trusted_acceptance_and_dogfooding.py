@@ -4536,3 +4536,72 @@ def test_c16_mc_rr_07_durable_keyring_rotation_and_cross_process_restart_verific
     )
     assert eval_tampered.passed is False
     assert eval_tampered.rejection_code == REWARD_HACKING_DETECTED
+
+
+def test_c16_mc_rr2_01_03_criterion_runner_blocks_addaudithook_and_runner_frame_walk(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    trusted_test = candidate_root / "tests" / "trusted" / "test_contract.py"
+    trusted_test.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "import pytest",
+                "",
+                "",
+                "def test_trusted_contract() -> None:",
+                "    b1 = b2 = b3 = b4 = False",
+                "    try:",
+                "        sys.addaudithook(lambda _ev, _args: None)",
+                "    except PermissionError:",
+                "        b1 = True",
+                "    assert b1",
+                "    try:",
+                "        sys._getframe(0)",
+                "    except PermissionError:",
+                "        b2 = True",
+                "    assert b2",
+                "    try:",
+                "        sys._getframe(1)",
+                "    except PermissionError:",
+                "        b3 = True",
+                "    assert b3",
+                "    try:",
+                "        raise ValueError('boom')",
+                "    except ValueError as exc:",
+                "        tb = exc.__traceback__",
+                "        try:",
+                "            _ = tb.tb_frame.f_back",
+                "        except PermissionError:",
+                "            b4 = True",
+                "    assert b4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha = _init_git_repo(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=(
+            "src/aipc/review/gate.py",
+            "tests/trusted/test_contract.py",
+        ),
+        manifest_id="manifest-c16-mc-rr2-01-03",
+        required_criterion_ids=("AC-01",),
+        criterion_test_nodes={
+            "AC-01": "tests/trusted/test_contract.py::test_trusted_contract",
+        },
+    )
+    exec_receipts = TrustedAcceptanceHarnessValidator().execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        phase_id="c03",
+        task_id="task-c16-mc-rr2-01-03",
+        attempt=1,
+    )
+    assert len(exec_receipts) == 1
+    assert exec_receipts[0].passed is True

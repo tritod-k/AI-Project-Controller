@@ -1448,3 +1448,114 @@ def test_c16_mc_rr_03_container_sealed_descriptor_type_closure_and_body_immutabi
     )
     assert proc.returncode == 0
     assert "AIPC_CONTAINER_ORIGIN_" in proc.stdout
+
+
+def test_c16_mc_rr2_01_02_blocks_addaudithook_and_symlinked_python_in_isolated_and_container(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+
+    iso_test = candidate_root / "tests" / "test_c16_mc_rr2_iso.py"
+    iso_test.write_text(
+        "\n".join(
+            [
+                "import os, pathlib, pytest, subprocess, sys",
+                "def test_addaudithook_and_symlink_py_blocked():",
+                "    with pytest.raises(PermissionError):",
+                "        sys.addaudithook(lambda _e, _a: None)",
+                "    scratch = pathlib.Path(os.environ['TMPDIR'])",
+                "    sym_py = scratch / ('python_sym.exe' if os.name == 'nt' else 'python_sym')",
+                "    try:",
+                "        os.symlink(sys.executable, sym_py)",
+                "    except OSError:",
+                "        return",
+                "    with pytest.raises(",
+                "        PermissionError, match='SUBPROCESS_SANDBOX_BYPASS_BLOCKED'",
+                "    ):",
+                "        subprocess.Popen([str(sym_py), '-c', 'pass'])",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg_iso = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    receipt = SafeSelfDevelopmentRunner(cfg_iso).run_candidate_verification(
+        pytest_targets=("tests/test_c16_mc_rr2_iso.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0
+
+    captured: dict[str, str] = {}
+
+    def capture_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        probe_dir = Path("")
+        for item in argv:
+            if item.endswith(":/aipc_probe:ro"):
+                probe_dir = Path(item[: -len(":/aipc_probe:ro")])
+        captured["child"] = (probe_dir / "child_verify.py").read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="capture")
+
+    cfg_cont = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="container",
+    )
+    SafeSelfDevelopmentRunner(
+        cfg_cont, subprocess_runner=capture_runner
+    ).run_candidate_verification(
+        pytest_targets=("tests/test_candidate_smoke.py",),
+    )
+    assert "child" in captured
+
+    exec_probe = tmp_path / "exec_probe_rr2"
+    exec_ctrl = tmp_path / "exec_ctrl_rr2"
+    exec_probe.mkdir()
+    exec_ctrl.mkdir()
+    child_src = (
+        captured["child"]
+        .replace("/aipc_probe", exec_probe.as_posix())
+        .replace("/aipc_ctrl_out", exec_ctrl.as_posix())
+    )
+    child_file = exec_probe / "child_verify.py"
+    child_file.write_text(child_src, encoding="utf-8")
+
+    cont_test = candidate_root / "tests" / "test_c16_mc_rr2_cont.py"
+    cont_test.write_text(
+        "\n".join(
+            [
+                "import pytest, sys",
+                "def test_container_addaudithook_blocked():",
+                "    with pytest.raises(PermissionError):",
+                "        sys.addaudithook(lambda _e, _a: None)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    sanitized_env = build_sanitized_child_env(os.environ)
+    assert_child_env_isolated(sanitized_env)
+    proc = subprocess.run(
+        [sys.executable, "-B", str(child_file), str(cont_test)],
+        cwd=str(candidate_root),
+        env=sanitized_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert "AIPC_CONTAINER_ORIGIN_" in proc.stdout
