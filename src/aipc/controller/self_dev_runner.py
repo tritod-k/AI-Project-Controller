@@ -177,8 +177,23 @@ def _git_status_and_head(
     )
 
 
+_SHADOWED_BOOTSTRAP_MODULES = (
+    "pytest",
+    "socket",
+    "subprocess",
+    "tempfile",
+    "shutil",
+    "pathlib",
+    "os",
+    "io",
+    "stat",
+    "builtins",
+    "conftest",
+)
+
+
 def _assert_no_candidate_startup_hooks(workspace_root: Path) -> None:
-    """Fail closed if candidate worktree contains startup hooks or shadowed pytest."""
+    """Fail closed if candidate worktree contains startup hooks or shadowed bootstrap modules."""
     ws_resolved = Path(workspace_root).resolve()
     if not ws_resolved.exists():
         return
@@ -190,12 +205,13 @@ def _assert_no_candidate_startup_hooks(workspace_root: Path) -> None:
                 f"{IMPORT_ORIGIN_MISMATCH}: candidate contains prohibited startup hook {item}"
             )
     for base in (ws_resolved, ws_resolved / "src"):
-        py_mod = base / "pytest.py"
-        py_pkg = base / "pytest" / "__init__.py"
-        if py_mod.exists() or py_mod.is_symlink() or py_pkg.exists() or py_pkg.is_symlink():
-            raise ControllerError(
-                f"{IMPORT_ORIGIN_MISMATCH}: candidate shadows pytest under {base}"
-            )
+        for mod_name in _SHADOWED_BOOTSTRAP_MODULES:
+            py_mod = base / f"{mod_name}.py"
+            py_pkg = base / mod_name / "__init__.py"
+            if py_mod.exists() or py_mod.is_symlink() or py_pkg.exists() or py_pkg.is_symlink():
+                raise ControllerError(
+                    f"{IMPORT_ORIGIN_MISMATCH}: candidate shadows {mod_name} under {base}"
+                )
 
 
 def _write_candidate_isolation_bootstrap(
@@ -207,11 +223,28 @@ def _write_candidate_isolation_bootstrap(
     """Write a sitecustomize.py that prunes Stable paths and installs sandbox guards."""
     stable_str = str(Path(stable_root).resolve())
     cand_src_str = str(Path(candidate_src).resolve())
+    cand_root_str = str(Path(candidate_src).resolve().parent)
     nl = chr(10)
     script = nl.join(
         [
             "def _install_aipc_boot_guard():",
-            "    import os, socket, stat, subprocess, sys, tempfile",
+            "    import sys",
+            f"    _cand_pfx = {cand_root_str!r}.replace('\\\\', '/').rstrip('/').lower()",
+            "    sys.path[:] = [",
+            "        _e for _e in sys.path",
+            "        if _e and _e != '.'",
+            "        and not _e.replace('\\\\', '/').startswith('./')",
+            "        and not (",
+            "            _cand_pfx",
+            "            and (",
+            "                _e.replace('\\\\', '/').rstrip('/').lower() == _cand_pfx",
+            "                or _e.replace('\\\\', '/').rstrip('/').lower().startswith(",
+            "                    _cand_pfx + '/'",
+            "                )",
+            "            )",
+            "        )",
+            "    ]",
+            "    import os, socket, stat, subprocess, tempfile",
             "    if sys.flags.no_site or sys.flags.isolated or sys.flags.ignore_environment:",
             "        raise RuntimeError('ISOLATED_GUARD_DISABLED')",
             "    _is_win = (os.name == 'nt')",
@@ -515,7 +548,7 @@ def _write_candidate_isolation_bootstrap(
             "        except (OSError, PermissionError):",
             "            pass",
             "        _cleaned.append(_entry)",
-            "    sys.path[:] = [_cand_src_real] + _cleaned",
+            "    sys.path[:] = _cleaned",
             "    def _is_loopback_addr(_addr):",
             "        if isinstance(_addr, tuple) and len(_addr) >= 1:",
             "            return str(_addr[0]) in ('127.0.0.1', '::1', 'localhost', '')",
@@ -709,6 +742,7 @@ def _write_candidate_isolation_bootstrap(
             "    _aipc_boot_audit.__kwdefaults__ = None",
             "    sys.addaudithook(_aipc_boot_audit)",
             "    del _aipc_boot_audit",
+            "    sys.path.insert(0, _cand_src_real)",
             "_install_aipc_boot_guard()",
             "del _install_aipc_boot_guard",
             "",
@@ -758,7 +792,7 @@ def verify_candidate_import_origin(
                 stable_root=s_root,
                 candidate_src=c_src,
             )
-            pythonpath_val = os.pathsep.join([str(boot_path), str(c_src)])
+            pythonpath_val = str(boot_path)
         else:
             # Deliberately unpruned mode (used in tests to verify IMPORT_ORIGIN_MISMATCH detection)
             pythonpath_val = str(s_root / "src")
@@ -1072,33 +1106,62 @@ class SafeSelfDevelopmentRunner:
                 "    _f = pathlib.Path(aipc.__file__).resolve()",
                 "    _sha = hashlib.sha256(_f.read_bytes()).hexdigest()",
                 "    _orig_path = list(sys.path)",
+                "    import _pytest.config",
+                "    import _pytest.python",
+                "    _orig_runtest = _pytest.python.Function.runtest",
+                "    _fn_passed = set()",
+                "    _fn_failed = set()",
+                "    def _guarded_runtest(self_item):",
+                "        try:",
+                "            _orig_runtest(self_item)",
+                "        except BaseException:",
+                "            _fn_failed.add(self_item.nodeid)",
+                "            raise",
+                "        else:",
+                "            _fn_passed.add(self_item.nodeid)",
+                "    _pytest.python.Function.runtest = _guarded_runtest",
+                "    _st = {'ran': False, 'collected': 0, 'passed_calls': 0, 'failed_calls': 0}",
                 "    class _CtrlPlugin:",
-                "        def __init__(self):",
-                "            self.ran = False",
-                "            self.collected = 0",
-                "            self.passed_calls = 0",
-                "            self.failed_calls = 0",
+                "        __slots__ = ()",
                 "        def pytest_runtest_logreport(self, report):",
                 "            if report.when == 'call' and report.outcome == 'passed':",
-                "                self.passed_calls += 1",
+                "                _st['passed_calls'] += 1",
                 "            elif report.failed:",
-                "                self.failed_calls += 1",
+                "                _st['failed_calls'] += 1",
                 "        def pytest_sessionfinish(self, session, exitstatus):",
-                "            self.ran = True",
-                "            self.collected = getattr(session, 'testscollected', 0)",
+                "            _st['ran'] = True",
+                "            _st['collected'] = getattr(session, 'testscollected', 0)",
                 "    _plugin = _CtrlPlugin()",
+                "    _pm_cls = _pytest.config.PytestPluginManager",
+                "    _orig_get_plugins = _pm_cls.get_plugins",
+                "    _orig_list_name_plugin = _pm_cls.list_name_plugin",
+                "    def _guarded_get_plugins(pm_self):",
+                "        return {p for p in _orig_get_plugins(pm_self) if p is not _plugin}",
+                "    def _guarded_list_name_plugin(pm_self):",
+                "        return [",
+                "            (nm, pl) for nm, pl in _orig_list_name_plugin(pm_self)",
+                "            if pl is not _plugin",
+                "        ]",
+                "    _pm_cls.get_plugins = _guarded_get_plugins",
+                "    _pm_cls.list_name_plugin = _guarded_list_name_plugin",
                 "    try:",
-                "        _rc = _real_pytest_main(sys.argv[1:], plugins=[_plugin])",
+                "        _rc = _real_pytest_main(",
+                "            ['--noconftest', '-p', 'no:cacheprovider', *sys.argv[1:]],",
+                "            plugins=[_plugin],",
+                "        )",
                 "    except BaseException as exc:",
                 "        raise SystemExit(1) from exc",
                 "    if (",
                 "        sys.modules.get('pytest') is not _real_pytest_mod",
                 "        or getattr(pytest, 'main', None) is not _real_pytest_main",
-                "        or not _plugin.ran",
+                "        or _pytest.python.Function.runtest is not _guarded_runtest",
+                "        or not _st['ran']",
                 "        or (_rc == 0 and (",
-                "            _plugin.collected <= 0",
-                "            or _plugin.passed_calls <= 0",
-                "            or _plugin.failed_calls != 0",
+                "            _st['collected'] <= 0",
+                "            or _st['passed_calls'] <= 0",
+                "            or _st['failed_calls'] != 0",
+                "            or len(_fn_passed) == 0",
+                "            or len(_fn_failed) != 0",
                 "        ))",
                 "    ):",
                 "        raise SystemExit(",
@@ -1394,7 +1457,7 @@ class SafeSelfDevelopmentRunner:
                 argv,
                 base_env=parent_env,
                 extra_env={
-                    "PYTHONPATH": os.pathsep.join([str(boot_dir), str(candidate_src)]),
+                    "PYTHONPATH": str(boot_dir),
                     "PYTHONDONTWRITEBYTECODE": "1",
                 },
             )

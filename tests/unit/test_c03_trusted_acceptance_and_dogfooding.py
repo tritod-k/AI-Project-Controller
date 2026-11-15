@@ -1130,6 +1130,9 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
         passed=True,
         exit_code=0,
         execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
+        phase_id="c03",
+        task_id="task-c03-crit-valid",
+        attempt=1,
     )
     rec_ac02, _ = record_trusted_criterion_execution(
         manifest,
@@ -1139,17 +1142,28 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
         passed=True,
         exit_code=0,
         execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
+        phase_id="c03",
+        task_id="task-c03-crit-valid",
+        attempt=1,
     )
     exec_receipts = (rec_ac01, rec_ac02)
+    valid_changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    valid_tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    bound_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-crit-valid",
+        candidate_sha=_CANDIDATE_SHA,
+        workspace_root=candidate_root,
+        changed_files=valid_changed,
+        tests_summary=valid_tests_sum,
+    )
     eval_valid = validator.evaluate_candidate(
         manifest=manifest,
         workspace=candidate_root,
         task_id="task-c03-crit-valid",
         candidate_sha=_CANDIDATE_SHA,
-        changed_files=(
-            FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
-        ),
-        tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+        changed_files=valid_changed,
+        tests_summary=valid_tests_sum,
         criterion_results=(
             CriterionResult(
                 criterion_id="AC-01",
@@ -1165,6 +1179,7 @@ def test_required_criterion_unverified_fails_closed(tmp_path: Path) -> None:
             ),
         ),
         verification_receipt=receipt,
+        review_context=bound_ctx,
         criterion_execution_receipts=exec_receipts,
     )
     assert eval_valid.passed is True
@@ -2186,6 +2201,19 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
         passed=True,
         exit_code=0,
         execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
+        phase_id="c03",
+        task_id="task-c03-good-ev",
+        attempt=1,
+    )
+    good_changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    good_tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    bound_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-good-ev",
+        candidate_sha=_CANDIDATE_SHA,
+        workspace_root=candidate_root,
+        changed_files=good_changed,
+        tests_summary=good_tests_sum,
     )
     for good_ev in (
         f"receipt:{_CANDIDATE_SHA}:AC-01:{manifest.manifest_digest}",
@@ -2197,10 +2225,8 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
             workspace=candidate_root,
             task_id="task-c03-good-ev",
             candidate_sha=_CANDIDATE_SHA,
-            changed_files=(
-                FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),
-            ),
-            tests_summary=TestSummary(total=1, passed=1, failed=0, skipped=0),
+            changed_files=good_changed,
+            tests_summary=good_tests_sum,
             criterion_results=(
                 CriterionResult(
                     criterion_id="AC-01",
@@ -2210,6 +2236,7 @@ def test_criterion_evidence_requires_digest_bound_receipt_or_behavioral_test_fil
                 ),
             ),
             verification_receipt=receipt,
+            review_context=bound_ctx,
             criterion_execution_receipts=(exec_receipt,),
         )
         assert good_eval.passed is True
@@ -2619,6 +2646,9 @@ def test_review_context_artifact_misleading_prose_and_bad_digest_rejected(
         passed=True,
         exit_code=0,
         execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
+        phase_id="c03",
+        task_id="task-c03-art-schema",
+        attempt=1,
     )
     bound_json_bytes = json.dumps(
         {
@@ -2727,15 +2757,22 @@ def test_execute_and_record_criteria_and_dogfooding_production_caller(
         workspace=candidate_root,
         candidate_sha=cand_sha,
         criterion_test_nodes={"AC-01": test_node},
+        phase_id="c03",
+        task_id="task-c03-dogfood-prod",
+        attempt=1,
     )
     assert len(exec_receipts) == 1
     assert exec_receipts[0].criterion_id == "AC-01"
     assert exec_receipts[0].passed is True
     assert exec_receipts[0].exit_code == 0
     assert exec_receipts[0].log_sha256 is not None
+    assert exec_receipts[0].phase_id == "c03"
+    assert exec_receipts[0].task_id == "task-c03-dogfood-prod"
+    assert exec_receipts[0].attempt == 1
     assert manifest.trusted_manifest_path is not None
     record_file = (
-        Path(manifest.trusted_manifest_path).resolve().parent / f"exec_AC-01_{cand_sha[:12]}.json"
+        Path(manifest.trusted_manifest_path).resolve().parent
+        / f"exec_AC-01_c03_task-c03-dogfood-prod_1_{cand_sha[:12]}.json"
     )
     assert record_file.is_file()
 
@@ -3043,3 +3080,289 @@ def test_execute_and_record_criteria_unlinks_runner_and_rejects_forged_outcome(
     )
     assert len(exec_receipts) == 1
     assert exec_receipts[0].passed is False
+
+
+def test_execute_and_record_criteria_rejects_conftest_plugin_exitstatus_and_stdlib_shadowing(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    cand_sha = _git_head_sha(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-r7a-hardening",
+        required_criterion_ids=("AC-01",),
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    test_node = "tests/unit/test_feature.py::test_feature_behavior"
+
+    conftest_file = candidate_root / "tests" / "conftest.py"
+    conftest_file.write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=REWARD_HACKING_DETECTED):
+        validator.execute_and_record_criteria(
+            manifest=manifest,
+            workspace=candidate_root,
+            candidate_sha=cand_sha,
+            criterion_test_nodes={"AC-01": test_node},
+            phase_id="c03",
+            task_id="task-c03-conftest",
+            attempt=1,
+        )
+    conftest_file.unlink()
+
+    shadow_socket = candidate_root / "src" / "socket.py"
+    shadow_socket.write_text("raise RuntimeError('shadowed socket')\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=REWARD_HACKING_DETECTED):
+        validator.execute_and_record_criteria(
+            manifest=manifest,
+            workspace=candidate_root,
+            candidate_sha=cand_sha,
+            criterion_test_nodes={"AC-01": test_node},
+            phase_id="c03",
+            task_id="task-c03-socket-shadow",
+            attempt=1,
+        )
+    shadow_socket.unlink()
+
+    bypass_test = candidate_root / "tests" / "unit" / "test_plugin_bypass.py"
+    bypass_node = "tests/unit/test_plugin_bypass.py::test_plugin_tamper_and_exitstatus"
+    bypass_test.write_text(
+        "\n".join(
+            [
+                "def test_plugin_tamper_and_exitstatus(pytestconfig, request) -> None:",
+                "    for plugin in pytestconfig.pluginmanager.get_plugins():",
+                "        if hasattr(plugin, 'passed_nodes'):",
+                "            plugin.passed_nodes.add(request.node.nodeid)",
+                "        if hasattr(plugin, 'failed_nodes'):",
+                "            plugin.failed_nodes.clear()",
+                "    request.session.exitstatus = 0",
+                "    actual_len = len(request.node.nodeid)",
+                "    assert actual_len == -1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bypass_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": bypass_node},
+        phase_id="c03",
+        task_id="task-c03-plugin-bypass",
+        attempt=1,
+    )
+    assert len(bypass_receipts) == 1
+    assert bypass_receipts[0].passed is False
+    assert bypass_receipts[0].exit_code != 0
+
+
+def test_evaluate_candidate_rejects_missing_review_context_on_direct_evidence(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-missing-ctx",
+        required_criterion_ids=("AC-01",),
+    )
+    assert manifest.manifest_digest is not None
+    test_node = "tests/unit/test_feature.py::test_feature_behavior"
+    exec_receipt, _ = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        test_node_id=test_node,
+        passed=True,
+        exit_code=0,
+        execution_log=f"{test_node} PASSED\n",
+        phase_id="c03",
+        task_id="task-c03-no-ctx",
+        attempt=1,
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+
+    for direct_ev in (
+        test_node,
+        "tests/unit/test_feature.py",
+        f"receipt:{_CANDIDATE_SHA}:AC-01:{manifest.manifest_digest}",
+    ):
+        evaluation = validator.evaluate_candidate(
+            manifest=manifest,
+            workspace=candidate_root,
+            task_id="task-c03-no-ctx",
+            candidate_sha=_CANDIDATE_SHA,
+            changed_files=changed,
+            tests_summary=tests_sum,
+            criterion_results=(
+                CriterionResult(
+                    criterion_id="AC-01",
+                    status=CriterionStatus.PASS,
+                    evidence=[direct_ev],
+                    notes="direct evidence without review_context",
+                ),
+            ),
+            verification_receipt=receipt,
+            review_context=None,
+            criterion_execution_receipts=(exec_receipt,),
+        )
+        assert evaluation.passed is False
+        assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+        assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+def test_evaluate_candidate_rejects_missing_receipt_identifiers(tmp_path: Path) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-miss-ids",
+        required_criterion_ids=("AC-01",),
+    )
+    assert manifest.manifest_digest is not None
+    assert manifest.trusted_manifest_path is not None
+    test_node = "tests/unit/test_feature.py::test_feature_behavior"
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    task_id = "task-c03-miss-ids"
+    bound_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        task_id,
+        candidate_sha=_CANDIDATE_SHA,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+    valid_rec, _ = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        test_node_id=test_node,
+        passed=True,
+        exit_code=0,
+        execution_log=f"{test_node} PASSED\n",
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+    )
+    retained_path = (
+        Path(manifest.trusted_manifest_path).resolve().parent
+        / f"exec_AC-01_c03_{task_id}_1_{_CANDIDATE_SHA[:12]}.json"
+    )
+    for field_name in ("phase_id", "task_id", "attempt"):
+        bad_rec = valid_rec.model_copy(update={field_name: None})
+        retained_path.write_text(
+            json.dumps(
+                {
+                    "receipt": bad_rec.model_dump(mode="json"),
+                    "execution_log": f"{test_node} PASSED\n",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        evaluation = validator.evaluate_candidate(
+            manifest=manifest,
+            workspace=candidate_root,
+            task_id=task_id,
+            candidate_sha=_CANDIDATE_SHA,
+            changed_files=changed,
+            tests_summary=tests_sum,
+            criterion_results=(
+                CriterionResult(
+                    criterion_id="AC-01",
+                    status=CriterionStatus.PASS,
+                    evidence=[test_node],
+                    notes=f"missing {field_name} on receipt",
+                ),
+            ),
+            verification_receipt=receipt,
+            review_context=bound_ctx,
+            criterion_execution_receipts=(bad_rec,),
+        )
+        assert evaluation.passed is False
+        assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+        assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+
+def test_evaluate_candidate_rejects_cross_attempt_replay(tmp_path: Path) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-cross-attempt",
+        required_criterion_ids=("AC-01",),
+    )
+    test_node = "tests/unit/test_feature.py::test_feature_behavior"
+    task_id = "task-c03-replay"
+    exec_attempt_1, _ = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        test_node_id=test_node,
+        passed=True,
+        exit_code=0,
+        execution_log=f"{test_node} PASSED\n",
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+    )
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    ctx_attempt_1, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        task_id,
+        candidate_sha=_CANDIDATE_SHA,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+    )
+    ctx_attempt_2 = ctx_attempt_1.model_copy(
+        update={
+            "task": ctx_attempt_1.task.model_copy(update={"attempt": 2}),
+            "evidence": ctx_attempt_1.evidence.model_copy(update={"attempt": 2}),
+            "checkpoint": ctx_attempt_1.checkpoint.model_copy(update={"attempt": 2}),
+        }
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    receipt = _make_valid_verification_receipt(candidate_root, _CANDIDATE_SHA)
+
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=[test_node],
+                notes="replaying attempt 1 receipt against attempt 2 review_context",
+            ),
+        ),
+        verification_receipt=receipt,
+        review_context=ctx_attempt_2,
+        criterion_execution_receipts=(exec_attempt_1,),
+    )
+    assert evaluation.passed is False
+    assert evaluation.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)

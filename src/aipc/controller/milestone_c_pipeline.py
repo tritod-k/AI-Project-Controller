@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -180,6 +179,22 @@ def _write_isolated_python_guard(
     stable_str = str(Path(stable_root).resolve()) if stable_root is not None else ""
     lines = [
         "def _install_aipc_sandbox():",
+        "    import sys",
+        f"    _ws_pfx = {ws_str!r}.replace('\\\\', '/').rstrip('/').lower()",
+        "    sys.path[:] = [",
+        "        _e for _e in sys.path",
+        "        if _e and _e != '.'",
+        "        and not _e.replace('\\\\', '/').startswith('./')",
+        "        and not (",
+        "            _ws_pfx",
+        "            and (",
+        "                _e.replace('\\\\', '/').rstrip('/').lower() == _ws_pfx",
+        "                or _e.replace('\\\\', '/').rstrip('/').lower().startswith(",
+        "                    _ws_pfx + '/'",
+        "                )",
+        "            )",
+        "        )",
+        "    ]",
         "    import builtins",
         "    import importlib.machinery",
         "    import io",
@@ -188,7 +203,6 @@ def _write_isolated_python_guard(
         "    import socket",
         "    import stat",
         "    import subprocess",
-        "    import sys",
         "    import tempfile",
         "    from collections.abc import Mapping",
         "",
@@ -1413,10 +1427,7 @@ class MultiLanguageIsolatedVerifier:
                     stable_root=stable_root,
                 )
                 exec_env = dict(sanitized_env)
-                existing_pypath = exec_env.get("PYTHONPATH", "")
-                exec_env["PYTHONPATH"] = (
-                    f"{tmp_boot}{os.pathsep}{existing_pypath}" if existing_pypath else tmp_boot
-                )
+                exec_env["PYTHONPATH"] = tmp_boot
                 exec_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
                 def _run_one(cmd: tuple[str, ...]) -> subprocess.CompletedProcess[str]:

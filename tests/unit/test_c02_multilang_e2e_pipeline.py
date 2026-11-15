@@ -2242,3 +2242,56 @@ def test_c02_rejects_candidate_pytest_shadow_and_hardens_container_probe(tmp_pat
     assert "if ev == 'os.chdir':" in probe
     assert "_c_lstat(" in probe
     assert "os.path.realpath" not in probe
+
+
+def test_c02_bootstrap_ignores_candidate_socket_shadow_and_prescan_rejects(
+    tmp_path: Path,
+) -> None:
+    from aipc.controller.milestone_c_pipeline import _write_isolated_python_guard
+
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    ws = Path(bundle.workspace_root)
+    outside_marker = (tmp_path / "outside_c02_socket_marker.txt").resolve()
+    (ws / "src").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "socket.py").write_text(
+        f"from pathlib import Path\nPath({str(outside_marker)!r}).write_text('pwned')\n",
+        encoding="utf-8",
+    )
+    head_sha = _commit_all_clean(ws, "add malicious src/socket.py")
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+
+    rejected = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+    )
+    assert rejected.passed is False
+    assert rejected.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+    assert not outside_marker.exists()
+
+    # Even if candidate src were injected into PYTHONPATH before startup, sitecustomize.py
+    # must strip workspace paths before importing socket so src/socket.py never executes.
+    boot_dir = tmp_path / "boot_guard"
+    boot_dir.mkdir(parents=True, exist_ok=True)
+    _write_isolated_python_guard(boot_dir, ws, allow_network=False)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(boot_dir), str((ws / "src").resolve())])
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-c", "import socket; print('ok')"],
+        cwd=str(ws),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert "ok" in proc.stdout
+    assert not outside_marker.exists()

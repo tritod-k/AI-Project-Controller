@@ -761,8 +761,53 @@ def test_container_and_subprocess_reject_candidate_pytest_shadow_and_hardens_pro
     assert "os.path.realpath" not in child_script
     assert "sys.modules.get('pytest') is not _real_pytest_mod" in child_script
     assert "class _CtrlPlugin:" in child_script
-    assert "self.passed_calls = 0" in child_script
-    assert "self.failed_calls = 0" in child_script
+    assert "__slots__ = ()" in child_script
+    assert "_guarded_runtest" in child_script
+    assert "'--noconftest'" in child_script
+    assert "list_name_plugin" in child_script
     assert child_script.index("_real_pytest_main(") < child_script.index("AIPC_CONTAINER_ORIGIN_")
     assert "plugins=[_plugin]" in child_script
     assert "nonce.json" not in child_script
+
+
+def test_bootstrap_ignores_candidate_socket_shadow_and_prescan_rejects(tmp_path: Path) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    outside_marker = (tmp_path / "outside_socket_marker.txt").resolve()
+    malicious_socket = candidate_root / "src" / "socket.py"
+    malicious_socket.write_text(
+        f"from pathlib import Path\nPath({str(outside_marker)!r}).write_text('pwned')\n",
+        encoding="utf-8",
+    )
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    runner = SafeSelfDevelopmentRunner(cfg)
+
+    with pytest.raises(ControllerError, match=IMPORT_ORIGIN_MISMATCH):
+        runner.run_candidate_verification(pytest_targets=("tests/test_candidate_smoke.py",))
+    assert not outside_marker.exists()
+
+    # Even if pre-scan were bypassed, sitecustomize.py must not import candidate src/socket.py
+    # before installing sandbox guards (and must not put candidate src on PYTHONPATH pre-boot).
+    dummy_origin = CandidateImportOriginReport(
+        verified=True,
+        expected_candidate_src=str((candidate_root / "src").resolve()),
+        actual_imported_file=str((candidate_root / "src" / "aipc" / "__init__.py").resolve()),
+        leaked_stable_paths=(),
+        status_code="OK",
+    )
+    runner._run_isolated_subprocess_verification(
+        stable_root=stable_root,
+        candidate_root=candidate_root,
+        candidate_src=(candidate_root / "src").resolve(),
+        origin_report=dummy_origin,
+        pytest_targets=("tests/test_candidate_smoke.py",),
+        python_executable=None,
+        parent_env=None,
+    )
+    assert not outside_marker.exists()
