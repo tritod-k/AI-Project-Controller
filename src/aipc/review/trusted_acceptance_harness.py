@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, StrictBool, StrictInt, model_validator
+from pydantic import Field, StrictBool, StrictInt, field_validator, model_validator
 
 from aipc.controller.milestone_b_orchestrator import HandoffNextAuthorizedAction
 from aipc.controller.self_dev_runner import (
@@ -94,6 +94,29 @@ def _normalize_rel_path(path: str) -> str:
     return normalized
 
 
+def _normalize_test_node_id(test_node_id: str) -> str:
+    parts = [part.strip() for part in test_node_id.split("::")]
+    if not parts:
+        return ""
+    parts[0] = _normalize_rel_path(parts[0])
+    return "::".join(parts)
+
+
+def _normalize_criterion_test_nodes(
+    raw: Mapping[str, str | Sequence[str]] | None,
+) -> dict[str, tuple[str, ...]]:
+    if not raw:
+        return {}
+    normalized: dict[str, tuple[str, ...]] = {}
+    for cid, nodes in raw.items():
+        if isinstance(nodes, str):
+            items = (_normalize_test_node_id(nodes),)
+        else:
+            items = tuple(_normalize_test_node_id(n) for n in nodes)
+        normalized[str(cid)] = items
+    return normalized
+
+
 def _contains_unauthorized_prefix(value: str) -> bool:
     norm = value.strip().lower()
     return any(prefix in norm for prefix in UNAUTHORIZED_MILESTONE_PREFIXES)
@@ -134,9 +157,11 @@ def _compute_manifest_digest(
     required_criterion_ids: tuple[str, ...] | list[str] = (),
     require_behavioral_assertions: bool = True,
     forbid_test_deletion: bool = True,
+    criterion_test_nodes: Mapping[str, Sequence[str] | str] | None = None,
 ) -> str:
     """Compute canonical SHA-256 digest over TrustedHarnessManifest policy fields."""
-    payload = (
+    norm_nodes = _normalize_criterion_test_nodes(criterion_test_nodes)
+    payload: tuple[object, ...] = (
         manifest_id,
         project_id,
         milestone_id,
@@ -147,6 +172,11 @@ def _compute_manifest_digest(
         bool(require_behavioral_assertions),
         bool(forbid_test_deletion),
     )
+    if norm_nodes:
+        payload = (
+            *payload,
+            {k: list(v) for k, v in sorted(norm_nodes.items())},
+        )
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -169,8 +199,31 @@ class TrustedHarnessManifest(CanonicalRecord):
     pinned_file_sha256: dict[str, Digest] = Field(default_factory=dict)
     pre_workspace_snapshot: dict[str, Digest] = Field(default_factory=dict)
     required_criterion_ids: tuple[NonBlank, ...] = ()
+    criterion_test_nodes: dict[str, tuple[NonBlank, ...]] = Field(default_factory=dict)
     require_behavioral_assertions: StrictBool = True
     forbid_test_deletion: StrictBool = True
+
+    @field_validator("criterion_test_nodes", mode="before")
+    @classmethod
+    def _validate_criterion_test_nodes(cls, value: object) -> dict[str, tuple[str, ...]]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("criterion_test_nodes must be a mapping")
+        out: dict[str, tuple[str, ...]] = {}
+        for cid, nodes in value.items():
+            if isinstance(nodes, str):
+                items = (_normalize_test_node_id(nodes),)
+            elif isinstance(nodes, Sequence) and not isinstance(nodes, (bytes, bytearray)):
+                items = tuple(_normalize_test_node_id(str(n)) for n in nodes)
+            else:
+                raise ValueError(
+                    f"criterion_test_nodes[{cid!r}] must be a string or sequence of strings"
+                )
+            if not items:
+                raise ValueError(f"criterion_test_nodes[{cid!r}] must not be empty")
+            out[str(cid)] = items
+        return out
 
     @model_validator(mode="after")
     def validate_manifest(self) -> Self:
@@ -190,6 +243,7 @@ class TrustedHarnessManifest(CanonicalRecord):
                 self.required_criterion_ids,
                 self.require_behavioral_assertions,
                 self.forbid_test_deletion,
+                self.criterion_test_nodes,
             )
             if self.manifest_digest != expected_digest:
                 raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: manifest_digest mismatch")
@@ -226,6 +280,7 @@ def build_trusted_harness_manifest(
     manifest_authority: Literal["trusted_operator", "stable_controller"] = "trusted_operator",
     protected_harness_globs: tuple[str, ...] = _DEFAULT_PROTECTED_HARNESS_GLOBS,
     required_criterion_ids: tuple[str, ...] = (),
+    criterion_test_nodes: Mapping[str, Sequence[str] | str] | None = None,
     require_behavioral_assertions: bool = True,
     forbid_test_deletion: bool = True,
     trusted_manifest_file: Path | None = None,
@@ -270,6 +325,7 @@ def build_trusted_harness_manifest(
             )
         trusted_path_str = str(resolved_manifest)
 
+    norm_criterion_nodes = _normalize_criterion_test_nodes(criterion_test_nodes)
     manifest_digest_val = _compute_manifest_digest(
         resolved_manifest_id,
         project_id,
@@ -280,6 +336,7 @@ def build_trusted_harness_manifest(
         required_criterion_ids,
         require_behavioral_assertions,
         forbid_test_deletion,
+        norm_criterion_nodes,
     )
     manifest = TrustedHarnessManifest(
         manifest_id=resolved_manifest_id,
@@ -292,6 +349,7 @@ def build_trusted_harness_manifest(
         pinned_file_sha256=pinned,
         pre_workspace_snapshot=pre_snap,
         required_criterion_ids=required_criterion_ids,
+        criterion_test_nodes=norm_criterion_nodes,
         require_behavioral_assertions=require_behavioral_assertions,
         forbid_test_deletion=forbid_test_deletion,
     )
@@ -329,6 +387,7 @@ def _verify_manifest_integrity(
         manifest.required_criterion_ids,
         manifest.require_behavioral_assertions,
         manifest.forbid_test_deletion,
+        manifest.criterion_test_nodes,
     )
     if manifest.manifest_digest is None or manifest.manifest_digest != expected_digest:
         findings.append(
@@ -388,7 +447,10 @@ def _verify_manifest_integrity(
             try:
                 raw_text = resolved_manifest_path.read_text(encoding="utf-8")
                 disk_manifest = TrustedHarnessManifest.model_validate_json(raw_text)
-                if disk_manifest != manifest:
+                if (
+                    disk_manifest != manifest
+                    or disk_manifest.criterion_test_nodes != manifest.criterion_test_nodes
+                ):
                     findings.append(
                         RewardHackingFinding(
                             rule_id="TRUSTED_MANIFEST_DISK_MISMATCH",
@@ -435,7 +497,16 @@ def _retained_exec_record_filename(
     phase_id: str,
     task_id: str,
     attempt: int,
+    test_node_id: str | None = None,
 ) -> str:
+    if test_node_id is not None:
+        node_digest = hashlib.sha256(
+            _normalize_test_node_id(test_node_id).encode("utf-8")
+        ).hexdigest()[:12]
+        return (
+            f"exec_{criterion_id}_{phase_id}_{task_id}_{attempt}_"
+            f"{candidate_sha[:12]}_{node_digest}.json"
+        )
     return f"exec_{criterion_id}_{phase_id}_{task_id}_{attempt}_{candidate_sha[:12]}.json"
 
 
@@ -494,12 +565,13 @@ def record_trusted_criterion_execution(
         or ".." in criterion_id
     ):
         raise ValueError(f"Invalid criterion_id for execution record: {criterion_id!r}")
+    norm_node = _normalize_test_node_id(test_node_id)
     log_sha256 = hashlib.sha256(execution_log.encode("utf-8")).hexdigest()
     receipt = CriterionExecutionReceipt(
         criterion_id=criterion_id,
         candidate_sha=candidate_sha,
         manifest_digest=manifest.manifest_digest,
-        test_node_id=test_node_id,
+        test_node_id=norm_node,
         passed=passed,
         exit_code=exit_code,
         log_sha256=log_sha256,
@@ -515,6 +587,7 @@ def record_trusted_criterion_execution(
         phase_id=phase_id or "none",
         task_id=task_id or "none",
         attempt=attempt or 0,
+        test_node_id=norm_node,
     )
     payload = {
         "receipt": receipt.model_dump(mode="json"),
@@ -1191,7 +1264,7 @@ class TrustedAcceptanceHarnessValidator:
         manifest: TrustedHarnessManifest,
         workspace: Path | str,
         candidate_sha: str,
-        criterion_test_nodes: Mapping[str, str],
+        criterion_test_nodes: Mapping[str, str | Sequence[str]] | None = None,
         python_executable: Path | str | None = None,
         parent_env: Mapping[str, str] | None = None,
         timeout_seconds: int = 120,
@@ -1207,576 +1280,847 @@ class TrustedAcceptanceHarnessValidator:
 
         _scan_candidate_runner_shadowing(workspace_root)
 
+        effective_nodes = (
+            manifest.criterion_test_nodes if criterion_test_nodes is None else criterion_test_nodes
+        )
+        if not effective_nodes:
+            raise ValueError("criterion_test_nodes must not be empty")
+        norm_nodes_map = _normalize_criterion_test_nodes(effective_nodes)
+        if manifest.criterion_test_nodes:
+            for cid, nodes in norm_nodes_map.items():
+                if (
+                    cid in manifest.criterion_test_nodes
+                    and tuple(nodes) != manifest.criterion_test_nodes[cid]
+                ):
+                    raise ValueError(
+                        f"{TRUSTED_HARNESS_TAMPER_DETECTED}: "
+                        f"criterion_test_nodes mismatch for '{cid}'"
+                    )
+
         sanitized_env = build_sanitized_child_env(parent_env)
         assert_child_env_isolated(sanitized_env)
         py_exe = str(python_executable) if python_executable is not None else sys.executable
 
         receipts: list[CriterionExecutionReceipt] = []
-        for cid, test_node_id in criterion_test_nodes.items():
-            parts = test_node_id.split("::")
-            if len(parts) < 2:
-                raise ValueError(f"Invalid test_node_id '{test_node_id}' for criterion '{cid}'")
-            func_name = parts[-1].split("[")[0]
-            norm_test_file = _normalize_rel_path(parts[0])
-            if (
-                not func_name.startswith("test_")
-                or Path(norm_test_file).is_absolute()
-                or not norm_test_file.startswith("tests/")
-                or not norm_test_file.endswith(".py")
-            ):
-                raise ValueError(f"Invalid test_node_id '{test_node_id}' for criterion '{cid}'")
-            test_path = (workspace_root / norm_test_file).resolve()
-            if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
-                raise ValueError(f"Test file not found for criterion '{cid}': '{norm_test_file}'")
-            if (
-                norm_test_file not in manifest.pinned_file_sha256
-                or not any(
-                    fnmatch.fnmatchcase(norm_test_file, glob_pat)
-                    for glob_pat in manifest.protected_harness_globs
-                )
-                or hashlib.sha256(test_path.read_bytes()).hexdigest()
-                != manifest.pinned_file_sha256[norm_test_file]
-            ):
-                raise ValueError(
-                    f"{TRUSTED_HARNESS_TAMPER_DETECTED}: criterion test file "
-                    f"'{norm_test_file}' must be pinned in manifest"
-                )
-            source = test_path.read_text(encoding="utf-8")
-            if not _test_function_exists_in_source(source, func_name):
-                raise ValueError(
-                    f"Test function '{func_name}' not found in '{norm_test_file}' for '{cid}'"
-                )
-            ast_findings = self.inspect_python_test_source(norm_test_file, source)
-            if ast_findings:
-                raise ValueError(
-                    f"AST verification failed for '{norm_test_file}': {ast_findings[0].description}"
-                )
-
-            with tempfile.TemporaryDirectory(prefix="aipc-crit-iso-") as tmp_iso:
-                iso_root = Path(tmp_iso).resolve()
-                boot_dir = iso_root / "boot"
-                boot_dir.mkdir()
-                candidate_src = (
-                    workspace_root / "src" if (workspace_root / "src").is_dir() else workspace_root
-                )
-                _write_candidate_isolation_bootstrap(
-                    boot_dir,
-                    stable_root=boot_dir / "disjoint_stable",
-                    candidate_src=candidate_src,
-                )
-                outcome_nonce = uuid4().hex
-                auth_nonce = uuid4().hex + uuid4().hex
-                (boot_dir / "scratch").mkdir(parents=True, exist_ok=True)
-                outcome_path = boot_dir / "scratch" / f"_aipc_outcome_{outcome_nonce}.json"
-                runner_script = boot_dir / "scratch" / "_trusted_criterion_runner.py"
-                runner_code = "\n".join(
-                    [
-                        "def _run_crit():",
-                        "    import hashlib, hmac, json, os, sys, pytest",
-                        "    import _pytest.config, _pytest.python, _pytest.runner",
-                        "    globals().pop('_run_crit', None)",
-                        "    _real_pytest_main = pytest.main",
-                        "    _real_pytest_mod = sys.modules['pytest']",
-                        "    _c_audit = sys.audit",
-                        "    _run_crit_code = sys._getframe(0).f_code",
-                        f"    _ws_str = {str(workspace_root)!r}",
-                        "    try:",
-                        "        os.unlink(__file__)",
-                        "    except OSError:",
-                        "        pass",
-                        "    def _no_exit(*_a, **_k):",
-                        "        raise PermissionError('os._exit prohibited')",
-                        "    os._exit = _no_exit",
-                        "    _ws_src = os.path.join(_ws_str, 'src')",
-                        "    if os.path.isdir(_ws_src) and _ws_src not in sys.path:",
-                        "        sys.path.append(_ws_src)",
-                        "    if _ws_str not in sys.path:",
-                        "        sys.path.append(_ws_str)",
-                        "    _dmap = {}",
-                        "    class _SealedBound:",
-                        "        __slots__ = ('_k', '_o')",
-                        "        def __init__(self, k, o):",
-                        "            object.__setattr__(self, '_k', k)",
-                        "            object.__setattr__(self, '_o', o)",
-                        "        def __call__(self, *a, **kw):",
-                        "            return _dmap[object.__getattribute__(self, '_k')](",
-                        "                object.__getattribute__(self, '_o'), *a, **kw",
-                        "            )",
-                        "        def __getattribute__(self, name):",
-                        "            raise PermissionError('closure introspection prohibited')",
-                        "        def __setattr__(self, name, val):",
-                        "            raise PermissionError('closure mutation prohibited')",
-                        "    class _SealedMethod:",
-                        "        __slots__ = ('_k',)",
-                        "        def __init__(self, fn):",
-                        "            _k = len(_dmap) + 1",
-                        "            _dmap[_k] = fn",
-                        "            object.__setattr__(self, '_k', _k)",
-                        "        def __get__(self, obj, objtype=None):",
-                        "            if obj is None:",
-                        "                raise PermissionError('closure introspection prohibited')",
-                        "            return _SealedBound(",
-                        "                object.__getattribute__(self, '_k'), obj",
-                        "            )",
-                        "        def __call__(self, *a, **kw):",
-                        "            return _dmap[object.__getattribute__(self, '_k')](*a, **kw)",
-                        "        def __getattribute__(self, name):",
-                        "            raise PermissionError('closure introspection prohibited')",
-                        "        def __setattr__(self, name, val):",
-                        "            raise PermissionError('closure mutation prohibited')",
-                        "    def _invoke_body(_fn, _nid, _a, _kw):",
-                        "        _c_audit('aipc.body_in', _nid, _fn)",
-                        "        _res = _fn(*_a, **_kw)",
-                        "        _c_audit('aipc.body_out', _nid, _fn)",
-                        "        return _res",
-                        "    _orig_runtest = _pytest.python.Function.runtest",
-                        "    def _guarded_runtest(self_item):",
-                        "        _orig_obj = self_item.obj",
-                        "        _c_audit('aipc.rt_in', self_item.nodeid, _orig_obj)",
-                        "        self_item.obj = lambda *a, **kw: _invoke_body(",
-                        "            _orig_obj, self_item.nodeid, a, kw",
-                        "        )",
-                        "        try:",
-                        "            _orig_runtest(self_item)",
-                        "        except BaseException:",
-                        "            _c_audit('aipc.rt_fail', self_item.nodeid)",
-                        "            raise",
-                        "        else:",
-                        "            _c_audit('aipc.rt_ok', self_item.nodeid)",
-                        "        finally:",
-                        "            self_item.obj = _orig_obj",
-                        "            _c_audit('aipc.rt_end', self_item.nodeid)",
-                        "    _sealed_runtest = _SealedMethod(_guarded_runtest)",
-                        "    _pytest.python.Function.runtest = _sealed_runtest",
-                        "    _orig_runtestprotocol = _pytest.runner.runtestprotocol",
-                        "    def _guarded_runtestprotocol(item, log=True, nextitem=None):",
-                        "        _c_audit('aipc.proto_in', item.nodeid)",
-                        "        reports = _orig_runtestprotocol(",
-                        "            item, log=log, nextitem=nextitem",
-                        "        )",
-                        "        _c_audit('aipc.proto_out', item.nodeid, reports)",
-                        "        return reports",
-                        "    _sealed_runtestprotocol = _SealedMethod(_guarded_runtestprotocol)",
-                        "    _pytest.runner.runtestprotocol = _sealed_runtestprotocol",
-                        "    class _NodePlugin:",
-                        "        __slots__ = ()",
-                        "    _plugin = _NodePlugin()",
-                        "    _ws_norm = os.path.normcase(os.path.realpath(_ws_str))",
-                        "    def _is_under_ws(path_str):",
-                        "        if not path_str:",
-                        "            return False",
-                        "        real_p = os.path.normcase(os.path.realpath(str(path_str)))",
-                        "        return (",
-                        "            real_p == _ws_norm",
-                        "            or real_p.startswith(_ws_norm + os.sep)",
-                        "        )",
-                        "    _pm_cls = _pytest.config.PytestPluginManager",
-                        "    _orig_get_plugins = _pm_cls.get_plugins",
-                        "    _orig_list_name_plugin = _pm_cls.list_name_plugin",
-                        "    _orig_get_plugin = _pm_cls.get_plugin",
-                        "    _orig_consider_module = _pm_cls.consider_module",
-                        "    _orig_register = _pm_cls.register",
-                        "    def _guarded_get_plugins(pm_self):",
-                        "        return {",
-                        "            p for p in _orig_get_plugins(pm_self)",
-                        "            if p is not _plugin",
-                        "        }",
-                        "    def _guarded_list_name_plugin(pm_self):",
-                        "        return [",
-                        "            (n, p) for n, p in _orig_list_name_plugin(pm_self)",
-                        "            if p is not _plugin",
-                        "        ]",
-                        "    def _guarded_get_plugin(pm_self, name):",
-                        "        res = _orig_get_plugin(pm_self, name)",
-                        "        return None if res is _plugin else res",
-                        "    def _guarded_consider_module(pm_self, mod):",
-                        "        if _is_under_ws(getattr(mod, '__file__', None)):",
-                        "            return None",
-                        "        return _orig_consider_module(pm_self, mod)",
-                        "    def _guarded_register(pm_self, plugin, name=None):",
-                        "        if plugin is _plugin:",
-                        "            return _orig_register(pm_self, plugin, name=name)",
-                        "        _c_audit('aipc.pm_register')",
-                        "        mod_name = getattr(plugin, '__module__', None)",
-                        "        mod_obj = sys.modules.get(mod_name) if mod_name else None",
-                        "        plugin_file = getattr(plugin, '__file__', None) or (",
-                        "            getattr(mod_obj, '__file__', None)",
-                        "            if mod_obj is not None",
-                        "            else None",
-                        "        )",
-                        "        if _is_under_ws(plugin_file) and not hasattr(plugin, 'fspath'):",
-                        "            raise PermissionError('candidate plugin prohibited')",
-                        "        return _orig_register(pm_self, plugin, name=name)",
-                        "    _sealed_get_plugins = _SealedMethod(_guarded_get_plugins)",
-                        "    _sealed_list_name_plugin = _SealedMethod(_guarded_list_name_plugin)",
-                        "    _sealed_get_plugin = _SealedMethod(_guarded_get_plugin)",
-                        "    _sealed_consider_module = _SealedMethod(_guarded_consider_module)",
-                        "    _sealed_register = _SealedMethod(_guarded_register)",
-                        "    _pm_cls.get_plugins = _sealed_get_plugins",
-                        "    _pm_cls.list_name_plugin = _sealed_list_name_plugin",
-                        "    _pm_cls.get_plugin = _sealed_get_plugin",
-                        "    _pm_cls.consider_module = _sealed_consider_module",
-                        "    _pm_cls.register = _sealed_register",
-                        "    _expected_dmap = dict(_dmap)",
-                        "    def _install_crit_vault(",
-                        "        _out_path,",
-                        "        _auth_nonce,",
-                        "        _dmap_ref,",
-                        "        _exp_dmap,",
-                        "        _runner_file,",
-                        "        _code_rt,",
-                        "        _code_body,",
-                        "        _code_proto,",
-                        "        _code_reg,",
-                        "        _code_rc,",
-                        "        _stdlib_dir,",
-                        "        _site_dir,",
-                        "    ):",
-                        "        _c_getframe = sys._getframe",
-                        "        _in_vault = [False]",
-                        "        _locked = [True]",
-                        "        _finalized = [False]",
-                        "        _phase_started = [False]",
-                        "        _fn_passed = set()",
-                        "        _fn_failed = set()",
-                        "        _passed_nodes = set()",
-                        "        _failed_nodes = set()",
-                        "        _body_in = set()",
-                        "        _body_out = set()",
-                        "        _in_call = {}",
-                        "        _started_nodes = set()",
-                        "        _active_fn = {}",
-                        "        def _vault_step(ev, args):",
-                        "            if _in_vault[0]:",
-                        "                return None",
-                        "            _in_vault[0] = True",
-                        "            try:",
-                        "                if ev in ('gc.get_objects', 'gc.get_referrers'):",
-                        "                    return ('perm', 'introspection prohibited')",
-                        "                if (",
-                        "                    ev == 'object.__getattr__'",
-                        "                    and len(args) >= 2",
-                        "                    and args[1] == 'tb_frame'",
-                        "                ):",
-                        "                    _tb_f = getattr(args[0], 'tb_frame', None)",
-                        "                    if getattr(_tb_f, 'f_code', None) in (",
-                        "                        _crit_audit_code,",
-                        "                        _vault_step_code,",
-                        "                    ):",
-                        "                        return (",
-                        "                            'perm',",
-                        "                            'vault traceback frame access prohibited',",
-                        "                        )",
-                        "                    return None",
-                        "                if ev == 'sys._getframe':",
-                        "                    _cf = _c_getframe(2)",
-                        "                    _cf_file = _cf.f_code.co_filename",
-                        "                    _cf_real = os.path.normcase(",
-                        "                        os.path.realpath(_cf_file)",
-                        "                    )",
-                        "                    _tf_file = (",
-                        "                        args[0].f_code.co_filename",
-                        "                        if args and hasattr(args[0], 'f_code')",
-                        "                        else ''",
-                        "                    )",
-                        "                    if (",
-                        "                        _is_under_ws(_cf_file)",
-                        "                        or _cf_file == '<string>'",
-                        "                        or _tf_file == _runner_file",
-                        "                        or (",
-                        "                            not _cf_file.startswith('<frozen ')",
-                        "                            and not _cf_real.startswith(",
-                        "                                _stdlib_dir + os.sep",
-                        "                            )",
-                        "                            and not _cf_real.startswith(",
-                        "                                _site_dir + os.sep",
-                        "                            )",
-                        "                            and _cf_file != _runner_file",
-                        "                        )",
-                        "                    ):",
-                        "                        return ('perm', 'introspection prohibited')",
-                        "                    return None",
-                        "                if (",
-                        "                    _locked[0]",
-                        "                    and ev in (",
-                        "                        'open', 'os.open', 'os.unlink',",
-                        "                        'os.remove', 'os.rename', 'os.replace',",
-                        "                    )",
-                        "                    and args",
-                        "                    and '_aipc_outcome_' in str(args[0])",
-                        "                ):",
-                        "                    return ('perm', 'outcome file protected')",
-                        "                if not ev.startswith('aipc.'):",
-                        "                    return None",
-                        "                _cc = _c_getframe(2).f_code",
-                        "                if ev == 'aipc.rt_in':",
-                        "                    if _cc is not _code_rt:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _nid, _orig_obj = args",
-                        "                    if _nid in _started_nodes or not callable(_orig_obj):",
-                        "                        _fn_failed.add(_nid)",
-                        "                    else:",
-                        "                        _started_nodes.add(_nid)",
-                        "                        _active_fn[_nid] = _orig_obj",
-                        "                        _in_call[_nid] = True",
-                        "                elif ev == 'aipc.body_in':",
-                        "                    if _cc is not _code_body:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _nid, _fn = args",
-                        "                    if (",
-                        "                        _in_call.get(_nid) is True",
-                        "                        and _nid not in _body_in",
-                        "                        and _fn is _active_fn.get(_nid)",
-                        "                    ):",
-                        "                        _body_in.add(_nid)",
-                        "                    else:",
-                        "                        _fn_failed.add(_nid)",
-                        "                elif ev == 'aipc.body_out':",
-                        "                    if _cc is not _code_body:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _nid, _fn = args",
-                        "                    if (",
-                        "                        _in_call.get(_nid) is True",
-                        "                        and _nid in _body_in",
-                        "                        and _fn is _active_fn.get(_nid)",
-                        "                    ):",
-                        "                        _body_out.add(_nid)",
-                        "                    else:",
-                        "                        _fn_failed.add(_nid)",
-                        "                elif ev == 'aipc.rt_fail':",
-                        "                    if _cc is not _code_rt:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _fn_failed.add(args[0])",
-                        "                elif ev == 'aipc.rt_ok':",
-                        "                    if _cc is not _code_rt:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _nid = args[0]",
-                        "                    if (",
-                        "                        _nid in _body_in",
-                        "                        and _nid in _body_out",
-                        "                        and _nid not in _fn_failed",
-                        "                        and _in_call.get(_nid) is True",
-                        "                    ):",
-                        "                        _fn_passed.add(_nid)",
-                        "                    else:",
-                        "                        _fn_failed.add(_nid)",
-                        "                        _b_err = (",
-                        "                            'REWARD_HACKING_DETECTED: body bypassed'",
-                        "                        )",
-                        "                        return ('runtime', _b_err)",
-                        "                elif ev == 'aipc.rt_end':",
-                        "                    if _cc is not _code_rt:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _in_call[args[0]] = False",
-                        "                elif ev == 'aipc.proto_in':",
-                        "                    if _cc is not _code_proto:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _phase_started[0] = True",
-                        "                elif ev == 'aipc.proto_out':",
-                        "                    if _cc is not _code_proto:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    _nid, _reports = args",
-                        "                    for _rep in _reports:",
-                        "                        if (",
-                        "                            _rep.when == 'call'",
-                        "                            and _rep.outcome == 'passed'",
-                        "                        ):",
-                        "                            _passed_nodes.add(_rep.nodeid)",
-                        "                        elif (",
-                        "                            _rep.when in ('setup', 'call', 'teardown')",
-                        "                            and _rep.failed",
-                        "                        ):",
-                        "                            _failed_nodes.add(_rep.nodeid)",
-                        "                elif ev == 'aipc.pm_register':",
-                        "                    if _cc is not _code_reg:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    if _phase_started[0]:",
-                        "                        return ('perm', 'candidate plugin prohibited')",
-                        "                elif ev == 'aipc.finalize_outcome':",
-                        "                    if _cc is not _code_rc:",
-                        "                        return ('perm', 'forged audit event')",
-                        "                    if _finalized[0]:",
-                        "                        return ('perm', 'already finalized')",
-                        "                    _finalized[0] = True",
-                        "                    _rc_in, _guards_ok = args",
-                        "                    _all_ok = (",
-                        "                        bool(_guards_ok) and (_dmap_ref == _exp_dmap)",
-                        "                    )",
-                        "                    _eff_passed = (",
-                        "                        sorted(_passed_nodes & _fn_passed)",
-                        "                        if (",
-                        "                            _all_ok",
-                        "                            and not _failed_nodes",
-                        "                            and not _fn_failed",
-                        "                        )",
-                        "                        else []",
-                        "                    )",
-                        "                    _eff_failed = sorted(_failed_nodes | _fn_failed)",
-                        "                    _final_rc = int(_rc_in)",
-                        "                    if _eff_failed or not _all_ok:",
-                        "                        _final_rc = 1",
-                        "                    _msg = json.dumps(",
-                        "                        {",
-                        "                            'rc': _final_rc,",
-                        "                            'passed_nodes': _eff_passed,",
-                        "                            'failed_nodes': _eff_failed,",
-                        "                        },",
-                        "                        sort_keys=True,",
-                        "                    ).encode('utf-8')",
-                        "                    _mac = hmac.new(",
-                        "                        _auth_nonce.encode('utf-8'),",
-                        "                        _msg,",
-                        "                        hashlib.sha256,",
-                        "                    ).hexdigest()",
-                        "                    _payload = json.dumps(",
-                        "                        {",
-                        "                            'rc': _final_rc,",
-                        "                            'passed_nodes': _eff_passed,",
-                        "                            'failed_nodes': _eff_failed,",
-                        "                            'mac': _mac,",
-                        "                        }",
-                        "                    )",
-                        "                    _locked[0] = False",
-                        "                    with open(_out_path, 'w', encoding='utf-8') as _f:",
-                        "                        _f.write(_payload)",
-                        "                    if _final_rc != 0:",
-                        "                        return ('sysexit', 1)",
-                        "                return None",
-                        "            finally:",
-                        "                _in_vault[0] = False",
-                        "        def _crit_audit(ev, args):",
-                        "            _res = _vault_step(ev, args)",
-                        "            if _res is not None:",
-                        "                if _res[0] == 'runtime':",
-                        "                    raise RuntimeError(_res[1])",
-                        "                if _res[0] == 'sysexit':",
-                        "                    raise SystemExit(_res[1])",
-                        "                raise PermissionError(_res[1])",
-                        "        _vault_step_code = _vault_step.__code__",
-                        "        _crit_audit_code = _crit_audit.__code__",
-                        "        sys.addaudithook(_crit_audit)",
-                        "        del _crit_audit",
-                        "    _install_crit_vault(",
-                        f"        {str(outcome_path)!r},",
-                        f"        {auth_nonce!r},",
-                        "        _dmap,",
-                        "        _expected_dmap,",
-                        "        __file__,",
-                        "        _guarded_runtest.__code__,",
-                        "        _invoke_body.__code__,",
-                        "        _guarded_runtestprotocol.__code__,",
-                        "        _guarded_register.__code__,",
-                        "        _run_crit_code,",
-                        "        os.path.normcase(",
-                        "            os.path.realpath(os.path.dirname(os.__file__))",
-                        "        ),",
-                        "        os.path.normcase(",
-                        "            os.path.realpath(",
-                        "                os.path.dirname(os.path.dirname(pytest.__file__))",
-                        "            )",
-                        "        ),",
-                        "    )",
-                        "    del _install_crit_vault, _expected_dmap",
-                        "    _args = [",
-                        "        '--noconftest', '-p', 'no:cacheprovider', '-v', sys.argv[1]",
-                        "    ]",
-                        "    _rc = int(_real_pytest_main(_args, plugins=[_plugin]))",
-                        "    _fn_d = _pytest.python.Function.__dict__",
-                        "    _pm_d = _pm_cls.__dict__",
-                        "    _guards_intact = (",
-                        "        sys.modules.get('pytest') is _real_pytest_mod",
-                        "        and getattr(pytest, 'main', None) is _real_pytest_main",
-                        "        and _fn_d.get('runtest') is _sealed_runtest",
-                        "        and _pytest.runner.runtestprotocol is _sealed_runtestprotocol",
-                        "        and _pm_d.get('get_plugins') is _sealed_get_plugins",
-                        "        and _pm_d.get('list_name_plugin') is _sealed_list_name_plugin",
-                        "        and _pm_d.get('get_plugin') is _sealed_get_plugin",
-                        "        and _pm_d.get('consider_module') is _sealed_consider_module",
-                        "        and _pm_d.get('register') is _sealed_register",
-                        "    )",
-                        "    _c_audit('aipc.finalize_outcome', _rc, _guards_intact)",
-                        "    sys.exit(_rc)",
-                        "_run_crit()",
-                        "",
-                    ]
-                )
-                runner_script.write_text(runner_code, encoding="utf-8")
-                exec_env = dict(sanitized_env)
-                exec_env["PYTHONDONTWRITEBYTECODE"] = "1"
-                exec_env["PYTHONSAFEPATH"] = "1"
-                exec_env["PYTHONPATH"] = str(boot_dir)
-                proc = subprocess.run(
-                    [py_exe, "-P", "-B", str(runner_script), test_node_id],
-                    cwd=str(workspace_root),
-                    env=exec_env,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                    check=False,
-                )
-                outcome_data: dict[str, object] = {}
-                mac_valid = False
-                if outcome_path.is_file():
-                    try:
-                        parsed_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
-                        if isinstance(parsed_outcome, dict):
-                            raw_mac = str(parsed_outcome.get("mac", ""))
-                            raw_rc = parsed_outcome.get("rc")
-                            raw_passed = parsed_outcome.get("passed_nodes")
-                            raw_failed = parsed_outcome.get("failed_nodes")
-                            if (
-                                isinstance(raw_rc, int)
-                                and isinstance(raw_passed, list)
-                                and isinstance(raw_failed, list)
-                            ):
-                                expected_msg = json.dumps(
-                                    {
-                                        "rc": raw_rc,
-                                        "passed_nodes": raw_passed,
-                                        "failed_nodes": raw_failed,
-                                    },
-                                    sort_keys=True,
-                                ).encode("utf-8")
-                                expected_mac = hmac.new(
-                                    auth_nonce.encode("utf-8"),
-                                    expected_msg,
-                                    hashlib.sha256,
-                                ).hexdigest()
-                                if hmac.compare_digest(raw_mac, expected_mac):
-                                    mac_valid = True
-                                    outcome_data = parsed_outcome
-                    except ValueError:
-                        outcome_data = {}
-                passed_nodes = outcome_data.get("passed_nodes")
-                failed_nodes = outcome_data.get("failed_nodes")
-                passed = (
-                    mac_valid
-                    and proc.returncode == 0
-                    and outcome_data.get("rc") == 0
-                    and isinstance(failed_nodes, list)
-                    and not failed_nodes
-                    and isinstance(passed_nodes, list)
-                    and any(
-                        isinstance(n, str)
-                        and (n == test_node_id or n.startswith(test_node_id + "::"))
-                        for n in passed_nodes
+        for cid, node_list in norm_nodes_map.items():
+            for test_node_id in node_list:
+                parts = test_node_id.split("::")
+                if len(parts) < 2:
+                    raise ValueError(f"Invalid test_node_id '{test_node_id}' for criterion '{cid}'")
+                func_name = parts[-1].split("[")[0]
+                norm_test_file = _normalize_rel_path(parts[0])
+                if (
+                    not func_name.startswith("test_")
+                    or Path(norm_test_file).is_absolute()
+                    or not norm_test_file.startswith("tests/")
+                    or not norm_test_file.endswith(".py")
+                ):
+                    raise ValueError(f"Invalid test_node_id '{test_node_id}' for criterion '{cid}'")
+                test_path = (workspace_root / norm_test_file).resolve()
+                if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
+                    raise ValueError(
+                        f"Test file not found for criterion '{cid}': '{norm_test_file}'"
                     )
+                if (
+                    norm_test_file not in manifest.pinned_file_sha256
+                    or not any(
+                        fnmatch.fnmatchcase(norm_test_file, glob_pat)
+                        for glob_pat in manifest.protected_harness_globs
+                    )
+                    or hashlib.sha256(test_path.read_bytes()).hexdigest()
+                    != manifest.pinned_file_sha256[norm_test_file]
+                ):
+                    raise ValueError(
+                        f"{TRUSTED_HARNESS_TAMPER_DETECTED}: criterion test file "
+                        f"'{norm_test_file}' must be pinned in manifest"
+                    )
+                source = test_path.read_text(encoding="utf-8")
+                if not _test_function_exists_in_source(source, func_name):
+                    raise ValueError(
+                        f"Test function '{func_name}' not found in '{norm_test_file}' for '{cid}'"
+                    )
+                ast_findings = self.inspect_python_test_source(norm_test_file, source)
+                if ast_findings:
+                    raise ValueError(
+                        f"AST verification failed for '{norm_test_file}': "
+                        f"{ast_findings[0].description}"
+                    )
+
+                with tempfile.TemporaryDirectory(prefix="aipc-crit-iso-") as tmp_iso:
+                    iso_root = Path(tmp_iso).resolve()
+                    boot_dir = iso_root / "boot"
+                    boot_dir.mkdir()
+                    candidate_src = (
+                        workspace_root / "src"
+                        if (workspace_root / "src").is_dir()
+                        else workspace_root
+                    )
+                    _write_candidate_isolation_bootstrap(
+                        boot_dir,
+                        stable_root=boot_dir / "disjoint_stable",
+                        candidate_src=candidate_src,
+                    )
+                    outcome_nonce = uuid4().hex
+                    auth_nonce = uuid4().hex + uuid4().hex
+                    (boot_dir / "scratch").mkdir(parents=True, exist_ok=True)
+                    outcome_path = boot_dir / "scratch" / f"_aipc_outcome_{outcome_nonce}.json"
+                    runner_script = boot_dir / "scratch" / "_trusted_criterion_runner.py"
+                    runner_code = "\n".join(
+                        [
+                            "def _run_crit():",
+                            "    import _json, builtins, hashlib, os, pathlib, sys, types",
+                            "    import pytest, _pytest.config, _pytest.python, _pytest.runner",
+                            "    globals().pop('_run_crit', None)",
+                            "    _b_bool = builtins.bool",
+                            "    _b_bytes = builtins.bytes",
+                            "    _b_getattr = builtins.getattr",
+                            "    _b_int = builtins.int",
+                            "    _b_isinstance = builtins.isinstance",
+                            "    _b_len = builtins.len",
+                            "    _b_sorted = builtins.sorted",
+                            "    _b_str = builtins.str",
+                            "    _b_type = builtins.type",
+                            "    _b_BaseException = builtins.BaseException",
+                            "    _b_PermissionError = builtins.PermissionError",
+                            "    _b_RuntimeError = builtins.RuntimeError",
+                            "    _FunctionType = types.FunctionType",
+                            "    _CodeType = types.CodeType",
+                            "    _real_pytest_main = pytest.main",
+                            "    _real_pytest_mod = sys.modules['pytest']",
+                            "    _c_audit = sys.audit",
+                            "    _run_crit_code = sys._getframe(0).f_code",
+                            f"    _ws_str = {str(workspace_root)!r}",
+                            f"    _test_file_abs = {str(test_path)!r}",
+                            f"    _node_id = {test_node_id!r}",
+                            "    try:",
+                            "        os.unlink(__file__)",
+                            "    except OSError:",
+                            "        pass",
+                            "    _native = __import__('nt' if os.name == 'nt' else 'posix')",
+                            "    def _no_exit(*_a, **_k):",
+                            "        raise _b_PermissionError('os._exit prohibited')",
+                            "    os._exit = _no_exit",
+                            "    _native._exit = _no_exit",
+                            "    os.system = _no_exit",
+                            "    _native.system = _no_exit",
+                            "    import ast as _ast",
+                            "    import _pytest.assertion.rewrite as _par",
+                            "    _p_bytes = pathlib.Path(_test_file_abs).read_bytes()",
+                            "    _p_mod_co = compile(_p_bytes, _test_file_abs, 'exec')",
+                            "    _rw_tree = _ast.parse(_p_bytes, _test_file_abs)",
+                            "    _par.rewrite_asserts(",
+                            "        _rw_tree, _p_bytes, pathlib.Path(_test_file_abs)",
+                            "    )",
+                            "    _p_rw_mod_co = compile(",
+                            "        _rw_tree, _test_file_abs, 'exec', dont_inherit=True",
+                            "    )",
+                            "    _test_file_norm = os.path.normcase(",
+                            "        os.path.realpath(_test_file_abs)",
+                            "    )",
+                            "    _nid_parts = _node_id.split('::')",
+                            "    _target_fn_name = _nid_parts[-1].split('[')[0]",
+                            "    _cls_parts = _nid_parts[1:-1]",
+                            "    def _find_pinned_co(_co, _cls_chain, _fn_name):",
+                            "        if _cls_chain:",
+                            "            for _c in _co.co_consts:",
+                            "                if (",
+                            "                    _b_isinstance(_c, _CodeType)",
+                            "                    and _c.co_name == _cls_chain[0]",
+                            "                ):",
+                            "                    _found = _find_pinned_co(",
+                            "                        _c, _cls_chain[1:], _fn_name",
+                            "                    )",
+                            "                    if _found is not None:",
+                            "                        return _found",
+                            "            return None",
+                            "        for _c in _co.co_consts:",
+                            "            if _b_isinstance(_c, _CodeType):",
+                            "                if _c.co_name == _fn_name:",
+                            "                    return _c",
+                            "                _found = _find_pinned_co(_c, [], _fn_name)",
+                            "                if _found is not None:",
+                            "                    return _found",
+                            "        return None",
+                            "    _pinned_raw_co = _find_pinned_co(",
+                            "        _p_mod_co, _cls_parts, _target_fn_name",
+                            "    )",
+                            "    _pinned_rw_co = _find_pinned_co(",
+                            "        _p_rw_mod_co, _cls_parts, _target_fn_name",
+                            "    )",
+                            "    _pinned_sigs = {",
+                            "        (_c.co_code, _c.co_consts, _c.co_names, _c.co_varnames)",
+                            "        for _c in (_pinned_raw_co, _pinned_rw_co)",
+                            "        if _c is not None",
+                            "    }",
+                            "    _smap = {}",
+                            "    _bmap = {}",
+                            "    class _SealedBound:",
+                            "        __slots__ = ()",
+                            "        def __init__(self, obj, fid):",
+                            "            _bmap[id(self)] = (obj, fid)",
+                            "        def __call__(self, *a, **kw):",
+                            "            _obj, _fid = _bmap[id(self)]",
+                            "            return _smap[_fid](_obj, *a, **kw)",
+                            "        def __getattribute__(self, name):",
+                            "            raise _b_PermissionError(",
+                            "                'closure introspection prohibited'",
+                            "            )",
+                            "        def __setattr__(self, name, val):",
+                            "            raise _b_PermissionError('closure mutation prohibited')",
+                            "        def __del__(self):",
+                            "            _bmap.pop(id(self), None)",
+                            "    class _SealedMethod:",
+                            "        __slots__ = ()",
+                            "        def __init__(self, fn):",
+                            "            _smap[id(self)] = fn",
+                            "        def __get__(self, obj, objtype=None):",
+                            "            if obj is None:",
+                            "                raise _b_PermissionError(",
+                            "                    'closure introspection prohibited'",
+                            "                )",
+                            "            return _SealedBound(obj, id(self))",
+                            "        def __call__(self, *a, **kw):",
+                            "            return _smap[id(self)](*a, **kw)",
+                            "        def __getattribute__(self, name):",
+                            "            raise _b_PermissionError(",
+                            "                'closure introspection prohibited'",
+                            "            )",
+                            "        def __setattr__(self, name, val):",
+                            "            raise _b_PermissionError('closure mutation prohibited')",
+                            "        def __del__(self):",
+                            "            _smap.pop(id(self), None)",
+                            "    def _seal_method(fn):",
+                            "        return _SealedMethod(fn)",
+                            "    _orig_fn_init = _pytest.python.Function.__dict__['__init__']",
+                            "    _ws_src = os.path.join(_ws_str, 'src')",
+                            "    if os.path.isdir(_ws_src) and _ws_src not in sys.path:",
+                            "        sys.path.append(_ws_src)",
+                            "    if _ws_str not in sys.path:",
+                            "        sys.path.append(_ws_str)",
+                            "    def _invoke_body(_fn, _nid, _a, _kw):",
+                            "        _c_audit('aipc.body_in', _nid, _fn)",
+                            "        _use_co = (",
+                            "            _pinned_rw_co",
+                            "            if (",
+                            "                _pinned_rw_co is not None",
+                            "                and '@py_builtins' in _fn.__globals__",
+                            "            )",
+                            "            else _pinned_raw_co",
+                            "        )",
+                            "        _bound_fn = _FunctionType(",
+                            "            _use_co,",
+                            "            _fn.__globals__,",
+                            "            _use_co.co_name,",
+                            "            _fn.__defaults__,",
+                            "            _fn.__closure__,",
+                            "        )",
+                            "        if _fn.__kwdefaults__ is not None:",
+                            "            _bound_fn.__kwdefaults__ = _fn.__kwdefaults__",
+                            "        _res = _bound_fn(*_a, **_kw)",
+                            "        _c_audit('aipc.body_out', _nid, _fn)",
+                            "        return _res",
+                            "    _orig_runtest = _pytest.python.Function.runtest",
+                            "    def _guarded_runtest(self_item):",
+                            "        _nid = self_item.nodeid",
+                            "        _orig_obj = _b_getattr(self_item, 'obj', None)",
+                            "        if (",
+                            "            _pytest.python.Function.__dict__.get('__init__')",
+                            "            is not _orig_fn_init",
+                            "            or _b_type(_orig_obj) is not _FunctionType",
+                            "            or _pinned_raw_co is None",
+                            "        ):",
+                            "            _c_audit('aipc.rt_fail', _nid)",
+                            "            raise _b_RuntimeError(",
+                            "                'REWARD_HACKING_DETECTED: test callable tampered'",
+                            "            )",
+                            "        _fc = _orig_obj.__code__",
+                            "        if (",
+                            "            os.path.normcase(os.path.realpath(_fc.co_filename))",
+                            "            != _test_file_norm",
+                            "            or _fc.co_name != _pinned_raw_co.co_name",
+                            "            or _fc.co_firstlineno != _pinned_raw_co.co_firstlineno",
+                            "            or _fc.co_argcount != _pinned_raw_co.co_argcount",
+                            "            or (",
+                            "                _fc.co_code,",
+                            "                _fc.co_consts,",
+                            "                _fc.co_names,",
+                            "                _fc.co_varnames,",
+                            "            )",
+                            "            not in _pinned_sigs",
+                            "        ):",
+                            "            _c_audit('aipc.rt_fail', _nid)",
+                            "            raise _b_RuntimeError(",
+                            "                'REWARD_HACKING_DETECTED: test callable tampered'",
+                            "            )",
+                            "        _c_audit('aipc.rt_in', _nid, _orig_obj)",
+                            "        self_item.obj = lambda *a, **kw: _invoke_body(",
+                            "            _orig_obj, _nid, a, kw",
+                            "        )",
+                            "        try:",
+                            "            _orig_runtest(self_item)",
+                            "        except _b_BaseException:",
+                            "            _c_audit('aipc.rt_fail', _nid)",
+                            "            raise",
+                            "        else:",
+                            "            _c_audit('aipc.rt_ok', _nid)",
+                            "        finally:",
+                            "            self_item.obj = _orig_obj",
+                            "            _c_audit('aipc.rt_end', _nid)",
+                            "    _sealed_runtest = _seal_method(_guarded_runtest)",
+                            "    _pytest.python.Function.runtest = _sealed_runtest",
+                            "    _orig_runtestprotocol = _pytest.runner.runtestprotocol",
+                            "    def _guarded_runtestprotocol(item, log=True, nextitem=None):",
+                            "        _c_audit('aipc.proto_in', item.nodeid)",
+                            "        reports = _orig_runtestprotocol(",
+                            "            item, log=log, nextitem=nextitem",
+                            "        )",
+                            "        _c_audit('aipc.proto_out', item.nodeid, reports)",
+                            "        return reports",
+                            "    _sealed_runtestprotocol = _seal_method(_guarded_runtestprotocol)",
+                            "    _pytest.runner.runtestprotocol = _sealed_runtestprotocol",
+                            "    class _NodePlugin:",
+                            "        __slots__ = ()",
+                            "    _plugin = _NodePlugin()",
+                            "    _ws_norm = os.path.normcase(os.path.realpath(_ws_str))",
+                            "    def _is_under_ws(path_str):",
+                            "        if not path_str:",
+                            "            return False",
+                            "        real_p = os.path.normcase(os.path.realpath(str(path_str)))",
+                            "        return (",
+                            "            real_p == _ws_norm",
+                            "            or real_p.startswith(_ws_norm + os.sep)",
+                            "        )",
+                            "    _pm_cls = _pytest.config.PytestPluginManager",
+                            "    _orig_get_plugins = _pm_cls.get_plugins",
+                            "    _orig_list_name_plugin = _pm_cls.list_name_plugin",
+                            "    _orig_get_plugin = _pm_cls.get_plugin",
+                            "    _orig_consider_module = _pm_cls.consider_module",
+                            "    _orig_register = _pm_cls.register",
+                            "    def _guarded_get_plugins(pm_self):",
+                            "        return {",
+                            "            p for p in _orig_get_plugins(pm_self)",
+                            "            if p is not _plugin",
+                            "        }",
+                            "    def _guarded_list_name_plugin(pm_self):",
+                            "        return [",
+                            "            (n, p) for n, p in _orig_list_name_plugin(pm_self)",
+                            "            if p is not _plugin",
+                            "        ]",
+                            "    def _guarded_get_plugin(pm_self, name):",
+                            "        res = _orig_get_plugin(pm_self, name)",
+                            "        return None if res is _plugin else res",
+                            "    def _guarded_consider_module(pm_self, mod):",
+                            "        if _is_under_ws(getattr(mod, '__file__', None)):",
+                            "            return None",
+                            "        return _orig_consider_module(pm_self, mod)",
+                            "    def _guarded_register(pm_self, plugin, name=None):",
+                            "        if plugin is _plugin:",
+                            "            return _orig_register(pm_self, plugin, name=name)",
+                            "        _c_audit('aipc.pm_register')",
+                            "        mod_name = getattr(plugin, '__module__', None)",
+                            "        mod_obj = sys.modules.get(mod_name) if mod_name else None",
+                            "        plugin_file = getattr(plugin, '__file__', None) or (",
+                            "            getattr(mod_obj, '__file__', None)",
+                            "            if mod_obj is not None",
+                            "            else None",
+                            "        )",
+                            "        if (",
+                            "            _is_under_ws(plugin_file)",
+                            "            and not hasattr(plugin, 'fspath')",
+                            "        ):",
+                            "            raise PermissionError('candidate plugin prohibited')",
+                            "        return _orig_register(pm_self, plugin, name=name)",
+                            "    _sealed_get_plugins = _seal_method(_guarded_get_plugins)",
+                            "    _sealed_list_name_plugin = _seal_method(",
+                            "        _guarded_list_name_plugin",
+                            "    )",
+                            "    _sealed_get_plugin = _seal_method(_guarded_get_plugin)",
+                            "    _sealed_consider_module = _seal_method(_guarded_consider_module)",
+                            "    _sealed_register = _seal_method(_guarded_register)",
+                            "    _pm_cls.get_plugins = _sealed_get_plugins",
+                            "    _pm_cls.list_name_plugin = _sealed_list_name_plugin",
+                            "    _pm_cls.get_plugin = _sealed_get_plugin",
+                            "    _pm_cls.consider_module = _sealed_consider_module",
+                            "    _pm_cls.register = _sealed_register",
+                            "    _expected_smap = dict(_smap)",
+                            "    def _install_crit_vault(",
+                            "        _v_key,",
+                            "        _v_out_path,",
+                            "        _v_pinned_raw_co,",
+                            "        _v_pinned_rw_co,",
+                            "        _v_pinned_sigs,",
+                            "        _v_test_file_norm,",
+                            "        _smap_ref,",
+                            "        _exp_smap,",
+                            "        _fn_cls_ref,",
+                            "        _orig_fn_init_ref,",
+                            "        _runner_file,",
+                            "        _code_rt,",
+                            "        _code_body,",
+                            "        _code_proto,",
+                            "        _code_reg,",
+                            "        _code_rc,",
+                            "        _stdlib_dir,",
+                            "        _site_dir,",
+                            "    ):",
+                            "        _json_encode_str = _json.encode_basestring_ascii",
+                            "        _sha256_ctor = hashlib.sha256",
+                            "        _nt_open = _native.open",
+                            "        _nt_write = _native.write",
+                            "        _nt_close = _native.close",
+                            "        _os_O_Flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC",
+                            "        _k_raw = _v_key.encode('utf-8')",
+                            "        _k_bytes = (",
+                            "            _sha256_ctor(_k_raw).digest()",
+                            "            if _b_len(_k_raw) > 64",
+                            "            else _k_raw",
+                            "        )",
+                            "        _k_pad = _k_bytes.ljust(64, b'\\x00')",
+                            "        _ih_init = _sha256_ctor(",
+                            "            _b_bytes(_x ^ 0x36 for _x in _k_pad)",
+                            "        )",
+                            "        _oh_init = _sha256_ctor(",
+                            "            _b_bytes(_x ^ 0x5c for _x in _k_pad)",
+                            "        )",
+                            "        _h_copy = _b_type(_ih_init).copy",
+                            "        _h_update = _b_type(_ih_init).update",
+                            "        _h_digest = _b_type(_ih_init).digest",
+                            "        _h_hexdigest = _b_type(_ih_init).hexdigest",
+                            "        del _v_key, _k_raw, _k_bytes, _k_pad",
+                            "        _c_getframe = sys._getframe",
+                            "        _in_getattr = [False]",
+                            "        _writing_out = [False]",
+                            "        _locked = [True]",
+                            "        _finalized = [False]",
+                            "        _phase_started = [False]",
+                            "        _fn_passed = set()",
+                            "        _fn_failed = set()",
+                            "        _passed_nodes = set()",
+                            "        _failed_nodes = set()",
+                            "        _body_in = set()",
+                            "        _body_out = set()",
+                            "        _in_call = {}",
+                            "        _started_nodes = set()",
+                            "        _active_fn = {}",
+                            "        _normcase = os.path.normcase",
+                            "        _realpath = os.path.realpath",
+                            "        def _co_matches(_ro):",
+                            "            if (",
+                            "                _fn_cls_ref.__dict__.get('__init__')",
+                            "                is not _orig_fn_init_ref",
+                            "                or _b_type(_ro) is not _FunctionType",
+                            "                or _v_pinned_raw_co is None",
+                            "            ):",
+                            "                return False",
+                            "            _fc = _ro.__code__",
+                            "            return (",
+                            "                _normcase(_realpath(_fc.co_filename))",
+                            "                == _v_test_file_norm",
+                            "                and _fc.co_name == _v_pinned_raw_co.co_name",
+                            "                and _fc.co_firstlineno",
+                            "                == _v_pinned_raw_co.co_firstlineno",
+                            "                and _fc.co_argcount",
+                            "                == _v_pinned_raw_co.co_argcount",
+                            "                and (",
+                            "                    _fc.co_code,",
+                            "                    _fc.co_consts,",
+                            "                    _fc.co_names,",
+                            "                    _fc.co_varnames,",
+                            "                )",
+                            "                in _v_pinned_sigs",
+                            "            )",
+                            "        def _vault_step(ev, args):",
+                            "            if _in_getattr[0]:",
+                            "                return None",
+                            "            if ev in ('gc.get_objects', 'gc.get_referrers'):",
+                            "                return ('perm', 'introspection prohibited')",
+                            "            if (",
+                            "                ev == 'object.__getattr__'",
+                            "                and _b_len(args) >= 2",
+                            "                and args[1] == 'tb_frame'",
+                            "            ):",
+                            "                _in_getattr[0] = True",
+                            "                try:",
+                            "                    _tb_f = _b_getattr(args[0], 'tb_frame', None)",
+                            "                    _tb_co = _b_getattr(_tb_f, 'f_code', None)",
+                            "                finally:",
+                            "                    _in_getattr[0] = False",
+                            "                if _tb_co in (",
+                            "                    _crit_audit_code,",
+                            "                    _vault_step_code,",
+                            "                ):",
+                            "                    return (",
+                            "                        'perm',",
+                            "                        'vault traceback frame access prohibited',",
+                            "                    )",
+                            "                return None",
+                            "            if ev == 'sys._getframe':",
+                            "                _in_getattr[0] = True",
+                            "                try:",
+                            "                    _cf = _c_getframe(2)",
+                            "                finally:",
+                            "                    _in_getattr[0] = False",
+                            "                _cf_file = _cf.f_code.co_filename",
+                            "                _cf_real = os.path.normcase(",
+                            "                    os.path.realpath(_cf_file)",
+                            "                )",
+                            "                _tf_file = (",
+                            "                    args[0].f_code.co_filename",
+                            "                    if args and hasattr(args[0], 'f_code')",
+                            "                    else ''",
+                            "                )",
+                            "                if (",
+                            "                    _is_under_ws(_cf_file)",
+                            "                    or _cf_file == '<string>'",
+                            "                    or _tf_file == _runner_file",
+                            "                    or (",
+                            "                        not _cf_file.startswith('<frozen ')",
+                            "                        and not _cf_real.startswith(",
+                            "                            _stdlib_dir + os.sep",
+                            "                        )",
+                            "                        and not _cf_real.startswith(",
+                            "                            _site_dir + os.sep",
+                            "                        )",
+                            "                        and _cf_file != _runner_file",
+                            "                    )",
+                            "                ):",
+                            "                    return ('perm', 'introspection prohibited')",
+                            "                return None",
+                            "            if (",
+                            "                ev in ('open', 'os.open')",
+                            "                and _writing_out[0]",
+                            "                and _b_len(args) >= 1",
+                            "                and args[0] == _v_out_path",
+                            "            ):",
+                            "                return None",
+                            "            if (",
+                            "                _locked[0]",
+                            "                and ev in (",
+                            "                    'open', 'os.open', 'os.unlink',",
+                            "                    'os.remove', 'os.rename', 'os.replace',",
+                            "                )",
+                            "                and args",
+                            "                and '_aipc_outcome_' in _b_str(args[0])",
+                            "            ):",
+                            "                return ('perm', 'outcome file protected')",
+                            "            if not ev.startswith('aipc.'):",
+                            "                return None",
+                            "            _in_getattr[0] = True",
+                            "            try:",
+                            "                _cc = _c_getframe(2).f_code",
+                            "            finally:",
+                            "                _in_getattr[0] = False",
+                            "            if ev == 'aipc.rt_in':",
+                            "                if _cc is not _code_rt:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _nid, _orig_obj = args",
+                            "                if not _co_matches(_orig_obj):",
+                            "                    _fn_failed.add(_nid)",
+                            "                    return (",
+                            "                        'runtime',",
+                            "                        'REWARD_HACKING_DETECTED: '",
+                            "                        'test callable tampered',",
+                            "                    )",
+                            "                if _nid in _started_nodes:",
+                            "                    _fn_failed.add(_nid)",
+                            "                else:",
+                            "                    _started_nodes.add(_nid)",
+                            "                    _active_fn[_nid] = _orig_obj",
+                            "                    _in_call[_nid] = True",
+                            "            elif ev == 'aipc.body_in':",
+                            "                if _cc is not _code_body:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _nid, _fn = args",
+                            "                if not _co_matches(_fn):",
+                            "                    _fn_failed.add(_nid)",
+                            "                    return (",
+                            "                        'runtime',",
+                            "                        'REWARD_HACKING_DETECTED: '",
+                            "                        'test callable tampered',",
+                            "                    )",
+                            "                if (",
+                            "                    _in_call.get(_nid) is True",
+                            "                    and _nid not in _body_in",
+                            "                    and _fn is _active_fn.get(_nid)",
+                            "                ):",
+                            "                    _body_in.add(_nid)",
+                            "                else:",
+                            "                    _fn_failed.add(_nid)",
+                            "            elif ev == 'aipc.body_out':",
+                            "                if _cc is not _code_body:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _nid, _fn = args",
+                            "                if (",
+                            "                    _in_call.get(_nid) is True",
+                            "                    and _nid in _body_in",
+                            "                    and _fn is _active_fn.get(_nid)",
+                            "                ):",
+                            "                    _body_out.add(_nid)",
+                            "                else:",
+                            "                    _fn_failed.add(_nid)",
+                            "            elif ev == 'aipc.rt_fail':",
+                            "                if _cc is not _code_rt:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _fn_failed.add(args[0])",
+                            "            elif ev == 'aipc.rt_ok':",
+                            "                if _cc is not _code_rt:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _nid = args[0]",
+                            "                if (",
+                            "                    _nid in _body_in",
+                            "                    and _nid in _body_out",
+                            "                    and _nid not in _fn_failed",
+                            "                    and _in_call.get(_nid) is True",
+                            "                ):",
+                            "                    _fn_passed.add(_nid)",
+                            "                else:",
+                            "                    _fn_failed.add(_nid)",
+                            "                    _b_err = (",
+                            "                        'REWARD_HACKING_DETECTED: body bypassed'",
+                            "                    )",
+                            "                    return ('runtime', _b_err)",
+                            "            elif ev == 'aipc.rt_end':",
+                            "                if _cc is not _code_rt:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _in_call[args[0]] = False",
+                            "            elif ev == 'aipc.proto_in':",
+                            "                if _cc is not _code_proto:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _phase_started[0] = True",
+                            "            elif ev == 'aipc.proto_out':",
+                            "                if _cc is not _code_proto:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _nid, _reports = args",
+                            "                for _rep in _reports:",
+                            "                    if (",
+                            "                        _rep.when == 'call'",
+                            "                        and _rep.outcome == 'passed'",
+                            "                    ):",
+                            "                        _passed_nodes.add(_rep.nodeid)",
+                            "                    elif (",
+                            "                        _rep.when in ('setup', 'call', 'teardown')",
+                            "                        and _rep.failed",
+                            "                    ):",
+                            "                        _failed_nodes.add(_rep.nodeid)",
+                            "            elif ev == 'aipc.pm_register':",
+                            "                if _cc is not _code_reg:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                if _phase_started[0]:",
+                            "                    return ('perm', 'candidate plugin prohibited')",
+                            "            elif ev == 'aipc.finalize_outcome':",
+                            "                if _cc is not _code_rc:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                if _finalized[0]:",
+                            "                    return ('perm', 'already finalized')",
+                            "                _finalized[0] = True",
+                            "                _rc_in, _guards_ok = args",
+                            "                _all_ok = (",
+                            "                    _b_bool(_guards_ok)",
+                            "                    and (_smap_ref == _exp_smap)",
+                            "                    and (",
+                            "                        _fn_cls_ref.__dict__.get('__init__')",
+                            "                        is _orig_fn_init_ref",
+                            "                    )",
+                            "                )",
+                            "                _eff_passed = (",
+                            "                    _b_sorted(_passed_nodes & _fn_passed)",
+                            "                    if (",
+                            "                        _all_ok",
+                            "                        and not _failed_nodes",
+                            "                        and not _fn_failed",
+                            "                    )",
+                            "                    else []",
+                            "                )",
+                            "                _eff_failed = _b_sorted(",
+                            "                    _failed_nodes | _fn_failed",
+                            "                )",
+                            "                _final_rc = _b_int(_rc_in)",
+                            "                if _eff_failed or not _all_ok:",
+                            "                    _final_rc = 1",
+                            "                _f_json = '[' + ', '.join(",
+                            "                    _json_encode_str(_b_str(_x))",
+                            "                    for _x in _eff_failed",
+                            "                ) + ']'",
+                            "                _p_json = '[' + ', '.join(",
+                            "                    _json_encode_str(_b_str(_x))",
+                            "                    for _x in _eff_passed",
+                            "                ) + ']'",
+                            "                _payload_str = (",
+                            "                    f'{{\"failed_nodes\": {_f_json}, '",
+                            "                    f'\"passed_nodes\": {_p_json}, '",
+                            "                    f'\"rc\": {_final_rc}}}'",
+                            "                )",
+                            "                _ih = _h_copy(_ih_init)",
+                            "                _h_update(_ih, _payload_str.encode('utf-8'))",
+                            "                _oh = _h_copy(_oh_init)",
+                            "                _h_update(_oh, _h_digest(_ih))",
+                            "                _mac = _h_hexdigest(_oh)",
+                            "                _out_str = (",
+                            "                    f'{{\"failed_nodes\": {_f_json}, '",
+                            "                    f'\"passed_nodes\": {_p_json}, '",
+                            "                    f'\"rc\": {_final_rc}, '",
+                            "                    f'\"mac\": {_json_encode_str(_mac)}}}'",
+                            "                )",
+                            "                _out_bytes = _out_str.encode('utf-8')",
+                            "                _writing_out[0] = True",
+                            "                try:",
+                            "                    _ofd = _nt_open(",
+                            "                        _v_out_path, _os_O_Flags, 0o600",
+                            "                    )",
+                            "                finally:",
+                            "                    _writing_out[0] = False",
+                            "                try:",
+                            "                    _off = 0",
+                            "                    while _off < _b_len(_out_bytes):",
+                            "                        _off += _nt_write(",
+                            "                            _ofd, _out_bytes[_off:]",
+                            "                        )",
+                            "                finally:",
+                            "                    _nt_close(_ofd)",
+                            "                if _final_rc != 0:",
+                            "                    return ('sysexit', 1)",
+                            "            return None",
+                            "        def _crit_audit(ev, args):",
+                            "            _res = _vault_step(ev, args)",
+                            "            if _res is not None:",
+                            "                if _res[0] == 'runtime':",
+                            "                    raise _b_RuntimeError(_res[1])",
+                            "                if _res[0] == 'sysexit':",
+                            "                    raise SystemExit(_res[1])",
+                            "                raise _b_PermissionError(_res[1])",
+                            "        _vault_step_code = _vault_step.__code__",
+                            "        _crit_audit_code = _crit_audit.__code__",
+                            "        sys.addaudithook(_crit_audit)",
+                            "        del _crit_audit",
+                            "    _install_crit_vault(",
+                            f"        {auth_nonce!r},",
+                            f"        {str(outcome_path)!r},",
+                            "        _pinned_raw_co,",
+                            "        _pinned_rw_co,",
+                            "        _pinned_sigs,",
+                            "        _test_file_norm,",
+                            "        _smap,",
+                            "        _expected_smap,",
+                            "        _pytest.python.Function,",
+                            "        _orig_fn_init,",
+                            "        __file__,",
+                            "        _guarded_runtest.__code__,",
+                            "        _invoke_body.__code__,",
+                            "        _guarded_runtestprotocol.__code__,",
+                            "        _guarded_register.__code__,",
+                            "        _run_crit_code,",
+                            "        os.path.normcase(",
+                            "            os.path.realpath(os.path.dirname(os.__file__))",
+                            "        ),",
+                            "        os.path.normcase(",
+                            "            os.path.realpath(",
+                            "                os.path.dirname(os.path.dirname(pytest.__file__))",
+                            "            )",
+                            "        ),",
+                            "    )",
+                            "    del _install_crit_vault, _expected_smap",
+                            "    _args = [",
+                            "        '--noconftest', '-p', 'no:cacheprovider', '-v',",
+                            "        sys.argv[1],",
+                            "    ]",
+                            "    _rc = int(_real_pytest_main(_args, plugins=[_plugin]))",
+                            "    _fn_d = _pytest.python.Function.__dict__",
+                            "    _pm_d = _pm_cls.__dict__",
+                            "    _guards_intact = (",
+                            "        sys.modules.get('pytest') is _real_pytest_mod",
+                            "        and getattr(pytest, 'main', None) is _real_pytest_main",
+                            "        and _fn_d.get('__init__') is _orig_fn_init",
+                            "        and _fn_d.get('runtest') is _sealed_runtest",
+                            "        and _pytest.runner.runtestprotocol is _sealed_runtestprotocol",
+                            "        and _pm_d.get('get_plugins') is _sealed_get_plugins",
+                            "        and _pm_d.get('list_name_plugin') is _sealed_list_name_plugin",
+                            "        and _pm_d.get('get_plugin') is _sealed_get_plugin",
+                            "        and _pm_d.get('consider_module') is _sealed_consider_module",
+                            "        and _pm_d.get('register') is _sealed_register",
+                            "    )",
+                            "    _c_audit('aipc.finalize_outcome', _rc, _guards_intact)",
+                            "    sys.exit(_rc)",
+                            "_run_crit()",
+                            "",
+                        ]
+                    )
+                    runner_script.write_text(runner_code, encoding="utf-8")
+                    exec_env = dict(sanitized_env)
+                    exec_env["PYTHONDONTWRITEBYTECODE"] = "1"
+                    exec_env["PYTHONSAFEPATH"] = "1"
+                    exec_env["PYTHONPATH"] = str(boot_dir)
+                    proc = subprocess.run(
+                        [py_exe, "-P", "-B", str(runner_script), test_node_id],
+                        cwd=str(workspace_root),
+                        env=exec_env,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_seconds,
+                        check=False,
+                    )
+                    outcome_data: dict[str, object] = {}
+                    mac_valid = False
+                    if outcome_path.is_file():
+                        try:
+                            parsed_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+                            if isinstance(parsed_outcome, dict):
+                                raw_mac = str(parsed_outcome.get("mac", ""))
+                                raw_rc = parsed_outcome.get("rc")
+                                raw_passed = parsed_outcome.get("passed_nodes")
+                                raw_failed = parsed_outcome.get("failed_nodes")
+                                if (
+                                    isinstance(raw_rc, int)
+                                    and isinstance(raw_passed, list)
+                                    and isinstance(raw_failed, list)
+                                ):
+                                    expected_msg = json.dumps(
+                                        {
+                                            "rc": raw_rc,
+                                            "passed_nodes": raw_passed,
+                                            "failed_nodes": raw_failed,
+                                        },
+                                        sort_keys=True,
+                                    ).encode("utf-8")
+                                    expected_mac = hmac.new(
+                                        auth_nonce.encode("utf-8"),
+                                        expected_msg,
+                                        hashlib.sha256,
+                                    ).hexdigest()
+                                    if hmac.compare_digest(raw_mac, expected_mac):
+                                        mac_valid = True
+                                        outcome_data = parsed_outcome
+                        except ValueError:
+                            outcome_data = {}
+                    passed_nodes = outcome_data.get("passed_nodes")
+                    failed_nodes = outcome_data.get("failed_nodes")
+                    passed = (
+                        mac_valid
+                        and proc.returncode == 0
+                        and outcome_data.get("rc") == 0
+                        and isinstance(failed_nodes, list)
+                        and not failed_nodes
+                        and isinstance(passed_nodes, list)
+                        and any(
+                            isinstance(n, str)
+                            and (n == test_node_id or n.startswith(test_node_id + "::"))
+                            for n in passed_nodes
+                        )
+                    )
+                execution_log = (proc.stdout or "") + (proc.stderr or "")
+                receipt, _ = record_trusted_criterion_execution(
+                    manifest,
+                    criterion_id=cid,
+                    candidate_sha=candidate_sha,
+                    test_node_id=test_node_id,
+                    passed=passed,
+                    exit_code=int(proc.returncode),
+                    execution_log=execution_log,
+                    phase_id=phase_id,
+                    task_id=task_id,
+                    attempt=attempt,
                 )
-            execution_log = (proc.stdout or "") + (proc.stderr or "")
-            receipt, _ = record_trusted_criterion_execution(
-                manifest,
-                criterion_id=cid,
-                candidate_sha=candidate_sha,
-                test_node_id=test_node_id,
-                passed=passed,
-                exit_code=int(proc.returncode),
-                execution_log=execution_log,
-                phase_id=phase_id,
-                task_id=task_id,
-                attempt=attempt,
-            )
-            receipts.append(receipt)
+                receipts.append(receipt)
 
         return tuple(receipts)
 
@@ -1794,6 +2138,7 @@ class TrustedAcceptanceHarnessValidator:
         review_context: ReviewContext | None = None,
         trusted_manifest_file: Path | None = None,
         criterion_execution_receipts: tuple[CriterionExecutionReceipt, ...] = (),
+        criterion_test_nodes: Mapping[str, str | Sequence[str]] | None = None,
     ) -> TrustedAcceptanceEvaluation:
         """Evaluate candidate changes and test evidence against TrustedHarnessManifest."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -1988,6 +2333,36 @@ class TrustedAcceptanceHarnessValidator:
 
             all_exec_receipts = list(criterion_execution_receipts)
 
+            expected_criteria: set[str] = set(manifest.required_criterion_ids)
+            if isinstance(criterion_results, dict):
+                expected_criteria.update(str(k) for k in criterion_results)
+            elif criterion_results is not None:
+                expected_criteria.update(cr.criterion_id for cr in criterion_results)
+
+            for rec in all_exec_receipts:
+                if rec.criterion_id not in expected_criteria:
+                    findings.append(
+                        RewardHackingFinding(
+                            rule_id="REQUIRED_CRITERION_UNVERIFIED",
+                            file_path="criteria",
+                            description=(
+                                f"Execution receipt for unexpected criterion '{rec.criterion_id}'"
+                            ),
+                        )
+                    )
+                    reward_hacking_detected = True
+
+            explicit_node_map: dict[str, tuple[str, ...]] = _normalize_criterion_test_nodes(
+                manifest.criterion_test_nodes
+            )
+            arg_node_map = _normalize_criterion_test_nodes(criterion_test_nodes)
+            mismatched_node_cids: set[str] = set()
+            for cid, nodes in arg_node_map.items():
+                if cid in explicit_node_map and explicit_node_map[cid] != nodes:
+                    mismatched_node_cids.add(cid)
+                else:
+                    explicit_node_map[cid] = nodes
+
             failed_receipt_cids = {
                 rec.criterion_id
                 for rec in all_exec_receipts
@@ -2045,11 +2420,35 @@ class TrustedAcceptanceHarnessValidator:
                     and review_context.checkpoint.attempt == review_context.task.attempt
                 )
 
+            def _expected_nodes_for_cid(
+                cid: str,
+                cr_evidence: Sequence[str],
+            ) -> tuple[str, ...] | None:
+                if cid in mismatched_node_cids:
+                    return None
+                if cid in explicit_node_map:
+                    return explicit_node_map[cid]
+                cid_exec_receipts = [rec for rec in all_exec_receipts if rec.criterion_id == cid]
+                if cid_exec_receipts:
+                    if any(not rec.passed or rec.exit_code != 0 for rec in cid_exec_receipts):
+                        return None
+                    return tuple(
+                        dict.fromkeys(
+                            _normalize_test_node_id(r.test_node_id) for r in cid_exec_receipts
+                        )
+                    )
+                nodes = tuple(
+                    dict.fromkeys(_normalize_test_node_id(ev) for ev in cr_evidence if "::" in ev)
+                )
+                return nodes if nodes else None
+
             def _matched_retained_trusted_receipt(
                 cid: str,
-            ) -> tuple[CriterionExecutionReceipt, str] | None:
+                expected_nodes: tuple[str, ...],
+            ) -> list[tuple[CriterionExecutionReceipt, str]] | None:
                 if (
-                    not _context_bound()
+                    not expected_nodes
+                    or not _context_bound()
                     or verification_receipt is None
                     or not verification_receipt.passed
                     or verification_receipt.exit_code != 0
@@ -2059,70 +2458,81 @@ class TrustedAcceptanceHarnessValidator:
                 ):
                     return None
                 assert review_context is not None
-                exec_record_path = Path(
-                    manifest.trusted_manifest_path
-                ).resolve().parent / _retained_exec_record_filename(
-                    cid,
-                    candidate_sha,
-                    phase_id=review_context.task.phase_id,
-                    task_id=task_id,
-                    attempt=review_context.task.attempt,
-                )
-                if not exec_record_path.is_file():
-                    return None
-                try:
-                    retained = json.loads(exec_record_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    return None
-                if not isinstance(retained, dict):
-                    return None
-                retained_receipt = retained.get("receipt")
-                retained_log = retained.get("execution_log")
-                controller_mac = retained.get("controller_mac")
-                if (
-                    not isinstance(retained_receipt, dict)
-                    or not isinstance(retained_log, str)
-                    or not isinstance(controller_mac, str)
-                    or not controller_mac.strip()
-                ):
-                    return None
-                try:
-                    retained_rec = CriterionExecutionReceipt.model_validate(retained_receipt)
-                except ValueError:
-                    return None
-                expected_mac = _compute_execution_record_mac(manifest, retained_rec)
-                if not hmac.compare_digest(controller_mac, expected_mac):
-                    return None
-                retained_log_sha = hashlib.sha256(retained_log.encode("utf-8")).hexdigest()
-                if retained_rec.log_sha256 is None or retained_log_sha != retained_rec.log_sha256:
-                    return None
-                if (
-                    retained_rec.criterion_id != cid
-                    or retained_rec.candidate_sha != candidate_sha
-                    or retained_rec.manifest_digest != manifest.manifest_digest
-                    or retained_rec.passed is not True
-                    or retained_rec.exit_code != 0
-                    or retained_rec.phase_id is None
-                    or not retained_rec.phase_id.strip()
-                    or retained_rec.phase_id != review_context.task.phase_id
-                    or retained_rec.task_id is None
-                    or not retained_rec.task_id.strip()
-                    or retained_rec.task_id != task_id
-                    or retained_rec.task_id != review_context.task.task_id
-                    or retained_rec.attempt is None
-                    or retained_rec.attempt != review_context.task.attempt
-                ):
-                    return None
-                norm_test_file = _verify_test_node(retained_rec.test_node_id)
-                if norm_test_file is None:
-                    return None
                 cid_exec_receipts = [rec for rec in all_exec_receipts if rec.criterion_id == cid]
-                if cid_exec_receipts:
-                    if any(not rec.passed or rec.exit_code != 0 for rec in cid_exec_receipts):
+                if cid_exec_receipts and any(
+                    not rec.passed or rec.exit_code != 0 for rec in cid_exec_receipts
+                ):
+                    return None
+                results: list[tuple[CriterionExecutionReceipt, str]] = []
+                for exp_node in expected_nodes:
+                    exec_record_path = Path(
+                        manifest.trusted_manifest_path
+                    ).resolve().parent / _retained_exec_record_filename(
+                        cid,
+                        candidate_sha,
+                        phase_id=review_context.task.phase_id,
+                        task_id=task_id,
+                        attempt=review_context.task.attempt,
+                        test_node_id=exp_node,
+                    )
+                    if not exec_record_path.is_file():
                         return None
-                    if not any(rec == retained_rec for rec in cid_exec_receipts):
+                    try:
+                        retained = json.loads(exec_record_path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
                         return None
-                return retained_rec, norm_test_file
+                    if not isinstance(retained, dict):
+                        return None
+                    retained_receipt = retained.get("receipt")
+                    retained_log = retained.get("execution_log")
+                    controller_mac = retained.get("controller_mac")
+                    if (
+                        not isinstance(retained_receipt, dict)
+                        or not isinstance(retained_log, str)
+                        or not isinstance(controller_mac, str)
+                        or not controller_mac.strip()
+                    ):
+                        return None
+                    try:
+                        retained_rec = CriterionExecutionReceipt.model_validate(retained_receipt)
+                    except ValueError:
+                        return None
+                    expected_mac = _compute_execution_record_mac(manifest, retained_rec)
+                    if not hmac.compare_digest(controller_mac, expected_mac):
+                        return None
+                    retained_log_sha = hashlib.sha256(retained_log.encode("utf-8")).hexdigest()
+                    if (
+                        retained_rec.log_sha256 is None
+                        or retained_log_sha != retained_rec.log_sha256
+                    ):
+                        return None
+                    if (
+                        retained_rec.criterion_id != cid
+                        or retained_rec.candidate_sha != candidate_sha
+                        or retained_rec.manifest_digest != manifest.manifest_digest
+                        or retained_rec.passed is not True
+                        or retained_rec.exit_code != 0
+                        or retained_rec.phase_id is None
+                        or not retained_rec.phase_id.strip()
+                        or retained_rec.phase_id != review_context.task.phase_id
+                        or retained_rec.task_id is None
+                        or not retained_rec.task_id.strip()
+                        or retained_rec.task_id != task_id
+                        or retained_rec.task_id != review_context.task.task_id
+                        or retained_rec.attempt is None
+                        or retained_rec.attempt != review_context.task.attempt
+                        or _normalize_test_node_id(retained_rec.test_node_id) != exp_node
+                    ):
+                        return None
+                    norm_test_file = _verify_test_node(retained_rec.test_node_id)
+                    if norm_test_file is None:
+                        return None
+                    if cid_exec_receipts and not any(
+                        rec == retained_rec for rec in cid_exec_receipts
+                    ):
+                        return None
+                    results.append((retained_rec, norm_test_file))
+                return results
 
             def _is_verified_context_artifact_for_criterion(
                 ev: str,
@@ -2182,32 +2592,41 @@ class TrustedAcceptanceHarnessValidator:
                     return False
                 return False
 
-            def _valid_criterion_evidence(ev: str, cid: str) -> bool:
+            def _valid_criterion_evidence(
+                ev: str,
+                cid: str,
+                cr_evidence: Sequence[str],
+            ) -> bool:
                 if not _context_bound():
                     return False
-                if cid in failed_receipt_cids:
+                if cid in failed_receipt_cids or cid in mismatched_node_cids:
                     return False
-                matched = _matched_retained_trusted_receipt(cid)
-                if matched is None:
+                exp_nodes = _expected_nodes_for_cid(cid, cr_evidence)
+                if not exp_nodes:
                     return False
-                exec_rec, norm_test_file = matched
+                matched_list = _matched_retained_trusted_receipt(cid, exp_nodes)
+                if not matched_list:
+                    return False
                 assert review_context is not None
                 assert verification_receipt is not None
                 assert manifest.manifest_digest is not None
                 expected_ev = (
                     f"receipt:{verification_receipt.candidate_sha}:{cid}:{manifest.manifest_digest}"
                 )
-                if ev in (exec_rec.test_node_id, norm_test_file, expected_ev):
-                    return True
-                return (
-                    exec_rec.log_sha256 is not None
-                    and _is_verified_context_artifact_for_criterion(
-                        ev,
-                        cid,
-                        required_test_node_id=exec_rec.test_node_id,
-                        required_log_sha256=exec_rec.log_sha256,
-                    )
-                )
+                for exec_rec, norm_test_file in matched_list:
+                    if ev in (exec_rec.test_node_id, norm_test_file, expected_ev):
+                        return True
+                    if (
+                        exec_rec.log_sha256 is not None
+                        and _is_verified_context_artifact_for_criterion(
+                            ev,
+                            cid,
+                            required_test_node_id=exec_rec.test_node_id,
+                            required_log_sha256=exec_rec.log_sha256,
+                        )
+                    ):
+                        return True
+                return False
 
             criterion_map: dict[str, bool] = {}
             if isinstance(criterion_results, dict):
@@ -2229,8 +2648,13 @@ class TrustedAcceptanceHarnessValidator:
             elif criterion_results is not None:
                 for cr in criterion_results:
                     if cr.criterion_id in manifest.required_criterion_ids:
-                        has_provenance = cr.criterion_id not in failed_receipt_cids and any(
-                            _valid_criterion_evidence(ev, cr.criterion_id) for ev in cr.evidence
+                        has_provenance = (
+                            cr.criterion_id not in failed_receipt_cids
+                            and cr.criterion_id not in mismatched_node_cids
+                            and any(
+                                _valid_criterion_evidence(ev, cr.criterion_id, cr.evidence)
+                                for ev in cr.evidence
+                            )
                         )
                         criterion_map[cr.criterion_id] = (
                             cr.status == CriterionStatus.PASS
@@ -2238,7 +2662,12 @@ class TrustedAcceptanceHarnessValidator:
                             and has_provenance
                         )
                     else:
-                        criterion_map[cr.criterion_id] = cr.status == CriterionStatus.PASS
+                        criterion_map[cr.criterion_id] = (
+                            cr.status == CriterionStatus.PASS
+                            and cr.criterion_id not in mismatched_node_cids
+                        )
+            for mismatch_cid in mismatched_node_cids:
+                criterion_map[mismatch_cid] = False
 
             if manifest.required_criterion_ids and criterion_results is None:
                 findings.append(
@@ -2481,7 +2910,7 @@ class SelfDevelopmentDogfoodingCoordinator:
         criterion_results: tuple[CriterionResult, ...] | dict[str, bool] | None = None,
         review_context: ReviewContext | None = None,
         criterion_execution_receipts: Sequence[CriterionExecutionReceipt] = (),
-        criterion_test_nodes: Mapping[str, str] | None = None,
+        criterion_test_nodes: Mapping[str, str | Sequence[str]] | None = None,
     ) -> DogfoodingAuditBundle:
         """Run trusted acceptance & isolation audit for a self-development candidate."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -2534,6 +2963,7 @@ class SelfDevelopmentDogfoodingCoordinator:
             verification_receipt=verification_receipt,
             review_context=gate_ctx,
             criterion_execution_receipts=effective_exec_receipts,
+            criterion_test_nodes=criterion_test_nodes,
         )
 
         blockers: list[str] = []

@@ -9,8 +9,10 @@ import pytest
 from aipc.controller import (
     ApprovedTaskContract,
     ControllerError,
+    MilestoneAuthorizationEvidence,
     PersistentTaskQueue,
     QueuedTaskStatus,
+    persist_milestone_authorization_evidence,
 )
 from aipc.hardening import SecretExposureError
 from aipc.recovery.models import (
@@ -280,3 +282,148 @@ def test_task_queue_enforces_bounded_retries_and_secret_free_persistence(
     # Secret exposure in contract objective is rejected fail-closed
     with pytest.raises(SecretExposureError):
         _contract("task-24-secret", objective=f"Using {SYNTHETIC_SECRET} in contract")
+
+
+def test_task_queue_milestone_c_requires_persisted_authorization_and_c01_c03_scope(
+    tmp_path: Path,
+) -> None:
+    """Milestone C queue requires persisted authorization evidence and C01-C03 scope."""
+    auth_path = tmp_path / "milestone_c_approval.json"
+    persist_milestone_authorization_evidence(
+        auth_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-mc-q1",
+            project_id="proj-alpha",
+            milestone_id="milestone-c",
+            decision="APPROVED",
+            authorized_workstreams=("c01", "c02", "c03"),
+        ),
+    )
+
+    def _mc_contract(
+        task_id: str = "task-mc-01",
+        *,
+        phase_id: str = "c01",
+        approval_id: str | None = "appr-mc-q1",
+    ) -> ApprovedTaskContract:
+        return ApprovedTaskContract(
+            task_id=task_id,
+            phase_id=phase_id,
+            milestone_id="milestone-c",
+            title=f"Execute {task_id}",
+            objective="Bounded Milestone C task execution",
+            in_scope=("src/aipc/project/profile.py",),
+            validation_commands=("pytest -q",),
+            approval_id=approval_id,
+        )
+
+    queue = PersistentTaskQueue(tmp_path / "queue.json")
+    contract = _mc_contract()
+    snap = queue.initialize(
+        project_id="proj-alpha",
+        milestone_id="milestone-c",
+        contracts=(contract,),
+    )
+    assert snap.tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+    running = queue.begin_dispatch(
+        "task-mc-01",
+        worker_id="agy-flash",
+        provider="gemini",
+    )
+    assert running.status == QueuedTaskStatus.RUNNING
+
+    # Negative: missing approval_id or out-of-scope phase_id on contract
+    with pytest.raises(ValueError):
+        _mc_contract(approval_id=None)
+
+    for bad_phase in ("c04", "phase-04", "phase-99", "d01", "milestone-d"):
+        with pytest.raises(ValueError):
+            _mc_contract(phase_id=bad_phase)
+
+    # Negative: missing milestone_c_approval.json
+    missing_dir = tmp_path / "missing_dir"
+    missing_dir.mkdir()
+    missing_queue = PersistentTaskQueue(missing_dir / "queue.json")
+    with pytest.raises(ControllerError):
+        missing_queue.initialize(
+            project_id="proj-alpha",
+            milestone_id="milestone-c",
+            contracts=(contract,),
+        )
+
+    # Negative: DENIED or STALE decision
+    for bad_decision in ("DENIED", "STALE"):
+        bad_dir = tmp_path / f"dir_{bad_decision.lower()}"
+        bad_dir.mkdir()
+        persist_milestone_authorization_evidence(
+            bad_dir / "milestone_c_approval.json",
+            MilestoneAuthorizationEvidence(
+                approval_id="appr-mc-q1",
+                project_id="proj-alpha",
+                milestone_id="milestone-c",
+                decision=bad_decision,
+                authorized_workstreams=("c01", "c02", "c03"),
+            ),
+        )
+        bad_queue = PersistentTaskQueue(bad_dir / "queue.json")
+        with pytest.raises(ControllerError):
+            bad_queue.initialize(
+                project_id="proj-alpha",
+                milestone_id="milestone-c",
+                contracts=(contract,),
+            )
+
+    # Negative: phase_id='c03' (and 'phase-03') when authorized_workstreams=('c01',)
+    c01_dir = tmp_path / "dir_c01_only"
+    c01_dir.mkdir()
+    persist_milestone_authorization_evidence(
+        c01_dir / "milestone_c_approval.json",
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-mc-q1",
+            project_id="proj-alpha",
+            milestone_id="milestone-c",
+            decision="APPROVED",
+            authorized_workstreams=("c01",),
+        ),
+    )
+    c01_queue = PersistentTaskQueue(c01_dir / "queue.json")
+    with pytest.raises(ControllerError):
+        c01_queue.initialize(
+            project_id="proj-alpha",
+            milestone_id="milestone-c",
+            contracts=(_mc_contract(phase_id="c03"),),
+        )
+    with pytest.raises(ControllerError):
+        c01_queue.initialize(
+            project_id="proj-alpha",
+            milestone_id="milestone-c",
+            contracts=(_mc_contract(phase_id="phase-03"),),
+        )
+
+    # Negative: begin_dispatch with out-of-scope target_paths
+    disp_dir = tmp_path / "dir_dispatch"
+    disp_dir.mkdir()
+    persist_milestone_authorization_evidence(
+        disp_dir / "milestone_c_approval.json",
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-mc-q1",
+            project_id="proj-alpha",
+            milestone_id="milestone-c",
+            decision="APPROVED",
+            authorized_workstreams=("c01", "c02", "c03"),
+        ),
+    )
+    disp_queue = PersistentTaskQueue(disp_dir / "queue.json")
+    disp_queue.initialize(
+        project_id="proj-alpha",
+        milestone_id="milestone-c",
+        contracts=(_mc_contract(phase_id="phase-01"),),
+    )
+    with pytest.raises(ControllerError):
+        disp_queue.begin_dispatch(
+            "task-mc-01",
+            worker_id="agy-flash",
+            provider="gemini",
+            target_paths=("outside/file.py",),
+        )

@@ -16,7 +16,9 @@ from aipc.agents.role_registry import (
 from aipc.agents.routing_models import CapabilityStatus
 from aipc.controller import (
     HumanGoalSpec,
+    MilestoneAuthorizationEvidence,
     PlannerOrchestrationEngine,
+    persist_milestone_authorization_evidence,
 )
 from aipc.domain.enums import CriterionStatus, ReviewVerdict, RiskLevel
 from aipc.domain.models import AgentResult, CriterionResult, ReviewResult, TaskRequest
@@ -390,3 +392,99 @@ def test_a04_rejects_unauthorized_milestones_and_defers_unverified_live_review(
     assert cycle.final_outcome == "DEFERRED"
     assert cycle.attempts_executed == 1
     assert cycle.final_project_state.status != "COMPLETED"
+
+
+def test_a04_milestone_c_requires_persisted_authorization_evidence(
+    tmp_path: Path,
+    review_case: dict[str, Any],
+) -> None:
+    """Milestone C goals require persisted, matching, non-stale authorization evidence."""
+    auth_path = tmp_path / "mc_auth.json"
+    persist_milestone_authorization_evidence(
+        auth_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-mc-001",
+            project_id="example",
+            milestone_id="milestone-c",
+            decision="APPROVED",
+            authorized_workstreams=("c01", "c02", "c03"),
+        ),
+    )
+
+    def _mc_goal(**overrides: Any) -> HumanGoalSpec:
+        params: dict[str, Any] = {
+            "project_id": "example",
+            "project_name": "AIPC 2.0",
+            "workspace": str(tmp_path),
+            "milestone_id": "milestone-c",
+            "phase_id": "c02",
+            "phase_name": "Workstream C02",
+            "goal_statement": "Execute bounded Milestone C02 verification",
+            "acceptance_criteria": (
+                AcceptanceCriterion(id="AC-1", statement="Verified", required=True),
+            ),
+            "in_scope_paths": ("src/aipc/controller/milestone_c_pipeline.py",),
+            "validation_commands": ("pytest -q",),
+            "approval_granted": True,
+            "approval_id": "appr-mc-001",
+            "approval_evidence_path": str(auth_path),
+        }
+        params.update(overrides)
+        return HumanGoalSpec(**params)
+
+    goal = _mc_goal()
+    engine = PlannerOrchestrationEngine(role_registry=_build_registry())
+    state = review_case["state"].model_copy(update={"current_phase": "c02"})
+    proposal = engine.build_initial_plan(goal, state=state)
+    assert proposal.status == "READY_FOR_WORKER"
+
+    # Negative 1: missing approval_evidence_path
+    with pytest.raises(ValueError):
+        _mc_goal(approval_evidence_path=None)
+
+    # Negative 2: missing evidence file on disk
+    with pytest.raises(ValueError):
+        _mc_goal(approval_evidence_path=str(tmp_path / "missing.json"))
+
+    # Negative 3: DENIED and STALE persisted evidence
+    for bad_decision in ("DENIED", "STALE"):
+        bad_path = tmp_path / f"mc_{bad_decision.lower()}.json"
+        persist_milestone_authorization_evidence(
+            bad_path,
+            MilestoneAuthorizationEvidence(
+                approval_id="appr-mc-001",
+                project_id="example",
+                milestone_id="milestone-c",
+                decision=bad_decision,
+                authorized_workstreams=("c01", "c02", "c03"),
+            ),
+        )
+        with pytest.raises(ValueError):
+            _mc_goal(approval_evidence_path=str(bad_path))
+
+    # Negative 4: scope mismatches
+    with pytest.raises(ValueError):
+        _mc_goal(project_id="wrong-project")
+
+    c01_c02_path = tmp_path / "mc_c01_c02.json"
+    persist_milestone_authorization_evidence(
+        c01_c02_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-mc-001",
+            project_id="example",
+            milestone_id="milestone-c",
+            decision="APPROVED",
+            authorized_workstreams=("c01", "c02"),
+        ),
+    )
+    with pytest.raises(ValueError):
+        _mc_goal(phase_id="c03", approval_evidence_path=str(c01_c02_path))
+
+    with pytest.raises(ValueError):
+        _mc_goal(phase_id="c04")
+
+    with pytest.raises(ValueError):
+        _mc_goal(in_scope_paths=("outside/hack.py",))
+
+    with pytest.raises(ValueError):
+        _mc_goal(in_scope_paths=("../escape.py",))

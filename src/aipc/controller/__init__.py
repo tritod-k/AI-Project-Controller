@@ -24,11 +24,15 @@ from aipc.controller.self_dev_runner import (
 )
 from aipc.controller.task_queue import (
     ApprovedTaskContract,
+    MilestoneAuthorizationEvidence,
     PersistentTaskQueue,
     QueuedTaskRecord,
     QueuedTaskStatus,
     TaskAttemptLedger,
     TaskQueueSnapshot,
+    load_milestone_authorization_evidence,
+    persist_milestone_authorization_evidence,
+    verify_milestone_c_authorization_scope,
 )
 
 if TYPE_CHECKING:
@@ -127,6 +131,7 @@ __all__ = [
     "HandoffReviewStatus",
     "HumanGoalSpec",
     "IMPORT_ORIGIN_MISMATCH",
+    "MilestoneAuthorizationEvidence",
     "MilestoneBFinalStatus",
     "MilestoneBOrchestrationResult",
     "MilestoneBRepairAndRecoveryOrchestrator",
@@ -154,5 +159,8 @@ __all__ = [
     "WorkerAttemptExecutionOutcome",
     "WorkerStepCallable",
     "assert_stable_process_free_of_candidate_imports",
+    "load_milestone_authorization_evidence",
+    "persist_milestone_authorization_evidence",
     "verify_candidate_import_origin",
+    "verify_milestone_c_authorization_scope",
 ]

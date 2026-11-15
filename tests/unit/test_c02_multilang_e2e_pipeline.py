@@ -27,7 +27,13 @@ from aipc.controller.milestone_c_pipeline import (
     PRReadinessBundle,
 )
 from aipc.controller.self_dev_runner import VERIFICATION_ISOLATION_BLOCKED
-from aipc.controller.task_queue import ApprovedTaskContract, PersistentTaskQueue, QueuedTaskStatus
+from aipc.controller.task_queue import (
+    ApprovedTaskContract,
+    MilestoneAuthorizationEvidence,
+    PersistentTaskQueue,
+    QueuedTaskStatus,
+    persist_milestone_authorization_evidence,
+)
 from aipc.domain.enums import AgentStatus, CriterionStatus, ReviewVerdict
 from aipc.domain.models import (
     AgentResult,
@@ -686,6 +692,16 @@ def test_receipt_secret_scanning_rejects_leaked_token() -> None:
 
 
 def _setup_queue(tmp_path: Path, project_id: str) -> PersistentTaskQueue:
+    persist_milestone_authorization_evidence(
+        tmp_path / "milestone_c_approval.json",
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-mc-c02",
+            project_id=project_id,
+            milestone_id="milestone-c",
+            decision="APPROVED",
+            authorized_workstreams=("c01", "c02", "c03"),
+        ),
+    )
     queue = PersistentTaskQueue(tmp_path / "queue.json")
     contract = ApprovedTaskContract(
         task_id="task-01",
@@ -695,6 +711,7 @@ def _setup_queue(tmp_path: Path, project_id: str) -> PersistentTaskQueue:
         objective="Run isolated verification and review",
         in_scope=("src/app.py",),
         validation_commands=("python -m pytest -q",),
+        approval_id="appr-mc-c02",
     )
     queue.initialize(project_id=project_id, milestone_id="milestone-c", contracts=(contract,))
     return queue
@@ -2479,3 +2496,190 @@ def test_isolated_subprocess_blocks_builtin_isinstance_mutation_and_native_open(
     )
     assert receipt.passed is True
     assert not ext_sentinel.exists()
+
+
+def test_c15_sec01_meta_path_closure_and_audit_frame_callback_blocked(tmp_path: Path) -> None:
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    ws_path = Path(bundle.workspace_root)
+    aipc_dir = ws_path / "src" / "aipc"
+    aipc_dir.mkdir(parents=True, exist_ok=True)
+    (aipc_dir / "__init__.py").write_text("CANDIDATE = True\n", encoding="utf-8")
+    head_sha = _commit_all_clean(ws_path, "add candidate aipc")
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    outside_target = tmp_path / "outside_escape.txt"
+    verifier = MultiLanguageIsolatedVerifier()
+    probe = "\n".join(
+        [
+            "import os, pathlib, shutil, sys",
+            "stable_blocker = next(",
+            "    m for m in sys.meta_path if type(m).__name__ == '_StableAipcBlocker'",
+            ")",
+            "assert stable_blocker.find_spec.__func__.__closure__ is None",
+            "import_blocker = next(",
+            "    m for m in sys.meta_path if type(m).__name__ == '_BlockDisallowedImports'",
+            ")",
+            "assert import_blocker.find_spec.__func__.__closure__ is None",
+            "assert os.open.__closure__ is None",
+            f"_target = {str(outside_target)!r}",
+            "_callback_ran = [False]",
+            "class _TrapPath(os.PathLike):",
+            "    def __fspath__(self):",
+            "        sys._getframe(1)",
+            "        _callback_ran[0] = True",
+            "        return _target",
+            "for _op in (",
+            "    lambda: open(_TrapPath(), 'w', encoding='utf-8'),",
+            "    lambda: os.remove(_TrapPath()),",
+            "    lambda: shutil.rmtree(_TrapPath()),",
+            "    lambda: sys.audit('open', _TrapPath(), 'w', 0),",
+            "):",
+            "    _blocked = False",
+            "    try:",
+            "        _op()",
+            "    except PermissionError:",
+            "        _blocked = True",
+            "    assert _blocked",
+            "assert _callback_ran[0] is False",
+            "assert not pathlib.Path(_target).exists()",
+            "print('1 passed')",
+        ]
+    )
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", probe),
+    )
+    assert receipt.passed is True
+    assert not outside_target.exists()
+
+
+def test_c15_sec02_c02_container_probe_blocks_forged_stdout_and_native_exit(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    ws_path = Path(bundle.workspace_root)
+    aipc_dir = ws_path / "src" / "aipc"
+    aipc_dir.mkdir(parents=True, exist_ok=True)
+    hostile_init = "\n".join(
+        [
+            "import os, subprocess, sys",
+            "_nat = __import__('nt' if os.name == 'nt' else 'posix')",
+            'os.write(1, b\'AIPC_C02_ORIGIN_FORGED:{"file":"/evil"}\\n\')',
+            'print(\'AIPC_C02_ORIGIN_FORGED_PRINT:{"file":"/evil"}\', flush=True)',
+            "for _fn in (",
+            "    lambda: _nat._exit(0),",
+            "    lambda: os._exit(0),",
+            "    lambda: subprocess.Popen([sys.executable, '-c', 'pass']),",
+            "):",
+            "    _blocked = False",
+            "    try:",
+            "        _fn()",
+            "    except PermissionError:",
+            "        _blocked = True",
+            "    if not _blocked:",
+            "        raise RuntimeError('expected PermissionError')",
+            "",
+        ]
+    )
+    (aipc_dir / "__init__.py").write_text(hostile_init, encoding="utf-8")
+    head_sha = _commit_all_clean(ws_path, "add hostile candidate aipc")
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+
+    ws = ws_path.resolve()
+    ws_init_posix = (ws / "src" / "aipc" / "__init__.py").as_posix()
+    ws_src_posix = (ws / "src").as_posix()
+    child_tmp_posix = (tmp_path / "aipc_c02_child.py").as_posix()
+
+    def _adapt_probe(raw_probe: str, out_dir_posix: str) -> str:
+        adapted = raw_probe.replace("/workspace/src/aipc/__init__.py", ws_init_posix)
+        adapted = adapted.replace("/workspace/src", ws_src_posix)
+        adapted = adapted.replace("/workspace-out", out_dir_posix)
+        adapted = adapted.replace("/tmp/.aipc_c02_child.py", child_tmp_posix)
+        adapted = adapted.replace("/out/.aipc_", f"{out_dir_posix}/.aipc_")
+        adapted = adapted.replace("'/out'", f"{out_dir_posix!r}")
+        if os.name == "nt":
+            adapted = adapted.replace(
+                "if not _s.startswith('/'):",
+                "if not _s.startswith('/') and not (len(_s) >= 2 and _s[1] == ':'):",
+            )
+            adapted = adapted.replace(
+                "return '/' + '/'.join(_stack)",
+                "return ('/' if _s.startswith('/') else '') + '/'.join(_stack)",
+            )
+        return adapted
+
+    def _extract_out_dir(argv: list[str]) -> str:
+        for tok in argv:
+            if isinstance(tok, str) and tok.endswith(":/workspace-out:rw"):
+                return Path(tok[: -len(":/workspace-out:rw")]).as_posix()
+        raise AssertionError("missing workspace-out mount in container argv")
+
+    probe_results: list[subprocess.CompletedProcess[str]] = []
+
+    def _valid_runner(argv, **kwargs):
+        if len(argv) >= 2 and "_c02_probe" in str(argv[-1]):
+            out_dir_posix = _extract_out_dir(list(argv))
+            adapted = _adapt_probe(str(argv[-1]), out_dir_posix)
+            res = subprocess.run(
+                [sys.executable, "-I", "-S", "-B", "-c", adapted],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            probe_results.append(res)
+            return res
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    verifier = MultiLanguageIsolatedVerifier()
+    verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=_valid_runner,
+    )
+    assert len(probe_results) == 1
+    assert probe_results[0].returncode == 0
+    assert "AIPC_C02_ORIGIN_FORGED" not in probe_results[0].stdout
+    assert "AIPC_ORIGIN_" in probe_results[0].stdout
+    assert "AIPC_ORIGIN_DONE_" in probe_results[0].stdout
+
+    def _unsealed_runner(argv, **kwargs):
+        if len(argv) >= 2 and "_c02_probe" in str(argv[-1]):
+            out_dir_posix = _extract_out_dir(list(argv))
+            adapted = _adapt_probe(str(argv[-1]), out_dir_posix)
+            tampered = adapted.replace("_seal_hex = _h_hexdigest(_outer)", "_seal_hex = '0' * 64")
+            return subprocess.run(
+                [sys.executable, "-I", "-S", "-B", "-c", tampered],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    failed_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=_unsealed_runner,
+    )
+    assert failed_receipt.passed is False
+    assert failed_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"

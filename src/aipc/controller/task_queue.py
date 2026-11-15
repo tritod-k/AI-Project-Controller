@@ -7,6 +7,10 @@ quota-exhaustion preservation, bounded retries, and secret-free atomic persisten
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -41,6 +45,35 @@ _PROHIBITED_MILESTONE_PREFIXES: tuple[str, ...] = (
 )
 
 
+_AUTHORIZED_MILESTONE_C_WORKSTREAMS: frozenset[str] = frozenset({"c01", "c02", "c03"})
+_AUTHORIZED_MILESTONE_C_IDS: frozenset[str] = frozenset({"milestone-c", "aipc-2.0-milestone-c"})
+_AUTHORIZED_MILESTONE_C_COMPOSITE_PHASES: frozenset[str] = frozenset(
+    {"milestone-c-repair", "milestone-c-docs", "milestone-c-hydrogen"}
+)
+_AUTHORIZED_MILESTONE_C_PHASES: frozenset[str] = frozenset(
+    {
+        "c01",
+        "c02",
+        "c03",
+        "phase-01",
+        "phase-02",
+        "phase-03",
+        "phase-c01",
+        "phase-c02",
+        "phase-c03",
+        "milestone-c-repair",
+        "milestone-c-docs",
+        "milestone-c-hydrogen",
+    }
+)
+_MILESTONE_C_PHASE_ALIASES: dict[str, str] = {
+    "phase-01": "c01",
+    "phase-02": "c02",
+    "phase-03": "c03",
+}
+_FORBIDDEN_WORKSTREAM_RE = re.compile(r"c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)")
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -50,6 +83,174 @@ def _is_unapproved_future_scope(text: str) -> bool:
     return any(
         lowered.startswith(prefix) or prefix in lowered for prefix in _PROHIBITED_MILESTONE_PREFIXES
     )
+
+
+def _is_milestone_c_scope(text: str) -> bool:
+    lowered = text.strip().lower()
+    if any(tok in lowered for tok in ("milestone-c", "milestone_c", "workstream-c")):
+        return True
+    return any(lowered == prefix or lowered.startswith(prefix) for prefix in ("c01", "c02", "c03"))
+
+
+class MilestoneAuthorizationEvidence(CanonicalRecord):
+    """Persisted human authorization evidence for bounded Milestone C execution."""
+
+    approval_id: Identifier
+    project_id: Identifier
+    milestone_id: Identifier = "milestone-c"
+    decision: Literal["APPROVED", "DENIED", "STALE", "EXPIRED", "REVOKED"] = "APPROVED"
+    authorized_by: NonEmptyStr = "K.TRITOD"
+    baseline_commit_sha: str = "849c86684867487f6f0ad8eb54c603cba240dd34"
+    authorized_workstreams: tuple[str, ...] = ("c01", "c02", "c03")
+    allowed_path_prefixes: tuple[PortableRelativePath, ...] = (
+        "src/",
+        "tests/",
+        "docs/",
+        ".agents/",
+        "projects/",
+        "schemas/",
+        "tools/",
+    )
+    evidence_digest: str | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> Self:
+        milestone_low = self.milestone_id.strip().lower()
+        if milestone_low not in _AUTHORIZED_MILESTONE_C_IDS or _is_unapproved_future_scope(
+            self.milestone_id
+        ):
+            raise ValueError(
+                f"milestone_id {self.milestone_id!r} is not an authorized Milestone C identifier"
+            )
+        if not self.authorized_workstreams:
+            raise ValueError("authorized_workstreams must not be empty")
+        if any(
+            w.strip().lower() not in _AUTHORIZED_MILESTONE_C_WORKSTREAMS
+            for w in self.authorized_workstreams
+        ):
+            raise ValueError(
+                f"authorized_workstreams contains unauthorized entry: {self.authorized_workstreams}"
+            )
+        payload = json.dumps(
+            (
+                self.approval_id,
+                self.project_id,
+                milestone_low,
+                self.decision,
+                self.authorized_by,
+                self.baseline_commit_sha,
+                [w.strip().lower() for w in self.authorized_workstreams],
+                [p.replace("\\", "/").strip() for p in self.allowed_path_prefixes],
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        expected = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        if self.evidence_digest is None:
+            object.__setattr__(self, "evidence_digest", expected)
+        elif self.evidence_digest != expected:
+            raise ValueError("MilestoneAuthorizationEvidence digest mismatch")
+        assert_no_secrets(self.model_dump(mode="json"))
+        return self
+
+
+def persist_milestone_authorization_evidence(
+    path: Path, evidence: MilestoneAuthorizationEvidence
+) -> Path:
+    """Atomically persist MilestoneAuthorizationEvidence to JSON and return its path."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(target, evidence.model_dump(mode="json"))
+    return target
+
+
+def load_milestone_authorization_evidence(path: Path) -> MilestoneAuthorizationEvidence:
+    """Load and validate persisted MilestoneAuthorizationEvidence from disk."""
+    target = Path(path)
+    if not target.is_file():
+        raise ValueError(f"Milestone authorization evidence file not found: {target}")
+    try:
+        raw = load_json(target)
+        assert_no_secrets(raw)
+        return MilestoneAuthorizationEvidence.model_validate(raw)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Invalid milestone authorization evidence: {exc}") from exc
+
+
+def _is_forbidden_phase_token(phase_low: str) -> bool:
+    return (
+        "milestone-d" in phase_low
+        or "milestone_d" in phase_low
+        or bool(_FORBIDDEN_WORKSTREAM_RE.search(phase_low))
+    )
+
+
+def _is_phase_in_workstreams(phase_low: str, workstreams: set[str]) -> bool:
+    if any(
+        phase_low == w or phase_low.startswith(f"{w}-") or phase_low.endswith(f"-{w}")
+        for w in workstreams
+    ):
+        return True
+    mapped = _MILESTONE_C_PHASE_ALIASES.get(phase_low)
+    if mapped is not None:
+        return mapped in workstreams
+    return (
+        phase_low in _AUTHORIZED_MILESTONE_C_COMPOSITE_PHASES
+        and _AUTHORIZED_MILESTONE_C_WORKSTREAMS.issubset(workstreams)
+    )
+
+
+def verify_milestone_c_authorization_scope(
+    evidence: MilestoneAuthorizationEvidence,
+    *,
+    project_id: str,
+    milestone_id: str,
+    phase_id: str,
+    in_scope_paths: Sequence[str],
+    expected_approval_id: str | None = None,
+) -> None:
+    """Verify persisted Milestone C authorization evidence covers the requested scope."""
+    if evidence.decision != "APPROVED":
+        raise ValueError(
+            f"Milestone C authorization is not APPROVED (decision={evidence.decision})"
+        )
+    if expected_approval_id is not None and evidence.approval_id != expected_approval_id:
+        raise ValueError(
+            f"approval_id mismatch: expected {expected_approval_id!r}, got {evidence.approval_id!r}"
+        )
+    if evidence.project_id != project_id:
+        raise ValueError(
+            f"project_id mismatch: expected {project_id!r}, got {evidence.project_id!r}"
+        )
+    if evidence.milestone_id.strip().lower() != milestone_id.strip().lower():
+        raise ValueError(
+            f"milestone_id mismatch: expected {milestone_id!r}, got {evidence.milestone_id!r}"
+        )
+
+    p_low = phase_id.strip().lower()
+    allowed_workstreams = {w.strip().lower() for w in evidence.authorized_workstreams}
+    if _is_forbidden_phase_token(p_low) or not _is_phase_in_workstreams(p_low, allowed_workstreams):
+        raise ValueError(
+            f"phase_id {phase_id!r} is outside authorized Milestone C workstream scope"
+        )
+
+    allowed_prefixes = [p.replace("\\", "/").strip() for p in evidence.allowed_path_prefixes]
+    for raw_path in in_scope_paths:
+        norm = raw_path.replace("\\", "/").strip()
+        is_drive_abs = len(norm) >= 2 and norm[1] == ":" and norm[0].isalpha()
+        if (
+            not norm
+            or Path(raw_path).is_absolute()
+            or Path(norm).is_absolute()
+            or norm.startswith("/")
+            or is_drive_abs
+            or ".." in norm.split("/")
+        ):
+            raise ValueError(f"Unsafe or non-relative path in Milestone C scope: {raw_path!r}")
+        if not any(norm.startswith(prefix) for prefix in allowed_prefixes):
+            raise ValueError(f"Path {raw_path!r} is outside authorized Milestone C path prefixes")
 
 
 class QueuedTaskStatus(StrEnum):
@@ -79,6 +280,8 @@ class ApprovedTaskContract(CanonicalRecord):
     out_of_scope: tuple[PortableRelativePath, ...] = ()
     validation_commands: tuple[NonEmptyStr, ...] = Field(min_length=1)
     require_independent_review: StrictBool = True
+    approval_id: Identifier | None = None
+    approval_evidence_path: str | None = None
 
     @model_validator(mode="after")
     def validate_approved_scope(self) -> Self:
@@ -91,6 +294,31 @@ class ApprovedTaskContract(CanonicalRecord):
             if _is_unapproved_future_scope(val):
                 raise ValueError(
                     f"{field_name} references unapproved future roadmap scope: '{val}'"
+                )
+        if any(
+            _is_milestone_c_scope(val) for val in (self.milestone_id, self.phase_id, self.task_id)
+        ):
+            if self.approval_id is None:
+                raise ValueError(
+                    "Milestone C task contract requires an explicit approval_id "
+                    "reference to persisted authorization evidence"
+                )
+            p_low = self.phase_id.strip().lower()
+            if p_low not in _AUTHORIZED_MILESTONE_C_PHASES and not p_low.startswith(
+                ("c01-", "c02-", "c03-")
+            ):
+                raise ValueError(
+                    f"phase_id {self.phase_id!r} is outside authorized Milestone C C01-C03 scope"
+                )
+            if self.approval_evidence_path is not None:
+                evidence = load_milestone_authorization_evidence(Path(self.approval_evidence_path))
+                verify_milestone_c_authorization_scope(
+                    evidence,
+                    project_id=evidence.project_id,
+                    milestone_id=self.milestone_id,
+                    phase_id=self.phase_id,
+                    in_scope_paths=self.in_scope,
+                    expected_approval_id=self.approval_id,
                 )
         if self.task_id in self.depends_on:
             raise ValueError(f"task '{self.task_id}' cannot depend on itself")
@@ -179,6 +407,8 @@ class TaskQueueSnapshot(CanonicalRecord):
     project_id: Identifier
     milestone_id: Identifier
     stop_at_milestone_boundary: Literal[True] = True
+    approval_id: Identifier | None = None
+    approval_evidence_path: str | None = None
     tasks: tuple[QueuedTaskRecord, ...] = Field(min_length=1)
     updated_at: datetime
 
@@ -249,12 +479,54 @@ class PersistentTaskQueue:
     def path(self) -> Path:
         return self._path
 
+    def _verify_milestone_c_authorization(
+        self,
+        *,
+        project_id: str,
+        milestone_id: str,
+        contract: ApprovedTaskContract,
+        approval_evidence_path: Path | str | None = None,
+        snapshot_evidence_path: str | None = None,
+        extra_paths: Sequence[str] = (),
+    ) -> None:
+        if not (
+            _is_milestone_c_scope(milestone_id)
+            or _is_milestone_c_scope(contract.milestone_id)
+            or _is_milestone_c_scope(contract.phase_id)
+            or _is_milestone_c_scope(contract.task_id)
+        ):
+            return
+
+        resolved_path = (
+            Path(approval_evidence_path)
+            if approval_evidence_path is not None
+            else Path(contract.approval_evidence_path)
+            if contract.approval_evidence_path is not None
+            else Path(snapshot_evidence_path)
+            if snapshot_evidence_path is not None
+            else self._path.parent / "milestone_c_approval.json"
+        )
+        try:
+            evidence = load_milestone_authorization_evidence(resolved_path)
+            verify_milestone_c_authorization_scope(
+                evidence,
+                project_id=project_id,
+                milestone_id=milestone_id,
+                phase_id=contract.phase_id,
+                in_scope_paths=(*contract.in_scope, *extra_paths),
+                expected_approval_id=contract.approval_id,
+            )
+        except Exception as exc:
+            raise ControllerError(f"Milestone C authorization verification failed: {exc}") from exc
+
     def initialize(
         self,
         *,
         project_id: str,
         milestone_id: str,
         contracts: tuple[ApprovedTaskContract, ...] | list[ApprovedTaskContract],
+        approval_id: str | None = None,
+        approval_evidence_path: Path | str | None = None,
     ) -> TaskQueueSnapshot:
         """Create and persist a validated milestone task queue from approved contracts."""
         if _is_unapproved_future_scope(milestone_id):
@@ -264,11 +536,22 @@ class PersistentTaskQueue:
         if not contracts:
             raise ControllerError("task queue initialization requires at least one task")
 
+        for contract in contracts:
+            self._verify_milestone_c_authorization(
+                project_id=project_id,
+                milestone_id=milestone_id,
+                contract=contract,
+                approval_evidence_path=approval_evidence_path,
+            )
+
         records = tuple(QueuedTaskRecord(contract=c) for c in contracts)
+        ev_path_str = str(approval_evidence_path) if approval_evidence_path is not None else None
         try:
             snapshot = TaskQueueSnapshot(
                 project_id=project_id,
                 milestone_id=milestone_id,
+                approval_id=approval_id,
+                approval_evidence_path=ev_path_str,
                 tasks=records,
                 updated_at=self._clock(),
             )
@@ -378,6 +661,13 @@ class PersistentTaskQueue:
                 )
 
         target = by_id[task_id]
+        self._verify_milestone_c_authorization(
+            project_id=snap.project_id,
+            milestone_id=snap.milestone_id,
+            contract=target.contract,
+            snapshot_evidence_path=snap.approval_evidence_path,
+            extra_paths=target_paths or (),
+        )
         if target.status not in (QueuedTaskStatus.ELIGIBLE, QueuedTaskStatus.REPAIR_REQUIRED):
             raise ControllerError(
                 f"task '{task_id}' is not eligible for dispatch (status={target.status})"
@@ -628,9 +918,13 @@ class PersistentTaskQueue:
 
 __all__ = [
     "ApprovedTaskContract",
+    "MilestoneAuthorizationEvidence",
     "PersistentTaskQueue",
     "QueuedTaskRecord",
     "QueuedTaskStatus",
     "TaskAttemptLedger",
     "TaskQueueSnapshot",
+    "load_milestone_authorization_evidence",
+    "persist_milestone_authorization_evidence",
+    "verify_milestone_c_authorization_scope",
 ]

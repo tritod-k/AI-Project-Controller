@@ -14,6 +14,7 @@ import aipc.review as review_pkg
 from aipc.controller.self_dev_runner import (
     CandidateImportOriginReport,
     CandidateVerificationReceipt,
+    SafeSelfDevelopmentRunner,
     StableCandidateConfig,
     verify_candidate_import_origin,
 )
@@ -71,6 +72,7 @@ from aipc.review.trusted_acceptance_harness import (
     TrustedAcceptanceEvaluation,
     TrustedAcceptanceHarnessValidator,
     TrustedHarnessManifest,
+    _retained_exec_record_filename,
     assert_milestone_c_scope_authorized,
     build_trusted_harness_manifest,
     record_trusted_criterion_execution,
@@ -2770,9 +2772,15 @@ def test_execute_and_record_criteria_and_dogfooding_production_caller(
     assert exec_receipts[0].task_id == "task-c03-dogfood-prod"
     assert exec_receipts[0].attempt == 1
     assert manifest.trusted_manifest_path is not None
-    record_file = (
-        Path(manifest.trusted_manifest_path).resolve().parent
-        / f"exec_AC-01_c03_task-c03-dogfood-prod_1_{cand_sha[:12]}.json"
+    record_file = Path(manifest.trusted_manifest_path).resolve().parent / (
+        _retained_exec_record_filename(
+            "AC-01",
+            cand_sha,
+            phase_id="c03",
+            task_id="task-c03-dogfood-prod",
+            attempt=1,
+            test_node_id=test_node,
+        )
     )
     assert record_file.is_file()
 
@@ -3861,3 +3869,454 @@ def test_required_criterion_rejects_unpinned_test_file_and_unauthenticated_retai
     assert valid_eval.passed is True
     assert valid_eval.findings == ()
     assert valid_eval.rejection_code is None
+
+
+def test_c15_sec01_self_dev_runner_os_open_closure_and_pathlike_callback_blocked(
+    tmp_path: Path,
+) -> None:
+    stable_root, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    outside_target = tmp_path / "outside_runner_escape.txt"
+    sec_test = candidate_root / "tests" / "unit" / "test_sec01_runner.py"
+    sec_test.write_text(
+        "\n".join(
+            [
+                "import os, pathlib, sys",
+                "",
+                "def test_runner_closures_and_pathlike_callback_blocked() -> None:",
+                "    blocker = next(",
+                "        m for m in sys.meta_path if type(m).__name__ == '_BlockNativeMods'",
+                "    )",
+                "    assert blocker.find_spec.__func__.__closure__ is None",
+                "    assert os.open.__closure__ is None",
+                f"    target = {str(outside_target)!r}",
+                "    callback_ran = [False]",
+                "    class _TrapPath(os.PathLike):",
+                "        def __fspath__(self):",
+                "            sys._getframe(1)",
+                "            callback_ran[0] = True",
+                "            return target",
+                "    for op in (",
+                "        lambda: open(_TrapPath(), 'w', encoding='utf-8'),",
+                "        lambda: os.remove(_TrapPath()),",
+                "        lambda: sys.audit('open', _TrapPath(), 'w', 0),",
+                "    ):",
+                "        blocked = False",
+                "        try:",
+                "            op()",
+                "        except PermissionError:",
+                "            blocked = True",
+                "        assert blocked",
+                "    assert callback_ran[0] is False",
+                "    assert not pathlib.Path(target).exists()",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha = _init_git_repo(candidate_root)
+    config = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=_git_head_sha(stable_root),
+        candidate_sha=cand_sha,
+        verification_isolation="isolated_subprocess",
+        allow_auto_promote_stable=False,
+    )
+    runner = SafeSelfDevelopmentRunner(config)
+    receipt = runner.run_candidate_verification(
+        pytest_targets=("tests/unit/test_sec01_runner.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.import_origin_verified is True
+    assert not outside_target.exists()
+
+
+def test_c15_arch03_candidate_replacing_function_init_or_item_obj_fails_closed(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    trusted_test = candidate_root / "tests" / "trusted" / "test_contract.py"
+    trusted_test.write_text(
+        "from aipc.feature import get_answer\n\n"
+        "def test_trusted_contract() -> None:\n"
+        "    assert get_answer() == 42\n",
+        encoding="utf-8",
+    )
+    feature_file = candidate_root / "src" / "aipc" / "feature.py"
+    feature_file.write_text("def get_answer() -> int:\n    return 0\n", encoding="utf-8")
+    _init_git_repo(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-arch03",
+        required_criterion_ids=("AC-01",),
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    test_node = "tests/trusted/test_contract.py::test_trusted_contract"
+
+    # (i) Wrap _pytest.python.Function.__init__ to replace self._obj without restoring
+    feature_file.write_text(
+        "\n".join(
+            [
+                "import _pytest.python",
+                "_orig_init = _pytest.python.Function.__init__",
+                "def _wrapped_init(self, *a, **kw):",
+                "    _orig_init(self, *a, **kw)",
+                "    self._obj = lambda *x, **y: None",
+                "_pytest.python.Function.__init__ = _wrapped_init",
+                "def get_answer() -> int:",
+                "    return 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha_1 = _init_git_repo(candidate_root)
+    receipts_1 = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha_1,
+        criterion_test_nodes={"AC-01": test_node},
+    )
+    assert len(receipts_1) == 1
+    assert receipts_1[0].passed is False
+
+    # (ii) Wrap _pytest.python.Function.__init__, replace self._obj, then restore __init__
+    feature_file.write_text(
+        "\n".join(
+            [
+                "import _pytest.python",
+                "_orig_init = _pytest.python.Function.__init__",
+                "def _wrapped_init(self, *a, **kw):",
+                "    _orig_init(self, *a, **kw)",
+                "    self._obj = lambda *x, **y: None",
+                "    _pytest.python.Function.__init__ = _orig_init",
+                "_pytest.python.Function.__init__ = _wrapped_init",
+                "def get_answer() -> int:",
+                "    return 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha_2 = _init_git_repo(candidate_root)
+    receipts_2 = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha_2,
+        criterion_test_nodes={"AC-01": test_node},
+    )
+    assert len(receipts_2) == 1
+    assert receipts_2[0].passed is False
+
+
+def test_c15_sec04_vault_ignores_monkeypatched_hmac_json_open_and_locks_native_exit(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    trusted_test = candidate_root / "tests" / "trusted" / "test_contract.py"
+    trusted_test.write_text(
+        "from aipc.feature import get_answer\n\n"
+        "def test_trusted_contract() -> None:\n"
+        "    assert get_answer() == 42\n",
+        encoding="utf-8",
+    )
+    feature_file = candidate_root / "src" / "aipc" / "feature.py"
+    feature_file.write_text("def get_answer() -> int:\n    return 0\n", encoding="utf-8")
+    _init_git_repo(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-sec04",
+        required_criterion_ids=("AC-01",),
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    test_node = "tests/trusted/test_contract.py::test_trusted_contract"
+
+    feature_file.write_text(
+        "\n".join(
+            [
+                "import builtins, hmac, io, json, os, pathlib",
+                "def _boom(*_a, **_kw):",
+                "    raise RuntimeError('monkeypatched')",
+                "_orig_open = builtins.open",
+                "def _trap_open(file, *a, **kw):",
+                "    if '_aipc_outcome' in str(file):",
+                "        raise RuntimeError('monkeypatched open')",
+                "    return _orig_open(file, *a, **kw)",
+                "hmac.new = _boom",
+                "hmac.HMAC = _boom",
+                "json.dumps = _boom",
+                "json._default_encoder.encode = _boom",
+                "builtins.open = _trap_open",
+                "io.open = _trap_open",
+                "pathlib.Path.write_text = _boom",
+                "def get_answer() -> int:",
+                "    _nat = __import__('nt' if os.name == 'nt' else 'posix')",
+                "    _blocked = False",
+                "    try:",
+                "        _nat._exit(0)",
+                "    except PermissionError:",
+                "        _blocked = True",
+                "    assert _blocked",
+                "    return 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha_fail = _init_git_repo(candidate_root)
+    fail_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha_fail,
+        criterion_test_nodes={"AC-01": test_node},
+        phase_id="c03",
+        task_id="task-c03-sec04-fail",
+        attempt=1,
+    )
+    assert len(fail_receipts) == 1
+    assert fail_receipts[0].passed is False
+
+    feature_file.write_text(
+        "\n".join(
+            [
+                "import hmac, json, os, pathlib",
+                "def _boom(*_a, **_kw):",
+                "    raise RuntimeError('monkeypatched')",
+                "hmac.new = _boom",
+                "json.dumps = _boom",
+                "pathlib.Path.write_text = _boom",
+                "def get_answer() -> int:",
+                "    _nat = __import__('nt' if os.name == 'nt' else 'posix')",
+                "    _blocked = False",
+                "    try:",
+                "        _nat._exit(0)",
+                "    except PermissionError:",
+                "        _blocked = True",
+                "    assert _blocked",
+                "    return 42",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha_pass = _init_git_repo(candidate_root)
+    pass_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha_pass,
+        criterion_test_nodes={"AC-01": test_node},
+        phase_id="c03",
+        task_id="task-c03-sec04-pass",
+        attempt=1,
+    )
+    assert len(pass_receipts) == 1
+    assert pass_receipts[0].passed is True
+
+
+def test_c15_arch06_multi_node_criterion_and_cross_criterion_partial_receipts(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    trusted_test = candidate_root / "tests" / "trusted" / "test_contract.py"
+    trusted_test.write_text(
+        "\n".join(
+            [
+                "def test_trusted_contract() -> None:",
+                '    result = int("2") + 2',
+                "    assert result == 4",
+                "",
+                "def test_second_contract() -> None:",
+                '    result = int("3") * 3',
+                "    assert result == 9",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha = _init_git_repo(candidate_root)
+    node1 = "tests/trusted/test_contract.py::test_trusted_contract"
+    node2 = "tests/trusted/test_contract.py::test_second_contract"
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-arch06",
+        required_criterion_ids=("AC-01", "AC-02"),
+        criterion_test_nodes={
+            "AC-01": (node1, node2),
+            "AC-02": node1,
+        },
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    task_id = "task-c03-arch06"
+    exec_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+    )
+    assert len(exec_receipts) == 3
+    assert manifest.trusted_manifest_path is not None
+    rec_dir = Path(manifest.trusted_manifest_path).resolve().parent
+    f1 = rec_dir / _retained_exec_record_filename(
+        "AC-01",
+        cand_sha,
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+        test_node_id=node1,
+    )
+    f2 = rec_dir / _retained_exec_record_filename(
+        "AC-01",
+        cand_sha,
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+        test_node_id=node2,
+    )
+    assert f1 != f2
+    assert f1.is_file()
+    assert f2.is_file()
+
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=2, passed=2, failed=0, skipped=0)
+    bound_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        task_id,
+        candidate_sha=cand_sha,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_evidence=[node1, node2],
+    )
+    receipt = _make_valid_verification_receipt(candidate_root, cand_sha)
+    crit_results = (
+        CriterionResult(
+            criterion_id="AC-01",
+            status=CriterionStatus.PASS,
+            evidence=[node1, node2],
+            notes="both AC-01 nodes passed",
+        ),
+        CriterionResult(
+            criterion_id="AC-02",
+            status=CriterionStatus.PASS,
+            evidence=[node1],
+            notes="AC-02 node passed",
+        ),
+    )
+
+    full_eval = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=cand_sha,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=crit_results,
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=tuple(exec_receipts),
+    )
+    assert full_eval.passed is True
+
+    ac02_receipt = next(r for r in exec_receipts if r.criterion_id == "AC-02")
+    partial_eval = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=cand_sha,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=crit_results,
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=(ac02_receipt,),
+    )
+    assert partial_eval.passed is True
+
+    # Missing one of AC-01's two retained records fails closed
+    f2.unlink()
+    missing_eval = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=cand_sha,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=crit_results,
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=(ac02_receipt,),
+    )
+    assert missing_eval.passed is False
+    assert missing_eval.rejection_code == REWARD_HACKING_DETECTED
+
+    # Failed one of AC-01's two retained records fails closed
+    record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=cand_sha,
+        test_node_id=node2,
+        passed=False,
+        exit_code=1,
+        execution_log=f"{node2} FAILED\n",
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+    )
+    failed_eval = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=cand_sha,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=crit_results,
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=(ac02_receipt,),
+    )
+    assert failed_eval.passed is False
+    assert failed_eval.rejection_code == REWARD_HACKING_DETECTED
+
+    # Omitted receipts, no criterion_test_nodes entry, and receipt:... only fails closed
+    manifest_no_node = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-arch06-no-node",
+        required_criterion_ids=("AC-01",),
+    )
+    assert manifest_no_node.manifest_digest is not None
+    receipt_ref = f"receipt:{cand_sha}:AC-01:{manifest_no_node.manifest_digest}"
+    no_node_eval = validator.evaluate_candidate(
+        manifest=manifest_no_node,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=cand_sha,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=[receipt_ref],
+                notes="receipt ref only without bound test_node_id",
+            ),
+        ),
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=(),
+    )
+    assert no_node_eval.passed is False
+    assert no_node_eval.rejection_code == REWARD_HACKING_DETECTED
