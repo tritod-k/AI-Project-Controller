@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 import subprocess
@@ -1633,6 +1634,11 @@ def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
         "except PermissionError:\n"
         "    adv_net_blocked = True\n"
         "assert adv_net_blocked\n"
+        "import ntpath, posixpath\n"
+        f"_fake_allowed = {str(Path(bundle.workspace_root) / 'allowed.txt')!r}\n"
+        "ntpath._getfinalpathname = lambda p: _fake_allowed\n"
+        "ntpath.realpath = lambda p: _fake_allowed\n"
+        "posixpath.realpath = lambda p: _fake_allowed\n"
         "pathlib.Path.is_relative_to = lambda self, *a: True\n"
         "pathlib.Path.resolve = lambda self: self\n"
         "os.path.realpath = lambda p: p\n"
@@ -1823,16 +1829,20 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
     assert absent_receipt.import_origin_verified is False
     assert absent_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
 
+    init_sha = hashlib.sha256((cand_ws / "src" / "aipc" / "__init__.py").read_bytes()).hexdigest()
+
     def nonzero_probe_runner(argv, **kwargs):
         cmd_str = " ".join(str(tok) for tok in argv)
         m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        m_done = re.search(r"AIPC_ORIGIN_DONE_[0-9a-f]+:0", cmd_str)
         if m:
+            done_line = f"{m_done.group(0)}\n" if m_done else ""
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=1,
                 stdout=(
                     f'{m.group(0)}{{"file": "/workspace/src/aipc/__init__.py", '
-                    '"path": ["/workspace/src"]}\n'
+                    f'"sha256": "{init_sha}", "path": ["/workspace/src"]}}\n{done_line}'
                 ),
                 stderr="probe error",
             )
@@ -1854,14 +1864,16 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
     def traversal_origin_runner(argv, **kwargs):
         cmd_str = " ".join(str(tok) for tok in argv)
         m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        m_done = re.search(r"AIPC_ORIGIN_DONE_[0-9a-f]+:0", cmd_str)
         if m:
+            done_line = f"{m_done.group(0)}\n" if m_done else ""
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=0,
                 stdout=(
                     f'{m.group(0)}{{"file": '
                     '"/workspace/src/aipc/../../other/aipc/__init__.py", '
-                    '"path": ["/workspace/src"]}\n'
+                    f'"sha256": "{init_sha}", "path": ["/workspace/src"]}}\n{done_line}'
                 ),
                 stderr="",
             )
@@ -1880,7 +1892,7 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
     assert traversal_receipt.import_origin_verified is False
     assert traversal_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
 
-    def good_origin_runner(argv, **kwargs):
+    def missing_done_runner(argv, **kwargs):
         cmd_str = " ".join(str(tok) for tok in argv)
         m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
         if m:
@@ -1889,7 +1901,38 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
                 returncode=0,
                 stdout=(
                     f'{m.group(0)}{{"file": "/workspace/src/aipc/__init__.py", '
-                    '"path": ["/workspace/src"]}\n'
+                    f'"sha256": "{init_sha}", "path": ["/workspace/src"]}}\n'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    missing_done_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=missing_done_runner,
+    )
+    assert missing_done_receipt.passed is False
+    assert missing_done_receipt.import_origin_verified is False
+    assert missing_done_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+    def good_origin_runner(argv, **kwargs):
+        cmd_str = " ".join(str(tok) for tok in argv)
+        m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        m_done = re.search(r"AIPC_ORIGIN_DONE_[0-9a-f]+:0", cmd_str)
+        if m:
+            assert "-I" in argv and "-S" in argv and "-B" in argv
+            done_line = f"{m_done.group(0)}\n" if m_done else ""
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=(
+                    f'{m.group(0)}{{"file": "/workspace/src/aipc/__init__.py", '
+                    f'"sha256": "{init_sha}", "path": ["/workspace/src"]}}\n{done_line}'
                 ),
                 stderr="",
             )
@@ -1910,3 +1953,128 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
     assert good_receipt.import_origin_report.actual_imported_file == (
         "/workspace/src/aipc/__init__.py"
     )
+
+    # Candidate src/sitecustomize.py must fail closed with IMPORT_ORIGIN_MISMATCH
+    (cand_ws / "src" / "sitecustomize.py").write_text(
+        "import os\nprint('AIPC_ORIGIN_forged:{}', flush=True)\nos._exit(0)\n",
+        encoding="utf-8",
+    )
+    hook_sha = _commit_all_clean(cand_ws, "add candidate sitecustomize hook")
+    hook_container_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=hook_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=good_origin_runner,
+    )
+    assert hook_container_receipt.passed is False
+    assert hook_container_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+    hook_subproc_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=hook_sha,
+        isolation_mode="isolated_subprocess",
+        runner=good_origin_runner,
+    )
+    assert hook_subproc_receipt.passed is False
+    assert hook_subproc_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+
+def test_container_mode_hmac_origin_receipt_valid_and_tampered(tmp_path: Path) -> None:
+    cand_ws = tmp_path / "cand-hmac"
+    cand_ws.mkdir(parents=True, exist_ok=True)
+    _git(cand_ws, "init")
+    (cand_ws / "pyproject.toml").write_text("[project]\nname='cand-hmac'\n", encoding="utf-8")
+    (cand_ws / "src" / "aipc").mkdir(parents=True, exist_ok=True)
+    (cand_ws / "src" / "aipc" / "__init__.py").write_text(
+        "__version__ = 'candidate'\n", encoding="utf-8"
+    )
+    (cand_ws / "tests").mkdir(exist_ok=True)
+    (cand_ws / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    head_sha = _commit_all_clean(cand_ws, "add candidate aipc")
+    bundle = onboard_universal_project(
+        workspace=cand_ws,
+        project_id="cand-hmac",
+        project_name="Candidate HMAC",
+        phases=_make_phases(),
+    )
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+    init_sha = hashlib.sha256((cand_ws / "src" / "aipc" / "__init__.py").read_bytes()).hexdigest()
+
+    def _make_hmac_runner(tamper: bool):
+        def _runner(argv, **kwargs):
+            cmd_str = " ".join(str(tok) for tok in argv)
+            m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+            m_done = re.search(r"AIPC_ORIGIN_DONE_[0-9a-f]+:0", cmd_str)
+            if m:
+                out_dir = Path("")
+                for item in argv:
+                    if isinstance(item, str) and item.endswith(":/workspace-out:rw"):
+                        out_dir = Path(item[: -len(":/workspace-out:rw")])
+                        break
+                sec_file = out_dir / ".aipc_probe_secret"
+                assert sec_file.is_file()
+                key = sec_file.read_text(encoding="utf-8").strip().encode("utf-8")
+                sig = hmac.new(
+                    key,
+                    f"/workspace/src/aipc/__init__.py|{init_sha}|0".encode(),
+                    hashlib.sha256,
+                ).hexdigest()
+                if tamper:
+                    sig = "f" * 64
+                (out_dir / ".aipc_origin_receipt.json").write_text(
+                    json.dumps(
+                        {
+                            "file": "/workspace/src/aipc/__init__.py",
+                            "sha256": init_sha,
+                            "path": ["/workspace/src"],
+                            "rc": 0,
+                            "hmac": sig,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                done_line = f"{m_done.group(0)}\n" if m_done else ""
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=0,
+                    stdout=(
+                        f'{m.group(0)}{{"file": "/workspace/src/aipc/__init__.py", '
+                        f'"sha256": "{init_sha}", "path": ["/workspace/src"]}}\n{done_line}'
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+            )
+
+        return _runner
+
+    good_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=_make_hmac_runner(tamper=False),
+    )
+    assert good_receipt.passed is True
+    assert good_receipt.import_origin_verified is True
+
+    bad_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=_make_hmac_runner(tamper=True),
+    )
+    assert bad_receipt.passed is False
+    assert bad_receipt.import_origin_verified is False
+    assert bad_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"

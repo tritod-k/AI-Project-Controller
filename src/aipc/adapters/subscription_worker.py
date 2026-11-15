@@ -344,6 +344,18 @@ def _pid_exists(pid: int, env: Mapping[str, str] | None = None) -> bool:
     return True
 
 
+def _posix_pgid_exists(pgid: int) -> bool:
+    if os.name == "nt":
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
 _CREATE_SUSPENDED = 0x00000004
 
 
@@ -568,8 +580,17 @@ def _terminate_pid_tree(
     except ProcessLookupError:
         pass
     except (PermissionError, OSError) as exc:
-        if require_tree_kill and _pid_exists(pid, env):
+        if require_tree_kill and (_pid_exists(pid, env) or _posix_pgid_exists(pid)):
             raise ControllerError(f"Failed to kill process group {pid}") from exc
+    if require_tree_kill:
+        for _ in range(20):
+            if not _pid_exists(pid, env) and not _posix_pgid_exists(pid):
+                return
+            time.sleep(0.05)
+        if _pid_exists(pid, env) or _posix_pgid_exists(pid):
+            raise ControllerError(
+                f"POSIX process group {pid} still has active processes after SIGKILL"
+            )
 
 
 def _default_validation_command_runner(
@@ -630,8 +651,8 @@ def _default_validation_command_runner(
         raise
     finally:
         job_obj.close()
-        if proc.poll() is None or os.name != "nt":
-            _terminate_pid_tree(proc.pid, env)
+        if os.name != "nt" or proc.poll() is None:
+            _terminate_pid_tree(proc.pid, env, require_tree_kill=True, job_obj=job_obj)
     elapsed_ms = max(0, int((time.monotonic() - t0) * 1000))
     return WorkerCommandReceipt(
         command=command,
@@ -772,7 +793,11 @@ async def invoke_antigravity_cli_worker(
                     transport.close()
         raise
     finally:
-        job_obj.close()
+        try:
+            if os.name != "nt":
+                _terminate_pid_tree(proc.pid, env, require_tree_kill=True, job_obj=job_obj)
+        finally:
+            job_obj.close()
     stdout_text = stdout_b.decode("utf-8", errors="replace")
     stderr_text = stderr_b.decode("utf-8", errors="replace")
     lines = [ln for ln in stdout_text.splitlines() if ln.strip().startswith("{")]

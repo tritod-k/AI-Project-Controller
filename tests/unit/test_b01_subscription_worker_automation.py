@@ -23,6 +23,8 @@ from aipc.adapters.subscription_worker import (
     WorkerCommandReceipt,
     WorkerInvocationResponse,
     _pid_exists,
+    _posix_pgid_exists,
+    _terminate_pid_tree,
     _WindowsKillOnCloseJob,
     invoke_antigravity_cli_worker,
     run_cli_worker_job,
@@ -1677,6 +1679,42 @@ def test_b01_pid_exists_and_job_object_fail_closed(
                     "gemini-3.8-flash-medium",
                 )
             )
+
+    import signal
+
+    with pytest.MonkeyPatch.context() as mp:
+        assert _posix_pgid_exists(99999) is (os.name != "nt" and _posix_pgid_exists(99999))
+        mp.setattr("aipc.adapters.subscription_worker.os.name", "posix")
+        mp.setattr(signal, "SIGKILL", 9, raising=False)
+        mp.setattr("aipc.adapters.subscription_worker.time.sleep", lambda _s: None)
+        mp.setattr("aipc.adapters.subscription_worker._pid_exists", lambda _p, _e=None: False)
+
+        def fake_killpg_alive(pgid: int, sig: int) -> None:
+            if sig == 0:
+                return
+            return
+
+        mp.setattr("aipc.adapters.subscription_worker.os.killpg", fake_killpg_alive, raising=False)
+        assert _posix_pgid_exists(99999) is True
+        with pytest.raises(
+            ControllerError,
+            match="POSIX process group 99999 still has active processes after SIGKILL",
+        ):
+            _terminate_pid_tree(99999, env, require_tree_kill=True)
+
+        def fake_killpg_gone(_pgid: int, sig: int) -> None:
+            if sig == 0:
+                raise ProcessLookupError
+
+        mp.setattr("aipc.adapters.subscription_worker.os.killpg", fake_killpg_gone, raising=False)
+        assert _posix_pgid_exists(99999) is False
+        _terminate_pid_tree(99999, env, require_tree_kill=True)
+
+        def fake_killpg_perm(_pgid: int, _sig: int) -> None:
+            raise PermissionError
+
+        mp.setattr("aipc.adapters.subscription_worker.os.killpg", fake_killpg_perm, raising=False)
+        assert _posix_pgid_exists(99999) is True
 
 
 def test_b01_cli_worker_job_invalid_worker_config_leaves_task_eligible(tmp_path: Path) -> None:

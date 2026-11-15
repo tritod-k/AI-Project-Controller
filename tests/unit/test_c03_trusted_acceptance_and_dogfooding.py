@@ -469,6 +469,7 @@ def _make_valid_review_context_and_gate_decision(
     workspace_root: Path,
     changed_files: tuple[FileChange, ...] | None = None,
     tests_summary: TestSummary | None = None,
+    criterion_evidence: list[str] | None = None,
 ) -> tuple[ReviewContext, SubscriptionReviewerGateDecision]:
     if changed_files is None:
         changed_files = (
@@ -610,6 +611,19 @@ def _make_valid_review_context_and_gate_decision(
                 source="test",
             )
         )
+    if criterion_evidence is not None:
+        known_refs = {ref for ev_id, rel_path, _ in file_specs for ref in (ev_id, rel_path)}
+        for ev_ref in criterion_evidence:
+            if ev_ref not in known_refs:
+                items.append(
+                    EvidenceItem(
+                        evidence_id=ev_ref,
+                        kind="criterion_evidence",
+                        status="collected",
+                        path="test_log.txt",
+                        source="test",
+                    )
+                )
     idx_bytes = json.dumps({"artifacts": [a.model_dump(mode="json") for a in artifacts]}).encode(
         "utf-8"
     )
@@ -680,7 +694,7 @@ def _make_valid_review_context_and_gate_decision(
             CriterionResult(
                 criterion_id="AC-01",
                 status=CriterionStatus.PASS,
-                evidence=["test_log"],
+                evidence=criterion_evidence if criterion_evidence is not None else ["test_log"],
                 notes="verified",
             )
         ],
@@ -2540,6 +2554,255 @@ def test_review_context_artifact_misleading_prose_and_bad_digest_rejected(
         assert evaluation.passed is False
         assert evaluation.rejection_code == REWARD_HACKING_DETECTED
         assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in evaluation.findings)
+
+    # Forged worker JSON with valid criterion_id, candidate_sha, manifest_digest, PASS, exit_code=0
+    # and valid SHA-256 in ReviewContext MUST still be rejected without a trusted execution record.
+    forged_valid_json_bytes = json.dumps(
+        {
+            "criterion_id": "AC-01",
+            "candidate_sha": _CANDIDATE_SHA,
+            "manifest_digest": manifest.manifest_digest,
+            "status": "PASS",
+            "exit_code": 0,
+            "test_node_id": "tests/unit/test_feature.py::test_feature_behavior",
+        }
+    ).encode("utf-8")
+    (ev_root / "raw_output.txt").write_bytes(forged_valid_json_bytes)
+    forged_ctx = updated_ctx.model_copy(
+        update={
+            "evidence": updated_ctx.evidence.model_copy(
+                update={
+                    "artifacts": tuple(
+                        art.model_copy(
+                            update={
+                                "size": len(forged_valid_json_bytes),
+                                "sha256": hashlib.sha256(forged_valid_json_bytes).hexdigest(),
+                            }
+                        )
+                        if art.path == "raw_output.txt"
+                        else art
+                        for art in updated_ctx.evidence.artifacts
+                    )
+                }
+            )
+        }
+    )
+    forged_eval = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-art-schema",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=["raw_output.txt"],
+                notes="forged worker JSON without trusted execution record",
+            ),
+        ),
+        verification_receipt=receipt,
+        review_context=forged_ctx,
+    )
+    assert forged_eval.passed is False
+    assert forged_eval.rejection_code == REWARD_HACKING_DETECTED
+    assert any(f.rule_id == "REQUIRED_CRITERION_UNVERIFIED" for f in forged_eval.findings)
+
+    # Now persist a genuine trusted criterion execution record, and update raw_output.txt
+    # with the matching log_sha256.
+    exec_receipt, _ = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=_CANDIDATE_SHA,
+        test_node_id="tests/unit/test_feature.py::test_feature_behavior",
+        passed=True,
+        exit_code=0,
+        execution_log="tests/unit/test_feature.py::test_feature_behavior PASSED\n",
+    )
+    bound_json_bytes = json.dumps(
+        {
+            "criterion_id": "AC-01",
+            "candidate_sha": _CANDIDATE_SHA,
+            "manifest_digest": manifest.manifest_digest,
+            "status": "PASS",
+            "exit_code": 0,
+            "test_node_id": "tests/unit/test_feature.py::test_feature_behavior",
+            "log_sha256": exec_receipt.log_sha256,
+        }
+    ).encode("utf-8")
+    (ev_root / "raw_output.txt").write_bytes(bound_json_bytes)
+    bound_ctx = forged_ctx.model_copy(
+        update={
+            "evidence": forged_ctx.evidence.model_copy(
+                update={
+                    "artifacts": tuple(
+                        art.model_copy(
+                            update={
+                                "size": len(bound_json_bytes),
+                                "sha256": hashlib.sha256(bound_json_bytes).hexdigest(),
+                            }
+                        )
+                        if art.path == "raw_output.txt"
+                        else art
+                        for art in forged_ctx.evidence.artifacts
+                    )
+                }
+            )
+        }
+    )
+
+    # Mismatched task_id or checkpoint.git_commit in review_context must still be rejected.
+    mismatched_task_ctx = bound_ctx.model_copy(
+        update={"task": bound_ctx.task.model_copy(update={"task_id": "other-task"})}
+    )
+    mismatched_sha_ctx = bound_ctx.model_copy(
+        update={"checkpoint": bound_ctx.checkpoint.model_copy(update={"git_commit": "9" * 40})}
+    )
+    for bad_bound_ctx in (mismatched_task_ctx, mismatched_sha_ctx):
+        bad_bound_eval = validator.evaluate_candidate(
+            manifest=manifest,
+            workspace=candidate_root,
+            task_id="task-c03-art-schema",
+            candidate_sha=_CANDIDATE_SHA,
+            changed_files=changed,
+            tests_summary=tests_sum,
+            criterion_results=(
+                CriterionResult(
+                    criterion_id="AC-01",
+                    status=CriterionStatus.PASS,
+                    evidence=["raw_output.txt"],
+                    notes="unbound review_context",
+                ),
+            ),
+            verification_receipt=receipt,
+            review_context=bad_bound_ctx,
+            criterion_execution_receipts=(exec_receipt,),
+        )
+        assert bad_bound_eval.passed is False
+        assert bad_bound_eval.rejection_code == REWARD_HACKING_DETECTED
+
+    good_bound_eval = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id="task-c03-art-schema",
+        candidate_sha=_CANDIDATE_SHA,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=["raw_output.txt"],
+                notes="bound review_context with matching trusted log_sha256",
+            ),
+        ),
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=(exec_receipt,),
+    )
+    assert good_bound_eval.passed is True
+    assert good_bound_eval.findings == ()
+    assert good_bound_eval.rejection_code is None
+
+
+def test_execute_and_record_criteria_and_dogfooding_production_caller(
+    tmp_path: Path,
+) -> None:
+    stable_root, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    cand_sha = _git_head_sha(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-exec-prod",
+        required_criterion_ids=("AC-01",),
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    test_node = "tests/unit/test_feature.py::test_feature_behavior"
+
+    exec_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": test_node},
+    )
+    assert len(exec_receipts) == 1
+    assert exec_receipts[0].criterion_id == "AC-01"
+    assert exec_receipts[0].passed is True
+    assert exec_receipts[0].exit_code == 0
+    assert exec_receipts[0].log_sha256 is not None
+    assert manifest.trusted_manifest_path is not None
+    record_file = (
+        Path(manifest.trusted_manifest_path).resolve().parent / f"exec_AC-01_{cand_sha[:12]}.json"
+    )
+    assert record_file.is_file()
+
+    with pytest.raises(ValueError, match="not found"):
+        validator.execute_and_record_criteria(
+            manifest=manifest,
+            workspace=candidate_root,
+            candidate_sha=cand_sha,
+            criterion_test_nodes={"AC-01": "tests/unit/test_feature.py::test_missing"},
+        )
+
+    config = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=_git_head_sha(stable_root),
+        candidate_sha=cand_sha,
+        verification_isolation="isolated_subprocess",
+        allow_auto_promote_stable=False,
+    )
+    import_report = CandidateImportOriginReport(
+        verified=True,
+        expected_candidate_src=str(candidate_root / "src" / "aipc"),
+        actual_imported_file=str(candidate_root / "src" / "aipc" / "__init__.py"),
+        leaked_stable_paths=(),
+        status_code="OK",
+    )
+    verification_receipt = CandidateVerificationReceipt(
+        candidate_sha=cand_sha,
+        isolation_mode="isolated_subprocess",
+        import_origin_verified=True,
+        import_origin_report=import_report,
+        sanitized_env_verified=True,
+        exit_code=0,
+        passed=True,
+        status_code="OK",
+        summary="Isolated candidate tests passed",
+    )
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    review_ctx, gate_decision = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        "task-c03-prod-caller",
+        candidate_sha=cand_sha,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_evidence=[test_node],
+    )
+
+    coordinator = SelfDevelopmentDogfoodingCoordinator()
+    bundle = coordinator.run_dogfooding_audit(
+        stable_candidate_config=config,
+        manifest=manifest,
+        task_id="task-c03-prod-caller",
+        changed_files=changed,
+        tests_summary=tests_sum,
+        import_origin_report=import_report,
+        verification_receipt=verification_receipt,
+        review_verdict=ReviewVerdict.PASS,
+        gate_verdict="PASS",
+        reviewer_gate_decision=gate_decision,
+        review_context=review_ctx,
+        criterion_test_nodes={"AC-01": test_node},
+    )
+    assert bundle.dogfooding_passed is True
+    assert bundle.next_authorized_action == "HUMAN_MERGE_REVIEW"
+    assert bundle.blockers == ()
 
 
 def test_dogfooding_accepts_container_import_origin_and_rejects_bad_container_origin(

@@ -7,6 +7,8 @@ import fnmatch
 import hashlib
 import json
 import subprocess
+import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from uuid import uuid4
@@ -27,7 +29,7 @@ from aipc.domain.models import (
     NonBlank,
     TestSummary,
 )
-from aipc.hardening.env_isolation import build_sanitized_child_env
+from aipc.hardening.env_isolation import assert_child_env_isolated, build_sanitized_child_env
 from aipc.hardening.secrets import assert_no_secrets
 from aipc.review.context import context_fingerprint, digest, review_provenance
 from aipc.review.errors import PhaseGateError, ReviewContextError
@@ -1039,6 +1041,82 @@ class TrustedAcceptanceHarnessValidator:
 
         return tuple(findings)
 
+    def execute_and_record_criteria(
+        self,
+        *,
+        manifest: TrustedHarnessManifest,
+        workspace: Path | str,
+        candidate_sha: str,
+        criterion_test_nodes: Mapping[str, str],
+        python_executable: Path | str | None = None,
+        parent_env: Mapping[str, str] | None = None,
+        timeout_seconds: int = 120,
+    ) -> tuple[CriterionExecutionReceipt, ...]:
+        """Execute criterion test nodes in a sanitized child env and persist trusted receipts."""
+        workspace_root = Path(workspace).resolve()
+        manifest_findings = _verify_manifest_integrity(manifest, workspace_root)
+        if manifest_findings:
+            raise ValueError(manifest_findings[0].description)
+
+        sanitized_env = build_sanitized_child_env(parent_env)
+        assert_child_env_isolated(sanitized_env)
+        py_exe = str(python_executable) if python_executable is not None else sys.executable
+
+        receipts: list[CriterionExecutionReceipt] = []
+        for cid, test_node_id in criterion_test_nodes.items():
+            parts = test_node_id.split("::")
+            if len(parts) < 2:
+                raise ValueError(f"Invalid test_node_id '{test_node_id}' for criterion '{cid}'")
+            func_name = parts[-1].split("[")[0]
+            norm_test_file = _normalize_rel_path(parts[0])
+            if (
+                not func_name.startswith("test_")
+                or Path(norm_test_file).is_absolute()
+                or not norm_test_file.startswith("tests/")
+                or not norm_test_file.endswith(".py")
+            ):
+                raise ValueError(f"Invalid test_node_id '{test_node_id}' for criterion '{cid}'")
+            test_path = (workspace_root / norm_test_file).resolve()
+            if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
+                raise ValueError(f"Test file not found for criterion '{cid}': '{norm_test_file}'")
+            source = test_path.read_text(encoding="utf-8")
+            if not _test_function_exists_in_source(source, func_name):
+                raise ValueError(
+                    f"Test function '{func_name}' not found in '{norm_test_file}' for '{cid}'"
+                )
+            ast_findings = self.inspect_python_test_source(norm_test_file, source)
+            if ast_findings:
+                raise ValueError(
+                    f"AST verification failed for '{norm_test_file}': {ast_findings[0].description}"
+                )
+
+            exec_env = dict(sanitized_env)
+            exec_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            proc = subprocess.run(
+                [py_exe, "-B", "-m", "pytest", "-p", "no:cacheprovider", test_node_id, "-v"],
+                cwd=str(workspace_root),
+                env=exec_env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            execution_log = (proc.stdout or "") + (proc.stderr or "")
+            passed = proc.returncode == 0 and "PASSED" in (proc.stdout or "")
+            receipt, _ = record_trusted_criterion_execution(
+                manifest,
+                criterion_id=cid,
+                candidate_sha=candidate_sha,
+                test_node_id=test_node_id,
+                passed=passed,
+                exit_code=int(proc.returncode),
+                execution_log=execution_log,
+            )
+            receipts.append(receipt)
+
+        return tuple(receipts)
+
     def evaluate_candidate(
         self,
         *,
@@ -1303,9 +1381,78 @@ class TrustedAcceptanceHarnessValidator:
                     return None
                 return norm_test_file
 
-            def _is_verified_context_artifact_for_criterion(ev: str, cid: str) -> bool:
-                if review_context is None or manifest.manifest_digest is None:
+            def _context_bound() -> bool:
+                return (
+                    review_context is not None
+                    and review_context.task.task_id == task_id
+                    and review_context.state.project_id == manifest.project_id
+                    and review_context.checkpoint.git_commit == candidate_sha
+                    and review_context.agent_result.task_id == task_id
+                    and review_context.evidence.git.head == candidate_sha
+                )
+
+            def _matched_retained_trusted_receipt(
+                cid: str,
+            ) -> tuple[CriterionExecutionReceipt, str] | None:
+                if (
+                    verification_receipt is None
+                    or not verification_receipt.passed
+                    or verification_receipt.exit_code != 0
+                    or verification_receipt.candidate_sha != candidate_sha
+                    or manifest.manifest_digest is None
+                    or manifest.trusted_manifest_path is None
+                ):
+                    return None
+                exec_record_path = (
+                    Path(manifest.trusted_manifest_path).resolve().parent
+                    / f"exec_{cid}_{candidate_sha[:12]}.json"
+                )
+                if not exec_record_path.is_file():
+                    return None
+                try:
+                    retained = json.loads(exec_record_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    return None
+                if not isinstance(retained, dict):
+                    return None
+                retained_receipt = retained.get("receipt")
+                retained_log = retained.get("execution_log")
+                if not isinstance(retained_receipt, dict) or not isinstance(retained_log, str):
+                    return None
+                retained_log_sha = hashlib.sha256(retained_log.encode("utf-8")).hexdigest()
+                for exec_rec in all_exec_receipts:
+                    if (
+                        exec_rec.criterion_id != cid
+                        or exec_rec.candidate_sha != candidate_sha
+                        or exec_rec.manifest_digest != manifest.manifest_digest
+                        or not exec_rec.passed
+                        or exec_rec.exit_code != 0
+                        or exec_rec.log_sha256 is None
+                    ):
+                        continue
+                    norm_test_file = _verify_test_node(exec_rec.test_node_id)
+                    if norm_test_file is None:
+                        continue
+                    if (
+                        retained_receipt != exec_rec.model_dump(mode="json")
+                        or retained_log_sha != exec_rec.log_sha256
+                        or exec_rec.test_node_id not in retained_log
+                        or "PASSED" not in retained_log
+                    ):
+                        continue
+                    return exec_rec, norm_test_file
+                return None
+
+            def _is_verified_context_artifact_for_criterion(
+                ev: str,
+                cid: str,
+                *,
+                required_test_node_id: str,
+                required_log_sha256: str,
+            ) -> bool:
+                if not _context_bound() or manifest.manifest_digest is None:
                     return False
+                assert review_context is not None
                 ev_root = Path(review_context.evidence_root).resolve()
                 artifacts_by_path = {art.path: art for art in review_context.evidence.artifacts}
                 for item in review_context.evidence.items:
@@ -1346,8 +1493,9 @@ class TrustedAcceptanceHarnessValidator:
                             and rec.get("status") == "PASS"
                             and type(exit_code) is int
                             and exit_code == 0
-                            and isinstance(test_node_id, str)
-                            and _verify_test_node(test_node_id) is not None
+                            and test_node_id == required_test_node_id
+                            and rec.get("log_sha256") == required_log_sha256
+                            and _verify_test_node(required_test_node_id) is not None
                         ):
                             return True
                     return False
@@ -1356,60 +1504,26 @@ class TrustedAcceptanceHarnessValidator:
             def _valid_criterion_evidence(ev: str, cid: str) -> bool:
                 if cid in failed_receipt_cids:
                     return False
-                if _is_verified_context_artifact_for_criterion(ev, cid):
-                    return True
-                if (
-                    verification_receipt is None
-                    or not verification_receipt.passed
-                    or verification_receipt.exit_code != 0
-                    or verification_receipt.candidate_sha != candidate_sha
-                    or manifest.manifest_digest is None
-                    or manifest.trusted_manifest_path is None
-                ):
+                matched = _matched_retained_trusted_receipt(cid)
+                if matched is None:
                     return False
+                exec_rec, norm_test_file = matched
+                assert verification_receipt is not None
+                assert manifest.manifest_digest is not None
                 expected_ev = (
                     f"receipt:{verification_receipt.candidate_sha}:{cid}:{manifest.manifest_digest}"
                 )
-                exec_record_path = (
-                    Path(manifest.trusted_manifest_path).resolve().parent
-                    / f"exec_{cid}_{candidate_sha[:12]}.json"
+                if ev in (exec_rec.test_node_id, norm_test_file, expected_ev):
+                    return True
+                return (
+                    exec_rec.log_sha256 is not None
+                    and _is_verified_context_artifact_for_criterion(
+                        ev,
+                        cid,
+                        required_test_node_id=exec_rec.test_node_id,
+                        required_log_sha256=exec_rec.log_sha256,
+                    )
                 )
-                if not exec_record_path.is_file():
-                    return False
-                try:
-                    retained = json.loads(exec_record_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    return False
-                if not isinstance(retained, dict):
-                    return False
-                retained_receipt = retained.get("receipt")
-                retained_log = retained.get("execution_log")
-                if not isinstance(retained_receipt, dict) or not isinstance(retained_log, str):
-                    return False
-                retained_log_sha = hashlib.sha256(retained_log.encode("utf-8")).hexdigest()
-                for exec_rec in all_exec_receipts:
-                    if (
-                        exec_rec.criterion_id != cid
-                        or exec_rec.candidate_sha != candidate_sha
-                        or exec_rec.manifest_digest != manifest.manifest_digest
-                        or not exec_rec.passed
-                        or exec_rec.exit_code != 0
-                        or exec_rec.log_sha256 is None
-                    ):
-                        continue
-                    norm_test_file = _verify_test_node(exec_rec.test_node_id)
-                    if norm_test_file is None:
-                        continue
-                    if (
-                        retained_receipt != exec_rec.model_dump(mode="json")
-                        or retained_log_sha != exec_rec.log_sha256
-                        or exec_rec.test_node_id not in retained_log
-                        or "PASSED" not in retained_log
-                    ):
-                        continue
-                    if ev in (exec_rec.test_node_id, norm_test_file, expected_ev):
-                        return True
-                return False
 
             criterion_map: dict[str, bool] = {}
             if isinstance(criterion_results, dict):
@@ -1682,6 +1796,8 @@ class SelfDevelopmentDogfoodingCoordinator:
         verify_stable_git_integrity: bool = True,
         criterion_results: tuple[CriterionResult, ...] | dict[str, bool] | None = None,
         review_context: ReviewContext | None = None,
+        criterion_execution_receipts: Sequence[CriterionExecutionReceipt] = (),
+        criterion_test_nodes: Mapping[str, str] | None = None,
     ) -> DogfoodingAuditBundle:
         """Run trusted acceptance & isolation audit for a self-development candidate."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -1711,6 +1827,15 @@ class SelfDevelopmentDogfoodingCoordinator:
                 )
             )
 
+        effective_exec_receipts = tuple(criterion_execution_receipts)
+        if criterion_test_nodes and not effective_exec_receipts:
+            effective_exec_receipts = self._validator.execute_and_record_criteria(
+                manifest=manifest,
+                workspace=c_root,
+                candidate_sha=stable_candidate_config.candidate_sha,
+                criterion_test_nodes=criterion_test_nodes,
+            )
+
         trusted_acceptance = self._validator.evaluate_candidate(
             manifest=manifest,
             workspace=c_root,
@@ -1721,6 +1846,7 @@ class SelfDevelopmentDogfoodingCoordinator:
             criterion_results=effective_criterion_results,
             verification_receipt=verification_receipt,
             review_context=gate_ctx,
+            criterion_execution_receipts=effective_exec_receipts,
         )
 
         blockers: list[str] = []
