@@ -7,12 +7,12 @@
 
 ## 2. Status
 - **Implementation & Full CI Regression Verification**: `PASS` (`READY FOR COMMANDER MERGE REVIEW`)
-  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`32 passed`** (`0c5b5c8`)
+  - **Hydrogen Worker & Registry Tests** (`test_a01`, `test_a03`, `test_b01`): **`32 passed`** (`7399643`)
   - **Workstream C01** (`test_c01_universal_project_profiles.py`): **`17 passed`** (`2df59c7`, `1115726`)
-  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`23 passed`** (`2c0a84b`, `0c5b5c8`)
-  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`68 passed`** (`eae7689`, `0c5b5c8`)
-  - **Self-Development Runner** (`test_self_dev_runner.py`): **`7 passed`** (`0c5b5c8`)
-  - **Full CI Regression**: **`1213 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites
+  - **Workstream C02** (`test_c02_multilang_e2e_pipeline.py`): **`23 passed`** (`2c0a84b`, `7399643`)
+  - **Workstream C03** (`test_c03_trusted_acceptance_and_dogfooding.py`): **`69 passed`** (`eae7689`, `7399643`)
+  - **Self-Development Runner** (`test_self_dev_runner.py`): **`10 passed`** (`7399643`)
+  - **Full CI Regression**: **`1219 passed`** across unit, contract, gemini, CLI, routing, consensus, observability, dashboard, MCP, hardening, controller, review, plugins, and E2E suites
   - **Static Analysis & Schemas**: `ruff check .` clean, `ruff format --check .` clean (`319 files already formatted`), domain and project JSON schemas verified
 
 ## 3. Summary
