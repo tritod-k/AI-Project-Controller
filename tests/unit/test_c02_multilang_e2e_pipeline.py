@@ -34,11 +34,12 @@ from aipc.controller.task_queue import (
     QueuedTaskStatus,
     persist_milestone_authorization_evidence,
 )
-from aipc.domain.enums import AgentStatus, CriterionStatus, ReviewVerdict
+from aipc.domain.enums import AgentStatus, ChangeType, CriterionStatus, ReviewVerdict
 from aipc.domain.models import (
     AgentResult,
     CriterionResult,
     EvidenceReferences,
+    FileChange,
     ReviewResult,
     TaskRequest,
     TestSummary,
@@ -2683,3 +2684,276 @@ def test_c15_sec02_c02_container_probe_blocks_forged_stdout_and_native_exit(
     )
     assert failed_receipt.passed is False
     assert failed_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+
+def test_c16_mc_rr_05_e2e_pipeline_enforces_approved_contract_scope_and_phase(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    worker_binding = _make_worker_binding()
+    review_ctx = _make_review_context(bundle, head_sha)
+    pipeline = MilestoneCEndToEndPipeline()
+
+    def ok_worker(binding: RoleModelBinding, attempt: int, repair_plan):
+        return WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=review_ctx,
+        )
+
+    def pass_review(**kwargs):
+        return _make_gate_decision(
+            bundle=bundle,
+            candidate_sha=head_sha,
+            verdict=ReviewVerdict.PASS,
+            gate_outcome="PASS",
+        )
+
+    def ok_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    # 1. Conflicting phase_id raises ControllerError before begin_dispatch (task stays ELIGIBLE)
+    q_phase = _setup_queue(tmp_path / "q_phase", bundle.project_definition.project.id)
+    with pytest.raises(ControllerError):
+        pipeline.run_e2e_cycle(
+            bundle=bundle,
+            task_queue=q_phase,
+            worker_step=ok_worker,
+            worker_binding=worker_binding,
+            review_callback=pass_review,
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+            phase_id="d01",
+        )
+    assert q_phase.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+    # 2. Conflicting project_id raises ControllerError before begin_dispatch (task stays ELIGIBLE)
+    q_proj = _setup_queue(tmp_path / "q_proj", bundle.project_definition.project.id)
+    bad_proj = bundle.project_definition.project.model_copy(update={"id": "other-project"})
+    bad_proj_def = bundle.project_definition.model_copy(update={"project": bad_proj})
+    bad_bundle = bundle.model_copy(update={"project_definition": bad_proj_def})
+    with pytest.raises(ControllerError):
+        pipeline.run_e2e_cycle(
+            bundle=bad_bundle,
+            task_queue=q_proj,
+            worker_step=ok_worker,
+            worker_binding=worker_binding,
+            review_callback=pass_review,
+            isolation_mode="isolated_subprocess",
+            runner=ok_runner,
+        )
+    assert q_proj.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+    # 3. Out-of-scope file change in agent_result fails closed with CONTRACT_SCOPE_VIOLATION
+    q_scope = _setup_queue(tmp_path / "q_scope", bundle.project_definition.project.id)
+    bad_ar = review_ctx.agent_result.model_copy(
+        update={
+            "files_changed": [
+                FileChange(path="src/outside_scope.py", change_type=ChangeType.MODIFIED)
+            ]
+        }
+    )
+    bad_ctx = review_ctx.model_copy(update={"agent_result": bad_ar})
+    res_scope = pipeline.run_e2e_cycle(
+        bundle=bundle,
+        task_queue=q_scope,
+        worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
+            candidate_sha=head_sha,
+            verification_passed=True,
+            review_context=bad_ctx,
+        ),
+        worker_binding=worker_binding,
+        review_callback=pass_review,
+        isolation_mode="isolated_subprocess",
+        runner=ok_runner,
+    )
+    assert res_scope.gate_verdict == "BLOCKED"
+    assert res_scope.pr_ready is False
+    assert res_scope.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+
+
+def test_c16_mc_rr_01_02_synthetic_audit_and_fake_python_and_winapi_blocked(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    outside_file = tmp_path / "outside_evil.txt"
+    verifier = MultiLanguageIsolatedVerifier()
+    probe = "\n".join(
+        [
+            "import os, pathlib, subprocess, sys",
+            f"_outside = {str(outside_file)!r}",
+            "_ran = [False]",
+            "class _EvilObj:",
+            "    @property",
+            "    def tb_frame(self):",
+            "        _ran[0] = True",
+            "        with open(_outside, 'w', encoding='utf-8') as _fh:",
+            "            _fh.write('pwned')",
+            "        return None",
+            "_evil = _EvilObj()",
+            "_attr_blocked = False",
+            "try:",
+            "    sys.audit('object.__getattr__', _evil, 'tb_frame')",
+            "except PermissionError:",
+            "    _attr_blocked = True",
+            "assert _attr_blocked",
+            "assert _ran[0] is False",
+            "assert not pathlib.Path(_outside).exists()",
+            "_fake_py = pathlib.Path(os.environ['TMPDIR']) / 'python_evil.exe'",
+            "_fake_py.write_bytes(b'MZ')",
+            "_fake_blocked = False",
+            "try:",
+            "    subprocess.Popen([str(_fake_py), '-c', 'pass'])",
+            "except PermissionError as _exc:",
+            "    _fake_blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(_exc)",
+            "assert _fake_blocked",
+            "try:",
+            "    sys.audit(",
+            "        'subprocess.Popen',",
+            "        sys.executable,",
+            "        [sys.executable, '-c', 'pass'],",
+            "        None,",
+            "        os.environ,",
+            "    )",
+            "except PermissionError:",
+            "    pass",
+            "_win_blocked = False",
+            "try:",
+            "    if hasattr(subprocess, '_winapi'):",
+            "        subprocess._winapi.CreateProcess(",
+            "            sys.executable,",
+            "            f'{sys.executable} -c pass',",
+            "            None, None, False, 0, None, None, None,",
+            "        )",
+            "    else:",
+            "        sys.audit(",
+            "            '_winapi.CreateProcess',",
+            "            sys.executable,",
+            "            f'{sys.executable} -c pass',",
+            "            None,",
+            "        )",
+            "except PermissionError as _exc:",
+            "    _win_blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(_exc)",
+            "assert _win_blocked",
+            "print('1 passed')",
+        ]
+    )
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", probe),
+    )
+    assert receipt.passed is True
+    assert not outside_file.exists()
+
+
+def test_c16_mc_rr_04_c02_probe_blocks_traceback_frame_access_and_separates_auth_state(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    ws_path = Path(bundle.workspace_root)
+    aipc_dir = ws_path / "src" / "aipc"
+    aipc_dir.mkdir(parents=True, exist_ok=True)
+    hostile_init = "\n".join(
+        [
+            "import sys",
+            "try:",
+            "    open('/out/.aipc_probe_nonce', 'w', encoding='utf-8')",
+            "except PermissionError as exc:",
+            "    tb = exc.__traceback__",
+            "    caught = []",
+            "    for fn in (",
+            "        lambda: tb.tb_frame,",
+            "        lambda: tb.tb_frame.f_back,",
+            "        lambda: tb.tb_frame.f_locals,",
+            "        lambda: sys._getframe(0),",
+            "    ):",
+            "        try:",
+            "            fn()",
+            "        except PermissionError as inner:",
+            "            caught.append(inner)",
+            "        else:",
+            "            raise RuntimeError('expected PermissionError')",
+            "    raise caught[0]",
+            "",
+        ]
+    )
+    (aipc_dir / "__init__.py").write_text(hostile_init, encoding="utf-8")
+    head_sha = _commit_all_clean(ws_path, "add hostile traceback probe aipc")
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+
+    ws = ws_path.resolve()
+    ws_init_posix = (ws / "src" / "aipc" / "__init__.py").as_posix()
+    ws_src_posix = (ws / "src").as_posix()
+    child_tmp_posix = (tmp_path / "aipc_c02_child.py").as_posix()
+
+    def _adapt_probe(raw_probe: str, out_dir_posix: str) -> str:
+        adapted = raw_probe.replace("/workspace/src/aipc/__init__.py", ws_init_posix)
+        adapted = adapted.replace("/workspace/src", ws_src_posix)
+        adapted = adapted.replace("/workspace-out", out_dir_posix)
+        adapted = adapted.replace("/tmp/.aipc_c02_child.py", child_tmp_posix)
+        adapted = adapted.replace("/out/.aipc_", f"{out_dir_posix}/.aipc_")
+        adapted = adapted.replace("'/out'", f"{out_dir_posix!r}")
+        if os.name == "nt":
+            adapted = adapted.replace(
+                "if not _s.startswith('/'):",
+                "if not _s.startswith('/') and not (len(_s) >= 2 and _s[1] == ':'):",
+            )
+            adapted = adapted.replace(
+                "return '/' + '/'.join(_stack)",
+                "return ('/' if _s.startswith('/') else '') + '/'.join(_stack)",
+            )
+        return adapted
+
+    def _extract_out_dir(argv: list[str]) -> str:
+        for tok in argv:
+            if isinstance(tok, str) and tok.endswith(":/workspace-out:rw"):
+                return Path(tok[: -len(":/workspace-out:rw")]).as_posix()
+        raise AssertionError("missing workspace-out mount in container argv")
+
+    probe_results: list[subprocess.CompletedProcess[str]] = []
+
+    def _runner(argv, **kwargs):
+        if len(argv) >= 2 and "_c02_probe" in str(argv[-1]):
+            out_dir_posix = _extract_out_dir(list(argv))
+            adapted = _adapt_probe(str(argv[-1]), out_dir_posix)
+            res = subprocess.run(
+                [sys.executable, "-I", "-S", "-B", "-c", adapted],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            probe_results.append(res)
+            return res
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    verifier = MultiLanguageIsolatedVerifier()
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=_runner,
+    )
+    assert len(probe_results) == 1
+    assert probe_results[0].returncode != 0
+    assert "probe introspection prohibited" in probe_results[0].stderr
+    assert receipt.passed is False
+    assert receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"

@@ -1303,3 +1303,148 @@ def test_container_verification_fails_closed_on_bypass_and_forged_origin_exit_ze
     assert forged_proc.returncode != 0
     assert not (exec_ctrl / "receipt.json").exists()
     assert m_d.group(0) not in forged_proc.stdout
+
+
+def test_c16_mc_rr_01_02_isolated_subprocess_synthetic_audit_fake_py_and_winapi_blocked(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    ext_sentinel = tmp_path / "external_sentinel.txt"
+    fake_py = candidate_root / ("python.exe" if os.name == "nt" else "python")
+    fake_py.write_text("", encoding="utf-8")
+
+    (candidate_root / "tests" / "test_c16_mc_rr_01_02.py").write_text(
+        "\n".join(
+            [
+                "import pathlib, pytest, subprocess, sys",
+                "def test_synthetic_audit_fake_py_and_winapi_blocked():",
+                "    called = []",
+                "    class Evil:",
+                "        @property",
+                "        def tb_frame(self):",
+                "            called.append(True)",
+                f"            with open({str(ext_sentinel)!r}, 'w', encoding='utf-8') as fh:",
+                "                fh.write('pwned')",
+                "            return None",
+                "    evil_obj = Evil()",
+                "    with pytest.raises(PermissionError):",
+                "        sys.audit('object.__getattr__', evil_obj, 'tb_frame')",
+                "    assert called == []",
+                f"    assert not pathlib.Path({str(ext_sentinel)!r}).exists()",
+                "    with pytest.raises(PermissionError):",
+                f"        subprocess.Popen([{str(fake_py)!r}, '-c', 'pass'])",
+                "    with pytest.raises(PermissionError):",
+                "        sys.audit(",
+                "            '_winapi.CreateProcess', 'cmd.exe', 'cmd.exe /c echo hi',",
+                "            None, None, False, 0, None, None, None,",
+                "        )",
+                "    if hasattr(subprocess, '_winapi'):",
+                "        with pytest.raises(PermissionError):",
+                "            subprocess._winapi.CreateProcess(",
+                "                'cmd.exe', 'cmd.exe /c echo hi',",
+                "                None, None, False, 0, None, None, None,",
+                "            )",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    runner = SafeSelfDevelopmentRunner(cfg)
+    receipt = runner.run_candidate_verification(
+        pytest_targets=("tests/test_c16_mc_rr_01_02.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0
+    assert not ext_sentinel.exists()
+
+
+def test_c16_mc_rr_03_container_sealed_descriptor_type_closure_and_body_immutability(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    captured: dict[str, str] = {}
+
+    def capture_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        probe_dir = Path("")
+        ctrl_out = Path("")
+        for item in argv:
+            if item.endswith(":/aipc_probe:ro"):
+                probe_dir = Path(item[: -len(":/aipc_probe:ro")])
+            elif item.endswith(":/aipc_ctrl_out:rw"):
+                ctrl_out = Path(item[: -len(":/aipc_ctrl_out:rw")])
+        captured["child"] = (probe_dir / "child_verify.py").read_text(encoding="utf-8")
+        captured["parent"] = (probe_dir / "run_verify.py").read_text(encoding="utf-8")
+        captured["nonce"] = (ctrl_out / "nonce.json").read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="capture")
+
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="container",
+    )
+    SafeSelfDevelopmentRunner(cfg, subprocess_runner=capture_runner).run_candidate_verification(
+        pytest_targets=("tests/test_candidate_smoke.py",),
+    )
+    assert "child" in captured and "parent" in captured
+
+    exec_probe = tmp_path / "exec_probe"
+    exec_ctrl = tmp_path / "exec_ctrl"
+    exec_probe.mkdir()
+    exec_ctrl.mkdir()
+    child_src = (
+        captured["child"]
+        .replace("/aipc_probe", exec_probe.as_posix())
+        .replace("/aipc_ctrl_out", exec_ctrl.as_posix())
+    )
+    child_file = exec_probe / "child_verify.py"
+    child_file.write_text(child_src, encoding="utf-8")
+
+    mc_rr_03_test = candidate_root / "tests" / "test_c16_mc_rr_03.py"
+    mc_rr_03_test.write_text(
+        "\n".join(
+            [
+                "import _pytest.python, pytest, types",
+                "def test_sealed_descriptor_type_and_closure_isolated():",
+                "    desc = _pytest.python.Function.__dict__['runtest']",
+                "    desc_cls = type(desc)",
+                "    with pytest.raises(PermissionError):",
+                "        _ = desc_cls.__get__",
+                "    cls_dict = object.__getattribute__(desc_cls, '__dict__')",
+                "    get_fn = cls_dict['__get__']",
+                "    for cell in get_fn.__closure__ or ():",
+                "        assert not isinstance(cell.cell_contents, (dict, set, types.CodeType))",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    sanitized_env = build_sanitized_child_env({**os.environ, "OPENAI_API_KEY": SYNTHETIC_API_KEY})
+    assert_child_env_isolated(sanitized_env)
+    proc = subprocess.run(
+        [sys.executable, "-B", str(child_file), str(mc_rr_03_test)],
+        cwd=str(candidate_root),
+        env=sanitized_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert "AIPC_CONTAINER_ORIGIN_" in proc.stdout

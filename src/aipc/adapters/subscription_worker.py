@@ -1052,7 +1052,7 @@ class AntigravitySubscriptionWorkerAutomation:
             explicitly_in_scope = any(
                 _matches_path_pattern(rel_posix, pat) for pat in self._config.in_scope_paths
             )
-            if self._config.in_scope_paths and not explicitly_in_scope:
+            if not self._config.in_scope_paths or not explicitly_in_scope:
                 violations.append(rel_posix)
 
         return sorted(set(violations))
@@ -1619,22 +1619,6 @@ __all__ = [
 ]
 
 
-def _verify_clean_worktree_for_recovery(
-    worktree: Path,
-    dec_precondition: str,
-) -> bool:
-    sanitized_env = build_sanitized_child_env()
-    status_res = _run_git(worktree, ["status", "--porcelain"], sanitized_env)
-    if status_res.returncode != 0 or bool((status_res.stdout or "").strip()):
-        return False
-    head_res = _run_git(worktree, ["rev-parse", "HEAD"], sanitized_env)
-    head_sha = (head_res.stdout or "").strip().lower()
-    if head_res.returncode != 0 or not _HEX_SHA_RE.fullmatch(head_sha):
-        return False
-    expected_precondition = hashlib.sha256(head_sha.encode("utf-8")).hexdigest()
-    return dec_precondition == expected_precondition
-
-
 def _normalize_agent_result_timestamps(res: AgentResult, ref_time: datetime) -> AgentResult:
     return res.model_copy(update={"started_at": ref_time, "completed_at": ref_time})
 
@@ -1657,10 +1641,17 @@ def run_cli_worker_job(
     """Execute a bounded CLI worker job with queue recovery and gate verification."""
     from aipc.controller.task_queue import PersistentTaskQueue, QueuedTaskStatus
     from aipc.domain.enums import ReviewVerdict
+    from aipc.domain.errors import StateError
+    from aipc.project.models import ProjectDefinition
+    from aipc.project.state_manager import StateManager
+    from aipc.recovery.errors import RecoveryError
+    from aipc.recovery.manager import RecoveryManager
     from aipc.recovery.models import RecoveryDecision
     from aipc.review.context import ReviewContext
     from aipc.review.gate import PhaseGate
     from aipc.review.subscription_reviewer_gate import SubscriptionReviewerGateDecision
+    from aipc.version.errors import VersionManagerError
+    from aipc.version.manager import VersionManager
 
     job = json.loads(Path(job_path).read_text(encoding="utf-8"))
     rep = qualification_report or qualify_antigravity_subscription_runtime()
@@ -1680,29 +1671,115 @@ def run_cli_worker_job(
     expected_project_id = task_req.project_id
     expected_phase_id = task_req.phase_id
     expected_attempt = 1
+    rec = None
     if q is not None:
-        rec = next(t for t in q.load().tasks if t.contract.task_id == tid)
+        snap = q.load()
+        rec = next((t for t in snap.tasks if t.contract.task_id == tid), None)
+        if rec is None:
+            raise ControllerError(f"Task '{tid}' not found in queue")
+        if task_req.project_id != snap.project_id:
+            raise ControllerError("task_request.project_id conflicts with queue project_id")
+        if task_req.phase_id != rec.contract.phase_id:
+            raise ControllerError("task_request.phase_id conflicts with approved contract phase_id")
+        worktree = Path(w_cfg.candidate_worktree).resolve()
+        if Path(task_req.workspace).resolve() != worktree:
+            raise ControllerError(
+                "task_request.workspace conflicts with worker_config.candidate_worktree"
+            )
+        if not w_cfg.in_scope_paths:
+            w_cfg = w_cfg.model_copy(update={"in_scope_paths": tuple(rec.contract.in_scope)})
+        else:
+            for p in w_cfg.in_scope_paths:
+                in_ok = any(_matches_path_pattern(p, c_in) for c_in in rec.contract.in_scope)
+                out_bad = any(
+                    _matches_path_pattern(p, c_out) for c_out in rec.contract.out_of_scope
+                )
+                if not in_ok or out_bad:
+                    raise ControllerError(
+                        "worker_config.in_scope_paths conflicts with approved contract scope"
+                    )
+        merged_out = tuple(dict.fromkeys((*rec.contract.out_of_scope, *w_cfg.out_of_scope_paths)))
+        w_cfg = w_cfg.model_copy(update={"out_of_scope_paths": merged_out})
+        if w_cfg.validation_commands and tuple(w_cfg.validation_commands) != tuple(
+            rec.contract.validation_commands
+        ):
+            raise ControllerError(
+                "worker_config.validation_commands conflicts with approved "
+                "contract validation_commands"
+            )
+        auto = AntigravitySubscriptionWorkerAutomation(
+            w_cfg,
+            qualification_report=rep,
+            worker_invoker=worker_invoker or invoke_antigravity_cli_worker,
+        )
         if rec.status in (QueuedTaskStatus.INTERRUPTED, QueuedTaskStatus.WAITING_PROVIDER):
             rec_path = job.get("recovery_decision_path")
-            if not rec_path:
-                raise ControllerError(
-                    f"Task {tid} is {rec.status} and requires verified "
-                    "recovery decision before dispatch"
+            proj_path = job.get("project_definition_path")
+            inline_proj = job.get("project_definition")
+            state_path = job.get("project_state_path")
+            err_msg = (
+                f"Task {tid} is {rec.status} and requires verified "
+                "recovery decision before dispatch"
+            )
+            if not rec_path or (not proj_path and inline_proj is None) or not state_path:
+                raise ControllerError(err_msg)
+            try:
+                dec = RecoveryDecision.model_validate_json(
+                    Path(rec_path).read_text(encoding="utf-8")
                 )
-            dec = RecoveryDecision.model_validate_json(Path(rec_path).read_text(encoding="utf-8"))
-            worktree = Path(w_cfg.candidate_worktree).resolve()
-            if not dec.safe_to_automate or not _verify_clean_worktree_for_recovery(
-                worktree, dec.precondition
-            ):
-                raise ControllerError(
-                    f"Task {tid} is {rec.status} and requires verified "
-                    "recovery decision before dispatch"
+                project = (
+                    ProjectDefinition.model_validate_json(
+                        Path(proj_path).read_text(encoding="utf-8")
+                    )
+                    if proj_path
+                    else ProjectDefinition.model_validate(inline_proj)
                 )
+                state_mgr = StateManager(Path(state_path))
+                wt_root = Path(job.get("worktree_root", worktree.parent / "worktrees"))
+                versions = VersionManager(
+                    worktree,
+                    project.project.id,
+                    worktree_root=wt_root,
+                )
+                if (
+                    project.project.id != snap.project_id
+                    or project.project.id != task_req.project_id
+                    or Path(project.project.workspace).resolve() != worktree
+                ):
+                    raise ControllerError(err_msg)
+                loaded_state = state_mgr.load(project)
+                if (
+                    loaded_state.project_id != snap.project_id
+                    or loaded_state.current_phase != rec.contract.phase_id
+                    or loaded_state.current_phase != task_req.phase_id
+                    or loaded_state.active_task_id not in (None, tid)
+                ):
+                    raise ControllerError(err_msg)
+                if dec.continuation is not None and (
+                    dec.continuation.phase_id != rec.contract.phase_id
+                    or dec.continuation.task_id not in (None, tid)
+                ):
+                    raise ControllerError(err_msg)
+                recovery_mgr = RecoveryManager(project, state_mgr, versions)
+                inspected = recovery_mgr.inspect(dec.request)
+                if (
+                    dec.safe_to_automate is not True
+                    or inspected.safe_to_automate is not True
+                    or inspected.precondition != dec.precondition
+                    or inspected.action != dec.action
+                ):
+                    raise ControllerError(err_msg)
+                rec_result = recovery_mgr.execute(dec)
+                if rec_result.outcome != "COMPLETED" or rec_result.remaining_blockers:
+                    raise ControllerError(err_msg)
+            except (RecoveryError, VersionManagerError, StateError, ValueError, OSError) as exc:
+                raise ControllerError(err_msg) from exc
             q.resume_after_recovery(tid, dec)
         q.begin_dispatch(
             tid,
             worker_id=job.get("worker_id", "aipc-implementation-worker"),
             provider="gemini",
+            target_paths=tuple(w_cfg.in_scope_paths),
         )
 
     try:
@@ -1711,6 +1788,20 @@ def run_cli_worker_job(
                 t for t in q.load().tasks if t.contract.task_id == tid
             ).current_attempt
         out = asyncio.run(auto.execute_worker_task(task_req))
+        if q is not None and rec is not None:
+            changed_paths = [
+                *(fc.path for fc in out.agent_result.files_changed),
+                *(fc.path for fc in out.receipt.files_changed),
+            ]
+            for changed in changed_paths:
+                in_ok = any(_matches_path_pattern(changed, pat) for pat in rec.contract.in_scope)
+                out_bad = any(
+                    _matches_path_pattern(changed, pat) for pat in rec.contract.out_of_scope
+                )
+                if not in_ok or out_bad:
+                    raise ControllerError(
+                        f"Worker modified out-of-scope path '{changed}' for task '{tid}'"
+                    )
         if out.agent_result.status != AgentStatus.COMPLETED:
             if q is not None:
                 q.mark_interrupted(

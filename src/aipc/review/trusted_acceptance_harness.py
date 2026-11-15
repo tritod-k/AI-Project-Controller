@@ -510,36 +510,209 @@ def _retained_exec_record_filename(
     return f"exec_{criterion_id}_{phase_id}_{task_id}_{attempt}_{candidate_sha[:12]}.json"
 
 
-_CONTROLLER_EXECUTION_HMAC_KEY: bytes = os.urandom(32)
+def _default_keyring_path(manifest: TrustedHarnessManifest) -> Path:
+    if manifest.trusted_manifest_path is None:
+        raise ValueError("manifest.trusted_manifest_path is required")
+    return Path(manifest.trusted_manifest_path).resolve().parent / ".aipc_controller_keyring.json"
 
 
-def _compute_execution_record_mac(
-    manifest: TrustedHarnessManifest,
-    receipt: CriterionExecutionReceipt,
-) -> str:
-    """Compute controller-held HMAC-SHA256 over a CriterionExecutionReceipt."""
-    norm_test_file = _normalize_rel_path(receipt.test_node_id.split("::")[0])
-    payload = (
-        manifest.manifest_id,
-        manifest.manifest_digest,
-        receipt.criterion_id,
-        receipt.candidate_sha,
-        receipt.test_node_id,
-        manifest.pinned_file_sha256.get(norm_test_file, ""),
-        bool(receipt.passed),
-        int(receipt.exit_code),
-        receipt.log_sha256,
-        receipt.phase_id,
-        receipt.task_id,
-        receipt.attempt,
-    )
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return hmac.new(_CONTROLLER_EXECUTION_HMAC_KEY, encoded, hashlib.sha256).hexdigest()
+class TrustedExecutionKeyring:
+    """Durable controller-held HMAC keyring persisted outside the candidate worktree."""
+
+    def __init__(
+        self,
+        keyring_path: Path | str,
+        *,
+        active_key_id: str,
+        hmac_keys: Mapping[str, str],
+    ) -> None:
+        self._keyring_path = Path(keyring_path).resolve()
+        if not active_key_id.strip() or active_key_id not in hmac_keys:
+            raise ValueError("active_key_id must exist in hmac_keys")
+        self._active_key_id = active_key_id
+        self._hmac_keys: dict[str, str] = dict(hmac_keys)
+
+    @property
+    def active_key_id(self) -> str:
+        """Return the active key identifier used for signing."""
+        return self._active_key_id
+
+    @property
+    def keyring_path(self) -> Path:
+        """Return the resolved path to the persisted keyring JSON file."""
+        return self._keyring_path
+
+    @staticmethod
+    def _validate_keyring_payload(data: object) -> tuple[str, dict[str, str]] | None:
+        if not isinstance(data, dict):
+            return None
+        active_id = data.get("active_key_id")
+        raw_keys = data.get("hmac_keys")
+        if not isinstance(active_id, str) or not active_id.strip():
+            return None
+        if not isinstance(raw_keys, dict) or active_id not in raw_keys:
+            return None
+        validated: dict[str, str] = {}
+        for k_id, k_hex in raw_keys.items():
+            if not isinstance(k_id, str) or not k_id.strip() or not isinstance(k_hex, str):
+                return None
+            try:
+                raw_bytes = bytes.fromhex(k_hex)
+            except ValueError:
+                return None
+            if len(raw_bytes) != 32 or len(k_hex) != 64:
+                return None
+            validated[k_id] = k_hex
+        return active_id, validated
+
+    def _persist(self) -> None:
+        self._keyring_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "active_key_id": self._active_key_id,
+            "hmac_keys": dict(self._hmac_keys),
+        }
+        encoded = json.dumps(payload, indent=2, sort_keys=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".aipc_keyring_",
+            suffix=".tmp",
+            dir=str(self._keyring_path.parent),
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self._keyring_path)
+            try:
+                os.chmod(self._keyring_path, 0o600)
+            except OSError:
+                pass
+        except BaseException:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _reload_if_exists(self) -> None:
+        if not self._keyring_path.is_file():
+            return
+        loaded = self.load_existing(self._keyring_path)
+        if loaded is not None:
+            self._active_key_id = loaded._active_key_id
+            self._hmac_keys = dict(loaded._hmac_keys)
+
+    @classmethod
+    def load_existing(cls, keyring_path: Path | str) -> TrustedExecutionKeyring | None:
+        """Load an existing keyring JSON file if present and valid, else return None."""
+        path = Path(keyring_path).resolve()
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        parsed = cls._validate_keyring_payload(data)
+        if parsed is None:
+            return None
+        active_id, hmac_keys = parsed
+        return cls(path, active_key_id=active_id, hmac_keys=hmac_keys)
+
+    @classmethod
+    def load_or_create(cls, keyring_path: Path | str) -> TrustedExecutionKeyring:
+        """Load keyring from disk if it exists, or create and persist an initial key."""
+        path = Path(keyring_path).resolve()
+        if path.is_file():
+            existing = cls.load_existing(path)
+            if existing is None:
+                raise ValueError(f"Invalid keyring file at '{path}'")
+            return existing
+        key_id = f"key-{os.urandom(8).hex()}"
+        key_hex = os.urandom(32).hex()
+        keyring = cls(path, active_key_id=key_id, hmac_keys={key_id: key_hex})
+        keyring._persist()
+        return keyring
+
+    def rotate_key(self) -> str:
+        """Generate and activate a new HMAC key while retaining all prior keys."""
+        self._reload_if_exists()
+        new_key_id = f"key-{os.urandom(8).hex()}"
+        while new_key_id in self._hmac_keys:
+            new_key_id = f"key-{os.urandom(8).hex()}"
+        self._hmac_keys[new_key_id] = os.urandom(32).hex()
+        self._active_key_id = new_key_id
+        self._persist()
+        return new_key_id
+
+    @staticmethod
+    def _compute_mac(
+        manifest: TrustedHarnessManifest,
+        receipt: CriterionExecutionReceipt,
+        *,
+        key_id: str,
+        key_hex: str,
+    ) -> str:
+        norm_test_file = _normalize_rel_path(receipt.test_node_id.split("::")[0])
+        payload = (
+            key_id,
+            manifest.manifest_id,
+            manifest.manifest_digest,
+            receipt.criterion_id,
+            receipt.candidate_sha,
+            receipt.test_node_id,
+            manifest.pinned_file_sha256.get(norm_test_file, ""),
+            bool(receipt.passed),
+            int(receipt.exit_code),
+            receipt.log_sha256,
+            receipt.phase_id,
+            receipt.task_id,
+            receipt.attempt,
+        )
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hmac.new(bytes.fromhex(key_hex), encoded, hashlib.sha256).hexdigest()
+
+    def sign(
+        self,
+        manifest: TrustedHarnessManifest,
+        receipt: CriterionExecutionReceipt,
+        *,
+        key_id: str | None = None,
+    ) -> tuple[str, str]:
+        """Sign a CriterionExecutionReceipt and return (used_key_id, mac_hex)."""
+        used_key_id = key_id if key_id is not None else self._active_key_id
+        key_hex = self._hmac_keys.get(used_key_id)
+        if key_hex is None:
+            raise ValueError(f"Unknown keyring key_id: {used_key_id!r}")
+        mac_hex = self._compute_mac(manifest, receipt, key_id=used_key_id, key_hex=key_hex)
+        return used_key_id, mac_hex
+
+    def verify(
+        self,
+        manifest: TrustedHarnessManifest,
+        receipt: CriterionExecutionReceipt,
+        *,
+        key_id: str | None,
+        controller_mac: str,
+    ) -> bool:
+        """Verify a CriterionExecutionReceipt MAC against the persisted keyring."""
+        self._reload_if_exists()
+        if not isinstance(key_id, str) or not key_id or not isinstance(controller_mac, str):
+            return False
+        key_hex = self._hmac_keys.get(key_id)
+        if key_hex is None:
+            return False
+        expected_mac = self._compute_mac(manifest, receipt, key_id=key_id, key_hex=key_hex)
+        return hmac.compare_digest(controller_mac, expected_mac)
 
 
 def record_trusted_criterion_execution(
@@ -554,6 +727,7 @@ def record_trusted_criterion_execution(
     phase_id: str | None = "c03",
     task_id: str | None = "task-c03",
     attempt: int | None = 1,
+    keyring: TrustedExecutionKeyring | None = None,
 ) -> tuple[CriterionExecutionReceipt, Path]:
     """Persist a trusted criterion execution record and log outside candidate worktree."""
     if manifest.trusted_manifest_path is None or manifest.manifest_digest is None:
@@ -579,6 +753,10 @@ def record_trusted_criterion_execution(
         task_id=task_id,
         attempt=attempt,
     )
+    active_keyring = keyring or TrustedExecutionKeyring.load_or_create(
+        _default_keyring_path(manifest)
+    )
+    key_id, mac_hex = active_keyring.sign(manifest, receipt)
     record_path = Path(
         manifest.trusted_manifest_path
     ).resolve().parent / _retained_exec_record_filename(
@@ -592,7 +770,8 @@ def record_trusted_criterion_execution(
     payload = {
         "receipt": receipt.model_dump(mode="json"),
         "execution_log": execution_log,
-        "controller_mac": _compute_execution_record_mac(manifest, receipt),
+        "key_id": key_id,
+        "controller_mac": mac_hex,
     }
     assert_no_secrets(payload)
     record_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1271,6 +1450,7 @@ class TrustedAcceptanceHarnessValidator:
         phase_id: str | None = "c03",
         task_id: str | None = "task-c03",
         attempt: int | None = 1,
+        keyring: TrustedExecutionKeyring | None = None,
     ) -> tuple[CriterionExecutionReceipt, ...]:
         """Execute criterion test nodes in a sanitized child env and persist trusted receipts."""
         workspace_root = Path(workspace).resolve()
@@ -1373,7 +1553,9 @@ class TrustedAcceptanceHarnessValidator:
                             "    globals().pop('_run_crit', None)",
                             "    _b_bool = builtins.bool",
                             "    _b_bytes = builtins.bytes",
+                            "    _b_frozenset = builtins.frozenset",
                             "    _b_getattr = builtins.getattr",
+                            "    _b_id = builtins.id",
                             "    _b_int = builtins.int",
                             "    _b_isinstance = builtins.isinstance",
                             "    _b_len = builtins.len",
@@ -1385,10 +1567,104 @@ class TrustedAcceptanceHarnessValidator:
                             "    _b_RuntimeError = builtins.RuntimeError",
                             "    _FunctionType = types.FunctionType",
                             "    _CodeType = types.CodeType",
+                            "    _FrameType = types.FrameType",
+                            "    _TracebackType = types.TracebackType",
+                            "    _GeneratorType = types.GeneratorType",
+                            "    _CoroutineType = types.CoroutineType",
+                            "    _AsyncGeneratorType = types.AsyncGeneratorType",
+                            "    _fr_f_code = _FrameType.f_code.__get__",
+                            "    _fr_f_back = _FrameType.f_back.__get__",
+                            "    _tb_frame_get = _TracebackType.tb_frame.__get__",
+                            "    _gi_frame_get = _GeneratorType.gi_frame.__get__",
+                            "    _cr_frame_get = _CoroutineType.cr_frame.__get__",
+                            "    _ag_frame_get = _AsyncGeneratorType.ag_frame.__get__",
+                            "    _FRAME_OBJ_TYPES = (",
+                            "        _FrameType, _TracebackType, _GeneratorType,",
+                            "        _CoroutineType, _AsyncGeneratorType,",
+                            "    )",
                             "    _real_pytest_main = pytest.main",
                             "    _real_pytest_mod = sys.modules['pytest']",
                             "    _c_audit = sys.audit",
                             "    _run_crit_code = sys._getframe(0).f_code",
+                            "    def _make_sealed_classes(",
+                            "        _sys_audit, _perm_err, _base_type, _obj_getattribute",
+                            "    ):",
+                            "        class _SealedMeta(_base_type):",
+                            "            def __getattribute__(cls, name):",
+                            "                if name == '__class__':",
+                            "                    return _base_type.__getattribute__(cls, name)",
+                            "                raise _perm_err('closure introspection prohibited')",
+                            "            def __setattr__(cls, name, val):",
+                            "                raise _perm_err('closure mutation prohibited')",
+                            "            def __delattr__(cls, name):",
+                            "                raise _perm_err('closure mutation prohibited')",
+                            "        class _SealedBound(metaclass=_SealedMeta):",
+                            "            __slots__ = ()",
+                            "            def __call__(self, *a, **kw):",
+                            "                _box = [None, None]",
+                            "                _sys_audit('aipc.call_bound', self, _box)",
+                            "                _fn, _obj = _box[0], _box[1]",
+                            "                _box[0] = None",
+                            "                _box[1] = None",
+                            "                del self",
+                            "                return _fn(_obj, *a, **kw)",
+                            "            def __getattribute__(self, name):",
+                            "                if name == '__class__':",
+                            "                    return _obj_getattribute(self, name)",
+                            "                raise _perm_err('closure introspection prohibited')",
+                            "            def __setattr__(self, name, val):",
+                            "                raise _perm_err('closure mutation prohibited')",
+                            "            def __del__(self):",
+                            "                _sys_audit('aipc.del_bound', self)",
+                            "        class _SealedMethod(metaclass=_SealedMeta):",
+                            "            __slots__ = ()",
+                            "            def __get__(self, obj, objtype=None):",
+                            "                if obj is None:",
+                            "                    raise _perm_err(",
+                            "                        'closure introspection prohibited'",
+                            "                    )",
+                            "                _b = _SealedBound()",
+                            "                _sys_audit('aipc.bind_method', self, obj, _b)",
+                            "                return _b",
+                            "            def __call__(self, *a, **kw):",
+                            "                _box = [None]",
+                            "                _sys_audit('aipc.call_method', self, _box)",
+                            "                _fn = _box[0]",
+                            "                _box[0] = None",
+                            "                del self",
+                            "                return _fn(*a, **kw)",
+                            "            def __getattribute__(self, name):",
+                            "                if name == '__class__':",
+                            "                    return _obj_getattribute(self, name)",
+                            "                raise _perm_err('closure introspection prohibited')",
+                            "            def __setattr__(self, name, val):",
+                            "                raise _perm_err('closure mutation prohibited')",
+                            "        _sb_dict = _base_type.__getattribute__(",
+                            "            _SealedBound, '__dict__'",
+                            "        )",
+                            "        _sm_dict = _base_type.__getattribute__(",
+                            "            _SealedMethod, '__dict__'",
+                            "        )",
+                            "        return (",
+                            "            _SealedBound,",
+                            "            _SealedMethod,",
+                            "            _sb_dict['__call__'].__code__,",
+                            "            _sb_dict['__del__'].__code__,",
+                            "            _sm_dict['__get__'].__code__,",
+                            "            _sm_dict['__call__'].__code__,",
+                            "        )",
+                            "    _obj_getattribute = builtins.object.__getattribute__",
+                            "    (",
+                            "        _SealedBound,",
+                            "        _SealedMethod,",
+                            "        _sb_call_code,",
+                            "        _sb_del_code,",
+                            "        _sm_get_code,",
+                            "        _sm_call_code,",
+                            "    ) = _make_sealed_classes(",
+                            "        _c_audit, _b_PermissionError, _b_type, _obj_getattribute",
+                            "    )",
+                            "    del _make_sealed_classes",
                             f"    _ws_str = {str(workspace_root)!r}",
                             f"    _test_file_abs = {str(test_path)!r}",
                             f"    _node_id = {test_node_id!r}",
@@ -1447,50 +1723,17 @@ class TrustedAcceptanceHarnessValidator:
                             "    _pinned_rw_co = _find_pinned_co(",
                             "        _p_rw_mod_co, _cls_parts, _target_fn_name",
                             "    )",
-                            "    _pinned_sigs = {",
+                            "    _pinned_sigs = _b_frozenset(",
                             "        (_c.co_code, _c.co_consts, _c.co_names, _c.co_varnames)",
                             "        for _c in (_pinned_raw_co, _pinned_rw_co)",
                             "        if _c is not None",
-                            "    }",
+                            "    )",
                             "    _smap = {}",
                             "    _bmap = {}",
-                            "    class _SealedBound:",
-                            "        __slots__ = ()",
-                            "        def __init__(self, obj, fid):",
-                            "            _bmap[id(self)] = (obj, fid)",
-                            "        def __call__(self, *a, **kw):",
-                            "            _obj, _fid = _bmap[id(self)]",
-                            "            return _smap[_fid](_obj, *a, **kw)",
-                            "        def __getattribute__(self, name):",
-                            "            raise _b_PermissionError(",
-                            "                'closure introspection prohibited'",
-                            "            )",
-                            "        def __setattr__(self, name, val):",
-                            "            raise _b_PermissionError('closure mutation prohibited')",
-                            "        def __del__(self):",
-                            "            _bmap.pop(id(self), None)",
-                            "    class _SealedMethod:",
-                            "        __slots__ = ()",
-                            "        def __init__(self, fn):",
-                            "            _smap[id(self)] = fn",
-                            "        def __get__(self, obj, objtype=None):",
-                            "            if obj is None:",
-                            "                raise _b_PermissionError(",
-                            "                    'closure introspection prohibited'",
-                            "                )",
-                            "            return _SealedBound(obj, id(self))",
-                            "        def __call__(self, *a, **kw):",
-                            "            return _smap[id(self)](*a, **kw)",
-                            "        def __getattribute__(self, name):",
-                            "            raise _b_PermissionError(",
-                            "                'closure introspection prohibited'",
-                            "            )",
-                            "        def __setattr__(self, name, val):",
-                            "            raise _b_PermissionError('closure mutation prohibited')",
-                            "        def __del__(self):",
-                            "            _smap.pop(id(self), None)",
                             "    def _seal_method(fn):",
-                            "        return _SealedMethod(fn)",
+                            "        _m = _SealedMethod()",
+                            "        _smap[_b_id(_m)] = fn",
+                            "        return _m",
                             "    _orig_fn_init = _pytest.python.Function.__dict__['__init__']",
                             "    _ws_src = os.path.join(_ws_str, 'src')",
                             "    if os.path.isdir(_ws_src) and _ws_src not in sys.path:",
@@ -1498,15 +1741,10 @@ class TrustedAcceptanceHarnessValidator:
                             "    if _ws_str not in sys.path:",
                             "        sys.path.append(_ws_str)",
                             "    def _invoke_body(_fn, _nid, _a, _kw):",
-                            "        _c_audit('aipc.body_in', _nid, _fn)",
-                            "        _use_co = (",
-                            "            _pinned_rw_co",
-                            "            if (",
-                            "                _pinned_rw_co is not None",
-                            "                and '@py_builtins' in _fn.__globals__",
-                            "            )",
-                            "            else _pinned_raw_co",
-                            "        )",
+                            "        _co_box = [None]",
+                            "        _c_audit('aipc.body_in', _nid, _fn, _co_box)",
+                            "        _use_co = _co_box[0]",
+                            "        _co_box[0] = None",
                             "        _bound_fn = _FunctionType(",
                             "            _use_co,",
                             "            _fn.__globals__,",
@@ -1517,41 +1755,12 @@ class TrustedAcceptanceHarnessValidator:
                             "        if _fn.__kwdefaults__ is not None:",
                             "            _bound_fn.__kwdefaults__ = _fn.__kwdefaults__",
                             "        _res = _bound_fn(*_a, **_kw)",
-                            "        _c_audit('aipc.body_out', _nid, _fn)",
+                            "        _c_audit('aipc.body_out', _nid, _fn, _bound_fn)",
                             "        return _res",
                             "    _orig_runtest = _pytest.python.Function.runtest",
                             "    def _guarded_runtest(self_item):",
                             "        _nid = self_item.nodeid",
                             "        _orig_obj = _b_getattr(self_item, 'obj', None)",
-                            "        if (",
-                            "            _pytest.python.Function.__dict__.get('__init__')",
-                            "            is not _orig_fn_init",
-                            "            or _b_type(_orig_obj) is not _FunctionType",
-                            "            or _pinned_raw_co is None",
-                            "        ):",
-                            "            _c_audit('aipc.rt_fail', _nid)",
-                            "            raise _b_RuntimeError(",
-                            "                'REWARD_HACKING_DETECTED: test callable tampered'",
-                            "            )",
-                            "        _fc = _orig_obj.__code__",
-                            "        if (",
-                            "            os.path.normcase(os.path.realpath(_fc.co_filename))",
-                            "            != _test_file_norm",
-                            "            or _fc.co_name != _pinned_raw_co.co_name",
-                            "            or _fc.co_firstlineno != _pinned_raw_co.co_firstlineno",
-                            "            or _fc.co_argcount != _pinned_raw_co.co_argcount",
-                            "            or (",
-                            "                _fc.co_code,",
-                            "                _fc.co_consts,",
-                            "                _fc.co_names,",
-                            "                _fc.co_varnames,",
-                            "            )",
-                            "            not in _pinned_sigs",
-                            "        ):",
-                            "            _c_audit('aipc.rt_fail', _nid)",
-                            "            raise _b_RuntimeError(",
-                            "                'REWARD_HACKING_DETECTED: test callable tampered'",
-                            "            )",
                             "        _c_audit('aipc.rt_in', _nid, _orig_obj)",
                             "        self_item.obj = lambda *a, **kw: _invoke_body(",
                             "            _orig_obj, _nid, a, kw",
@@ -1651,6 +1860,7 @@ class TrustedAcceptanceHarnessValidator:
                             "        _v_pinned_sigs,",
                             "        _v_test_file_norm,",
                             "        _smap_ref,",
+                            "        _bmap_ref,",
                             "        _exp_smap,",
                             "        _fn_cls_ref,",
                             "        _orig_fn_init_ref,",
@@ -1660,6 +1870,10 @@ class TrustedAcceptanceHarnessValidator:
                             "        _code_proto,",
                             "        _code_reg,",
                             "        _code_rc,",
+                            "        _code_sb_call,",
+                            "        _code_sb_del,",
+                            "        _code_sm_get,",
+                            "        _code_sm_call,",
                             "        _stdlib_dir,",
                             "        _site_dir,",
                             "    ):",
@@ -1730,31 +1944,57 @@ class TrustedAcceptanceHarnessValidator:
                             "                in _v_pinned_sigs",
                             "            )",
                             "        def _vault_step(ev, args):",
-                            "            if _in_getattr[0]:",
-                            "                return None",
                             "            if ev in ('gc.get_objects', 'gc.get_referrers'):",
                             "                return ('perm', 'introspection prohibited')",
                             "            if (",
                             "                ev == 'object.__getattr__'",
+                            "                and not _in_getattr[0]",
                             "                and _b_len(args) >= 2",
-                            "                and args[1] == 'tb_frame'",
+                            "                and args[1] in (",
+                            "                    'tb_frame', 'f_back', 'f_locals',",
+                            "                    'gi_frame', 'cr_frame', 'ag_frame',",
+                            "                )",
                             "            ):",
+                            "                _t = _b_type(args[0])",
+                            "                if _t not in _FRAME_OBJ_TYPES:",
+                            "                    return (",
+                            "                        'perm',",
+                            "                        'vault traceback frame access prohibited',",
+                            "                    )",
                             "                _in_getattr[0] = True",
                             "                try:",
-                            "                    _tb_f = _b_getattr(args[0], 'tb_frame', None)",
-                            "                    _tb_co = _b_getattr(_tb_f, 'f_code', None)",
+                            "                    _f = None",
+                            "                    _f2 = None",
+                            "                    if _t is _FrameType:",
+                            "                        _f = args[0]",
+                            "                        if args[1] == 'f_back':",
+                            "                            _f2 = _fr_f_back(_f)",
+                            "                    elif _t is _TracebackType:",
+                            "                        _f = _tb_frame_get(args[0])",
+                            "                    elif _t is _GeneratorType:",
+                            "                        _f = _gi_frame_get(args[0])",
+                            "                    elif _t is _CoroutineType:",
+                            "                        _f = _cr_frame_get(args[0])",
+                            "                    elif _t is _AsyncGeneratorType:",
+                            "                        _f = _ag_frame_get(args[0])",
+                            "                    _c1 = _fr_f_code(_f) if _f is not None else None",
+                            "                    _c2 = (",
+                            "                        _fr_f_code(_f2)",
+                            "                        if _f2 is not None",
+                            "                        else None",
+                            "                    )",
                             "                finally:",
                             "                    _in_getattr[0] = False",
-                            "                if _tb_co in (",
-                            "                    _crit_audit_code,",
-                            "                    _vault_step_code,",
-                            "                ):",
+                            "                _vc = (_crit_audit_code, _vault_step_code)",
+                            "                if _c1 in _vc or _c2 in _vc:",
                             "                    return (",
                             "                        'perm',",
                             "                        'vault traceback frame access prohibited',",
                             "                    )",
                             "                return None",
                             "            if ev == 'sys._getframe':",
+                            "                if _in_getattr[0]:",
+                            "                    return None",
                             "                _in_getattr[0] = True",
                             "                try:",
                             "                    _cf = _c_getframe(2)",
@@ -1765,8 +2005,8 @@ class TrustedAcceptanceHarnessValidator:
                             "                    os.path.realpath(_cf_file)",
                             "                )",
                             "                _tf_file = (",
-                            "                    args[0].f_code.co_filename",
-                            "                    if args and hasattr(args[0], 'f_code')",
+                            "                    _fr_f_code(args[0]).co_filename",
+                            "                    if (args and _b_type(args[0]) is _FrameType)",
                             "                    else ''",
                             "                )",
                             "                if (",
@@ -1800,7 +2040,10 @@ class TrustedAcceptanceHarnessValidator:
                             "                    'os.remove', 'os.rename', 'os.replace',",
                             "                )",
                             "                and args",
-                            "                and '_aipc_outcome_' in _b_str(args[0])",
+                            "                and (",
+                            "                    '_aipc_outcome_' in _b_str(args[0])",
+                            "                    or '.aipc_controller_keyring' in _b_str(args[0])",
+                            "                )",
                             "            ):",
                             "                return ('perm', 'outcome file protected')",
                             "            if not ev.startswith('aipc.'):",
@@ -1810,6 +2053,45 @@ class TrustedAcceptanceHarnessValidator:
                             "                _cc = _c_getframe(2).f_code",
                             "            finally:",
                             "                _in_getattr[0] = False",
+                            "            if ev == 'aipc.bind_method':",
+                            "                if _cc is not _code_sm_get:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                if _b_id(args[0]) not in _smap_ref:",
+                            "                    return (",
+                            "                        'perm',",
+                            "                        'closure introspection prohibited',",
+                            "                    )",
+                            "                _bmap_ref[_b_id(args[2])] = (",
+                            "                    _smap_ref[_b_id(args[0])],",
+                            "                    args[1],",
+                            "                )",
+                            "                return None",
+                            "            if ev == 'aipc.call_bound':",
+                            "                if _cc is not _code_sb_call:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _entry = _bmap_ref.get(_b_id(args[0]))",
+                            "                if _entry is None:",
+                            "                    return (",
+                            "                        'perm',",
+                            "                        'closure introspection prohibited',",
+                            "                    )",
+                            "                args[1][0], args[1][1] = _entry[0], _entry[1]",
+                            "                return None",
+                            "            if ev == 'aipc.call_method':",
+                            "                if _cc is not _code_sm_call:",
+                            "                    return ('perm', 'forged audit event')",
+                            "                _fn = _smap_ref.get(_b_id(args[0]))",
+                            "                if _fn is None:",
+                            "                    return (",
+                            "                        'perm',",
+                            "                        'closure introspection prohibited',",
+                            "                    )",
+                            "                args[1][0] = _fn",
+                            "                return None",
+                            "            if ev == 'aipc.del_bound':",
+                            "                if _cc is _code_sb_del:",
+                            "                    _bmap_ref.pop(_b_id(args[0]), None)",
+                            "                return None",
                             "            if ev == 'aipc.rt_in':",
                             "                if _cc is not _code_rt:",
                             "                    return ('perm', 'forged audit event')",
@@ -1830,7 +2112,7 @@ class TrustedAcceptanceHarnessValidator:
                             "            elif ev == 'aipc.body_in':",
                             "                if _cc is not _code_body:",
                             "                    return ('perm', 'forged audit event')",
-                            "                _nid, _fn = args",
+                            "                _nid, _fn, _co_box = args",
                             "                if not _co_matches(_fn):",
                             "                    _fn_failed.add(_nid)",
                             "                    return (",
@@ -1843,17 +2125,55 @@ class TrustedAcceptanceHarnessValidator:
                             "                    and _nid not in _body_in",
                             "                    and _fn is _active_fn.get(_nid)",
                             "                ):",
+                            "                    _use_co = (",
+                            "                        _v_pinned_rw_co",
+                            "                        if (",
+                            "                            _v_pinned_rw_co is not None",
+                            "                            and '@py_builtins' in _fn.__globals__",
+                            "                        )",
+                            "                        else _v_pinned_raw_co",
+                            "                    )",
+                            "                    if _use_co is None or (",
+                            "                        _use_co.co_code,",
+                            "                        _use_co.co_consts,",
+                            "                        _use_co.co_names,",
+                            "                        _use_co.co_varnames,",
+                            "                    ) not in _v_pinned_sigs:",
+                            "                        _fn_failed.add(_nid)",
+                            "                        return (",
+                            "                            'runtime',",
+                            "                            'REWARD_HACKING_DETECTED: '",
+                            "                            'test callable tampered',",
+                            "                        )",
+                            "                    _co_box[0] = _use_co",
                             "                    _body_in.add(_nid)",
                             "                else:",
                             "                    _fn_failed.add(_nid)",
                             "            elif ev == 'aipc.body_out':",
                             "                if _cc is not _code_body:",
                             "                    return ('perm', 'forged audit event')",
-                            "                _nid, _fn = args",
+                            "                _nid, _fn, _bound_fn = args",
+                            "                _bc = (",
+                            "                    _bound_fn.__code__",
+                            "                    if _b_type(_bound_fn) is _FunctionType",
+                            "                    else None",
+                            "                )",
                             "                if (",
                             "                    _in_call.get(_nid) is True",
                             "                    and _nid in _body_in",
                             "                    and _fn is _active_fn.get(_nid)",
+                            "                    and _b_type(_bound_fn) is _FunctionType",
+                            "                    and _bc is not None",
+                            "                    and (",
+                            "                        _bc is _v_pinned_raw_co",
+                            "                        or _bc is _v_pinned_rw_co",
+                            "                    )",
+                            "                    and (",
+                            "                        _bc.co_code,",
+                            "                        _bc.co_consts,",
+                            "                        _bc.co_names,",
+                            "                        _bc.co_varnames,",
+                            "                    ) in _v_pinned_sigs",
                             "                ):",
                             "                    _body_out.add(_nid)",
                             "                else:",
@@ -2000,6 +2320,7 @@ class TrustedAcceptanceHarnessValidator:
                             "        _pinned_sigs,",
                             "        _test_file_norm,",
                             "        _smap,",
+                            "        _bmap,",
                             "        _expected_smap,",
                             "        _pytest.python.Function,",
                             "        _orig_fn_init,",
@@ -2009,6 +2330,10 @@ class TrustedAcceptanceHarnessValidator:
                             "        _guarded_runtestprotocol.__code__,",
                             "        _guarded_register.__code__,",
                             "        _run_crit_code,",
+                            "        _sb_call_code,",
+                            "        _sb_del_code,",
+                            "        _sm_get_code,",
+                            "        _sm_call_code,",
                             "        os.path.normcase(",
                             "            os.path.realpath(os.path.dirname(os.__file__))",
                             "        ),",
@@ -2018,7 +2343,15 @@ class TrustedAcceptanceHarnessValidator:
                             "            )",
                             "        ),",
                             "    )",
-                            "    del _install_crit_vault, _expected_smap",
+                            "    del (",
+                            "        _install_crit_vault,",
+                            "        _expected_smap,",
+                            "        _pinned_raw_co,",
+                            "        _pinned_rw_co,",
+                            "        _pinned_sigs,",
+                            "        _smap,",
+                            "        _bmap,",
+                            "    )",
                             "    _args = [",
                             "        '--noconftest', '-p', 'no:cacheprovider', '-v',",
                             "        sys.argv[1],",
@@ -2119,6 +2452,7 @@ class TrustedAcceptanceHarnessValidator:
                     phase_id=phase_id,
                     task_id=task_id,
                     attempt=attempt,
+                    keyring=keyring,
                 )
                 receipts.append(receipt)
 
@@ -2139,6 +2473,7 @@ class TrustedAcceptanceHarnessValidator:
         trusted_manifest_file: Path | None = None,
         criterion_execution_receipts: tuple[CriterionExecutionReceipt, ...] = (),
         criterion_test_nodes: Mapping[str, str | Sequence[str]] | None = None,
+        keyring: TrustedExecutionKeyring | None = None,
     ) -> TrustedAcceptanceEvaluation:
         """Evaluate candidate changes and test evidence against TrustedHarnessManifest."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -2485,10 +2820,13 @@ class TrustedAcceptanceHarnessValidator:
                         return None
                     retained_receipt = retained.get("receipt")
                     retained_log = retained.get("execution_log")
+                    retained_key_id = retained.get("key_id")
                     controller_mac = retained.get("controller_mac")
                     if (
                         not isinstance(retained_receipt, dict)
                         or not isinstance(retained_log, str)
+                        or not isinstance(retained_key_id, str)
+                        or not retained_key_id.strip()
                         or not isinstance(controller_mac, str)
                         or not controller_mac.strip()
                     ):
@@ -2497,8 +2835,15 @@ class TrustedAcceptanceHarnessValidator:
                         retained_rec = CriterionExecutionReceipt.model_validate(retained_receipt)
                     except ValueError:
                         return None
-                    expected_mac = _compute_execution_record_mac(manifest, retained_rec)
-                    if not hmac.compare_digest(controller_mac, expected_mac):
+                    active_keyring = keyring or TrustedExecutionKeyring.load_existing(
+                        _default_keyring_path(manifest)
+                    )
+                    if active_keyring is None or not active_keyring.verify(
+                        manifest,
+                        retained_rec,
+                        key_id=retained_key_id,
+                        controller_mac=controller_mac,
+                    ):
                         return None
                     retained_log_sha = hashlib.sha256(retained_log.encode("utf-8")).hexdigest()
                     if (

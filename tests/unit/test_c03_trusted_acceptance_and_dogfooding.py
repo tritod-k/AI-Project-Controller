@@ -71,6 +71,7 @@ from aipc.review.trusted_acceptance_harness import (
     SelfDevelopmentDogfoodingCoordinator,
     TrustedAcceptanceEvaluation,
     TrustedAcceptanceHarnessValidator,
+    TrustedExecutionKeyring,
     TrustedHarnessManifest,
     _retained_exec_record_filename,
     assert_milestone_c_scope_authorized,
@@ -4320,3 +4321,218 @@ def test_c15_arch06_multi_node_criterion_and_cross_criterion_partial_receipts(
     )
     assert no_node_eval.passed is False
     assert no_node_eval.rejection_code == REWARD_HACKING_DETECTED
+
+
+def test_c16_mc_rr_01_03_criterion_runner_blocks_synthetic_audit_and_seals_descriptor_types(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    trusted_test = candidate_root / "tests" / "trusted" / "test_contract.py"
+    trusted_test.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "import types",
+                "",
+                "import _pytest.python",
+                "import _pytest.runner",
+                "import pytest",
+                "",
+                "",
+                "def test_trusted_contract() -> None:",
+                "    called: list[bool] = []",
+                "",
+                "    class _Evil:",
+                "        @property",
+                "        def tb_frame(self) -> None:",
+                "            called.append(True)",
+                "            return None",
+                "",
+                "    with pytest.raises(PermissionError):",
+                "        sys.audit('object.__getattr__', _Evil(), 'tb_frame')",
+                "    assert called == []",
+                "",
+                "    d_rt = _pytest.python.Function.__dict__['runtest']",
+                "    d_proto = _pytest.runner.runtestprotocol",
+                "    with pytest.raises(PermissionError):",
+                "        _ = type(d_rt).__get__",
+                "    with pytest.raises(PermissionError):",
+                "        _ = type(d_proto).__call__",
+                "",
+                "    cls_dict = object.__getattribute__(type(d_rt), '__dict__')",
+                "    for attr_name in ('__get__', '__call__'):",
+                "        fn = cls_dict[attr_name]",
+                "        for cell in fn.__closure__ or ():",
+                "            assert not isinstance(",
+                "                cell.cell_contents,",
+                "                (dict, set, frozenset, types.CodeType),",
+                "            )",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha = _init_git_repo(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=(
+            "src/aipc/review/gate.py",
+            "tests/trusted/test_contract.py",
+        ),
+        manifest_id="manifest-c16-mc-rr-03",
+        required_criterion_ids=("AC-01",),
+        criterion_test_nodes={
+            "AC-01": "tests/trusted/test_contract.py::test_trusted_contract",
+        },
+    )
+    exec_receipts = TrustedAcceptanceHarnessValidator().execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        phase_id="c03",
+        task_id="task-c16-mc-rr-03",
+        attempt=1,
+    )
+    assert len(exec_receipts) == 1
+    assert exec_receipts[0].passed is True
+
+
+def test_c16_mc_rr_07_durable_keyring_rotation_and_cross_process_restart_verification(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    trusted_test = candidate_root / "tests" / "trusted" / "test_contract.py"
+    trusted_test.write_text(
+        "\n".join(
+            [
+                "def test_trusted_contract() -> None:",
+                "    assert int('2') + 2 == 4",
+                "",
+                "",
+                "def test_second_contract() -> None:",
+                "    assert int('3') + 3 == 6",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cand_sha = _init_git_repo(candidate_root)
+    node1 = "tests/trusted/test_contract.py::test_trusted_contract"
+    node2 = "tests/trusted/test_contract.py::test_second_contract"
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=(
+            "src/aipc/review/gate.py",
+            "tests/trusted/test_contract.py",
+        ),
+        manifest_id="manifest-c16-keyring",
+        required_criterion_ids=("AC-01", "AC-02"),
+        criterion_test_nodes={"AC-01": node1, "AC-02": node2},
+    )
+    assert manifest.trusted_manifest_path is not None
+    keyring_path = (
+        Path(manifest.trusted_manifest_path).resolve().parent / ".aipc_controller_keyring.json"
+    )
+    keyring = TrustedExecutionKeyring.load_or_create(keyring_path)
+    key_id_1 = keyring.active_key_id
+
+    task_id = "task-c16-keyring"
+    rec1, path1 = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-01",
+        candidate_sha=cand_sha,
+        test_node_id=node1,
+        passed=True,
+        exit_code=0,
+        execution_log=f"{node1} PASSED\n",
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+        keyring=keyring,
+    )
+
+    key_id_2 = keyring.rotate_key()
+    assert key_id_2 != key_id_1
+
+    rec2, path2 = record_trusted_criterion_execution(
+        manifest,
+        criterion_id="AC-02",
+        candidate_sha=cand_sha,
+        test_node_id=node2,
+        passed=True,
+        exit_code=0,
+        execution_log=f"{node2} PASSED\n",
+        phase_id="c03",
+        task_id=task_id,
+        attempt=1,
+        keyring=keyring,
+    )
+    assert path1 != path2
+
+    reloaded_keyring = TrustedExecutionKeyring.load_existing(keyring_path)
+    assert reloaded_keyring is not None
+    assert reloaded_keyring.active_key_id == key_id_2
+
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.ADDED),)
+    tests_sum = TestSummary(total=2, passed=2, failed=0, skipped=0)
+    bound_ctx, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path,
+        task_id,
+        candidate_sha=cand_sha,
+        workspace_root=candidate_root,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_evidence=[node1, node2],
+    )
+    receipt = _make_valid_verification_receipt(candidate_root, cand_sha)
+    crit_results = (
+        CriterionResult(
+            criterion_id="AC-01",
+            status=CriterionStatus.PASS,
+            evidence=[node1],
+            notes="AC-01 signed with rotated-from key_id_1",
+        ),
+        CriterionResult(
+            criterion_id="AC-02",
+            status=CriterionStatus.PASS,
+            evidence=[node2],
+            notes="AC-02 signed with active key_id_2",
+        ),
+    )
+
+    eval_ok = TrustedAcceptanceHarnessValidator().evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=cand_sha,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=crit_results,
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=(rec1, rec2),
+    )
+    assert eval_ok.passed is True
+
+    tampered = json.loads(path1.read_text(encoding="utf-8"))
+    tampered["key_id"] = "key-unknown"
+    path1.write_text(json.dumps(tampered, indent=2), encoding="utf-8")
+
+    eval_tampered = TrustedAcceptanceHarnessValidator().evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate_root,
+        task_id=task_id,
+        candidate_sha=cand_sha,
+        changed_files=changed,
+        tests_summary=tests_sum,
+        criterion_results=crit_results,
+        verification_receipt=receipt,
+        review_context=bound_ctx,
+        criterion_execution_receipts=(rec1, rec2),
+    )
+    assert eval_tampered.passed is False
+    assert eval_tampered.rejection_code == REWARD_HACKING_DETECTED

@@ -549,6 +549,7 @@ def _approved_contract(
     task_id: str,
     *,
     depends_on: tuple[str, ...] = (),
+    validation_commands: tuple[str, ...] = ("pytest -q",),
 ) -> ApprovedTaskContract:
     return ApprovedTaskContract(
         task_id=task_id,
@@ -558,7 +559,7 @@ def _approved_contract(
         objective=f"Execute bounded work for {task_id}",
         depends_on=depends_on,
         in_scope=("src/module.py",),
-        validation_commands=("pytest -q",),
+        validation_commands=validation_commands,
     )
 
 
@@ -1277,7 +1278,7 @@ def test_b01_cli_worker_job_validates_complete_nested_review_receipt(tmp_path: P
         q.initialize(
             project_id="proj-b01",
             milestone_id="milestone-b",
-            contracts=[_approved_contract("task-b01-1")],
+            contracts=[_approved_contract("task-b01-1", validation_commands=(val_cmd,))],
         )
         gate_path = case_dir / "gate.json"
         payload["receipt_path"] = str(gate_path)
@@ -1742,3 +1743,252 @@ def test_b01_cli_worker_job_invalid_worker_config_leaves_task_eligible(tmp_path:
     with pytest.raises(SubscriptionBoundaryError):
         run_cli_worker_job(job_path, qualification_report=_qualified_report())
     assert q.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+
+def test_b01_empty_in_scope_paths_fails_closed_on_modified_file(tmp_path: Path) -> None:
+    """MC-RR-05: empty in_scope_paths must fail closed when any file is modified."""
+    wt = tmp_path / "candidate_wt"
+    base_sha = _init_git_repo(wt)
+
+    async def mutating_invoker(
+        _task: TaskRequest,
+        cfg: SubscriptionWorkerConfig,
+        _env: Mapping[str, str],
+        resolved_model: str,
+    ) -> WorkerInvocationResponse:
+        (Path(cfg.candidate_worktree) / "src" / "module.py").write_text(
+            f"def calc(x: int) -> int:{_NL}    return x * 5{_NL}",
+            encoding="utf-8",
+        )
+        return WorkerInvocationResponse(
+            session_id="agy-session-empty-scope",
+            model_used=resolved_model,
+            summary="Modified module.py without in_scope_paths.",
+        )
+
+    cfg = SubscriptionWorkerConfig(
+        candidate_worktree=str(wt),
+        evidence_output_dir=str(tmp_path / "evidence"),
+        in_scope_paths=(),
+    )
+    auto = AntigravitySubscriptionWorkerAutomation(
+        cfg,
+        qualification_report=_qualified_report(),
+        worker_invoker=mutating_invoker,
+    )
+    outcome = asyncio.run(auto.execute_worker_task(_task(wt, task_id="task-empty-scope")))
+    assert outcome.agent_result.status == AgentStatus.FAILED
+    assert outcome.agent_result.metadata["error_code"] == "FORBIDDEN_PATH_VIOLATION"
+    assert outcome.receipt.candidate_commit_sha == base_sha
+    assert "src/module.py" in outcome.receipt.forbidden_paths_violated
+
+
+def test_b01_cli_worker_job_rejects_contract_mismatches_before_dispatch(tmp_path: Path) -> None:
+    """MC-RR-05: reject mismatched project_id, phase_id, workspace, scope, validation_commands."""
+    wt = tmp_path / "candidate_wt"
+    _init_git_repo(wt)
+    other_wt = tmp_path / "other_wt"
+    _init_git_repo(other_wt)
+
+    def _run_bad_job(
+        case_name: str,
+        *,
+        task_override: dict[str, object] | None = None,
+        cfg_override: dict[str, object] | None = None,
+    ) -> None:
+        case_dir = tmp_path / case_name
+        case_dir.mkdir(parents=True, exist_ok=True)
+        q_path = case_dir / "queue.json"
+        q = PersistentTaskQueue(q_path)
+        q.initialize(
+            project_id="proj-b01",
+            milestone_id="milestone-b",
+            contracts=[_approved_contract("task-b01-1")],
+        )
+        task_data = _task(wt, task_id="task-b01-1").model_dump(mode="json")
+        if task_override:
+            task_data.update(task_override)
+        cfg_data: dict[str, object] = {
+            "candidate_worktree": str(wt),
+            "evidence_output_dir": str(case_dir / "evidence"),
+            "in_scope_paths": ["src/module.py"],
+            "validation_commands": ["pytest -q"],
+        }
+        if cfg_override:
+            cfg_data.update(cfg_override)
+        job_path = case_dir / "job.json"
+        job_path.write_text(
+            json.dumps(
+                {
+                    "queue_path": str(q_path),
+                    "task_request": task_data,
+                    "worker_config": cfg_data,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ControllerError):
+            run_cli_worker_job(job_path, qualification_report=_qualified_report())
+        assert q.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+    _run_bad_job("bad_proj", task_override={"project_id": "proj-other"})
+    _run_bad_job("bad_phase", task_override={"phase_id": "99"})
+    _run_bad_job("bad_ws", task_override={"workspace": str(other_wt)})
+    _run_bad_job("bad_scope", cfg_override={"in_scope_paths": ["src/other.py"]})
+    _run_bad_job("bad_val", cfg_override={"validation_commands": ["pytest -k other"]})
+
+
+def test_b01_cli_worker_job_recovery_uses_canonical_recovery_manager(tmp_path: Path) -> None:
+    """MC-RR-06: valid RecoveryDecision succeeds; forged HEAD sha or bad identity fails."""
+    import hashlib
+
+    from aipc.project.models import (
+        AcceptanceCriterion,
+        AgentAssignments,
+        ControllerConfig,
+        PhaseDefinition,
+        ProjectDefinition,
+        ProjectIdentity,
+    )
+    from aipc.project.state_manager import StateManager
+    from aipc.recovery.manager import RecoveryManager
+    from aipc.recovery.models import FailureClassification, RecoveryRequest
+    from aipc.version.manager import VersionManager
+
+    def _setup_interrupted_repo(case_name: str):
+        case_dir = tmp_path / case_name
+        wt = case_dir / "candidate_wt"
+        head_sha = _init_git_repo(wt)
+        wt_root = case_dir / "worktrees"
+        state_path = case_dir / "state.json"
+        proj_path = case_dir / "project.json"
+        project = ProjectDefinition(
+            schema_version="1.0",
+            project=ProjectIdentity(id="proj-b01", name="B01 Test", workspace=str(wt)),
+            controller=ControllerConfig(),
+            agents=AgentAssignments(planner="planner", worker="worker", reviewer="reviewer"),
+            phases=(
+                PhaseDefinition(
+                    id="01",
+                    name="Phase 01",
+                    objective="Implement double",
+                    acceptance_criteria=(
+                        AcceptanceCriterion(
+                            id="AC-01",
+                            statement="All tests pass",
+                            required=True,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        proj_path.write_text(project.model_dump_json(indent=2), encoding="utf-8")
+        versions = VersionManager(wt, "proj-b01", worktree_root=wt_root)
+        pre = versions.create_pre_phase_checkpoint("01")
+        work = versions.create_attempt_worktree(pre.checkpoint_id, 1, "worker")
+        state_mgr = StateManager(state_path)
+        state_mgr.initialize(project, "run-001")
+        state_mgr.transition(project, "READY")
+        state_mgr.transition(project, "RUNNING")
+        state_mgr.begin_phase(project, "01")
+        st = state_mgr.load(project)
+        state_mgr.save(project, st.model_copy(update={"active_task_id": "task-b01-1"}))
+        recovery_mgr = RecoveryManager(project, state_mgr, versions)
+        recovery_mgr.register_attempt(pre.checkpoint_id, work.worktree_id)
+        state_mgr.transition(project, "INTERRUPTED")
+        dec = recovery_mgr.inspect(
+            RecoveryRequest(
+                recovery_id="rec-01",
+                classification=FailureClassification.WORKER_INTERRUPTED,
+                worker_condition="DEAD",
+            )
+        )
+        rec_path = case_dir / "recovery_decision.json"
+        rec_path.write_text(dec.model_dump_json(indent=2), encoding="utf-8")
+        q_path = case_dir / "queue.json"
+        q = PersistentTaskQueue(q_path)
+        val_cmd = f"{Path(sys.executable).as_posix()} -c \"print('1 passed in 0.01s')\""
+        q.initialize(
+            project_id="proj-b01",
+            milestone_id="milestone-b",
+            contracts=[_approved_contract("task-b01-1", validation_commands=(val_cmd,))],
+        )
+        q.begin_dispatch("task-b01-1", worker_id="w1", provider="gemini")
+        q.mark_interrupted("task-b01-1", reason="crash", quota_exhausted=False)
+        job_path = case_dir / "job.json"
+        job_path.write_text(
+            json.dumps(
+                {
+                    "queue_path": str(q_path),
+                    "recovery_decision_path": str(rec_path),
+                    "project_definition_path": str(proj_path),
+                    "project_state_path": str(state_path),
+                    "worktree_root": str(wt_root),
+                    "task_request": _task(wt, task_id="task-b01-1").model_dump(mode="json"),
+                    "worker_config": {
+                        "candidate_worktree": str(wt),
+                        "evidence_output_dir": str(case_dir / "evidence"),
+                        "in_scope_paths": ["src/module.py"],
+                        "validation_commands": [val_cmd],
+                        "auto_commit_candidate": False,
+                        "require_non_empty_diff": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return case_dir, wt, head_sha, project, dec, rec_path, proj_path, q, job_path
+
+    async def noop_invoker(
+        _task: TaskRequest,
+        _cfg: SubscriptionWorkerConfig,
+        _env: Mapping[str, str],
+        resolved_model: str,
+    ) -> WorkerInvocationResponse:
+        return WorkerInvocationResponse(
+            session_id="sess-rec",
+            model_used=resolved_model,
+            summary="Noop.",
+        )
+
+    _, _, _, _, _, _, _, q_ok, job_ok = _setup_interrupted_repo("rec_valid")
+    rc = run_cli_worker_job(
+        job_ok,
+        qualification_report=_qualified_report(),
+        worker_invoker=noop_invoker,
+    )
+    assert rc == 0
+    assert q_ok.load().tasks[0].status == QueuedTaskStatus.RUNNING
+
+    _, _, head_sha, _, dec_forged, rec_forged_path, _, q_forged, job_forged = (
+        _setup_interrupted_repo("rec_forged")
+    )
+    forged_pre = hashlib.sha256(head_sha.encode("utf-8")).hexdigest()
+    rec_forged_path.write_text(
+        dec_forged.model_copy(update={"precondition": forged_pre}).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    with pytest.raises(ControllerError, match="requires verified recovery decision"):
+        run_cli_worker_job(
+            job_forged,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+    assert q_forged.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+    _, _, _, _, dec_bad_task, rec_bad_task_path, _, q_bad_task, job_bad_task = (
+        _setup_interrupted_repo("rec_bad_task")
+    )
+    assert dec_bad_task.continuation is not None
+    bad_cont = dec_bad_task.continuation.model_copy(update={"task_id": "other-task"})
+    rec_bad_task_path.write_text(
+        dec_bad_task.model_copy(update={"continuation": bad_cont}).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    with pytest.raises(ControllerError, match="requires verified recovery decision"):
+        run_cli_worker_job(
+            job_bad_task,
+            qualification_report=_qualified_report(),
+            worker_invoker=noop_invoker,
+        )
+    assert q_bad_task.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
