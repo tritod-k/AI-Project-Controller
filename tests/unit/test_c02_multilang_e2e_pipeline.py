@@ -2295,3 +2295,65 @@ def test_c02_bootstrap_ignores_candidate_socket_shadow_and_prescan_rejects(
     assert proc.returncode == 0
     assert "ok" in proc.stdout
     assert not outside_marker.exists()
+
+
+def test_c02_isolated_subprocess_seals_popen_and_blocks_scratch_pythonpath(
+    tmp_path: Path,
+) -> None:
+    bundle, head_sha = _make_onboarded_python_project(tmp_path)
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+    probe = "\n".join(
+        [
+            "import os, pathlib, subprocess, sys",
+            "scratch = pathlib.Path(os.environ['TMPDIR'])",
+            "marker = scratch / 'scratch_socket_pwned.txt'",
+            "(scratch / 'socket.py').write_text(",
+            "    f'import pathlib\\npathlib.Path({str(marker)!r}).write_text(\"pwned\")\\n',",
+            "    encoding='utf-8',",
+            ")",
+            "proc = subprocess.run(",
+            "    [sys.executable, '-c', 'import socket; print(\"ok\")'],",
+            "    env={'PYTHONPATH': str(scratch), 'PATH': os.environ.get('PATH', '')},",
+            "    capture_output=True,",
+            "    text=True,",
+            "    check=True,",
+            ")",
+            "assert 'ok' in proc.stdout",
+            "assert not marker.exists()",
+            "for fn in (",
+            "    lambda: subprocess.Popen.__init__,",
+            "    lambda: subprocess.Popen.__dict__['__init__'].__closure__,",
+            "):",
+            "    raised = False",
+            "    try:",
+            "        fn()",
+            "    except PermissionError:",
+            "        raised = True",
+            "    assert raised",
+            "p = subprocess.Popen(",
+            "    [sys.executable, '-c', 'pass'],",
+            "    env={'PYTHONPATH': '', 'PATH': os.environ.get('PATH', '')},",
+            ")",
+            "assert p.wait() == 0",
+            "bound_raised = False",
+            "try:",
+            "    _ = p.__init__.__closure__",
+            "except PermissionError:",
+            "    bound_raised = True",
+            "assert bound_raised",
+            "print('1 passed')",
+        ]
+    )
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-c", probe),
+    )
+    assert receipt.passed is True

@@ -811,3 +811,58 @@ def test_bootstrap_ignores_candidate_socket_shadow_and_prescan_rejects(tmp_path:
         parent_env=None,
     )
     assert not outside_marker.exists()
+
+
+def test_isolated_subprocess_seals_popen_and_blocks_scratch_pythonpath(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    (candidate_root / "tests" / "test_popen_seal_and_scratch_pp.py").write_text(
+        "\n".join(
+            [
+                "import os, pathlib, subprocess, sys, pytest",
+                "def test_popen_sealed_and_scratch_pythonpath_blocked():",
+                "    scratch = pathlib.Path(os.environ['TMPDIR'])",
+                "    marker = scratch / 'scratch_socket_pwned.txt'",
+                "    _m_str = str(marker)",
+                "    _code = f'import pathlib\\npathlib.Path({_m_str!r}).write_text(\"p\")\\n'",
+                "    (scratch / 'socket.py').write_text(_code, encoding='utf-8')",
+                "    proc = subprocess.run(",
+                "        [sys.executable, '-c', 'import socket; print(\"ok\")'],",
+                "        env={'PYTHONPATH': str(scratch), 'PATH': os.environ.get('PATH', '')},",
+                "        capture_output=True,",
+                "        text=True,",
+                "        check=True,",
+                "    )",
+                "    assert 'ok' in proc.stdout",
+                "    assert not marker.exists()",
+                "    with pytest.raises(PermissionError):",
+                "        _ = subprocess.Popen.__init__",
+                "    with pytest.raises(PermissionError):",
+                "        _ = subprocess.Popen.__dict__['__init__'].__closure__",
+                "    p = subprocess.Popen(",
+                "        [sys.executable, '-c', 'pass'],",
+                "        env={'PYTHONPATH': '', 'PATH': os.environ.get('PATH', '')},",
+                "    )",
+                "    assert p.wait() == 0",
+                "    with pytest.raises(PermissionError):",
+                "        _ = p.__init__.__closure__",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    runner = SafeSelfDevelopmentRunner(cfg)
+    receipt = runner.run_candidate_verification(
+        pytest_targets=("tests/test_popen_seal_and_scratch_pp.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0

@@ -3162,6 +3162,145 @@ def test_execute_and_record_criteria_rejects_conftest_plugin_exitstatus_and_stdl
     assert bypass_receipts[0].exit_code != 0
 
 
+def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspection(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
+    cand_sha = _git_head_sha(candidate_root)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate_root,
+        protected_rel_paths=("src/aipc/review/gate.py", "tests/trusted/test_contract.py"),
+        manifest_id="manifest-c03-r7a-hooks-closures",
+        required_criterion_ids=("AC-01",),
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+
+    hook_test = candidate_root / "tests" / "unit" / "test_hook_bypass.py"
+    hook_node = "tests/unit/test_hook_bypass.py::test_hook_bypass_fails"
+    hook_source = "\n".join(
+        [
+            "import pytest",
+            "",
+            "pytest_plugins = ['some_plugin']",
+            "",
+            "@pytest.hookimpl(tryfirst=True)",
+            "def pytest_pyfunc_call(pyfuncitem):",
+            "    return True",
+            "",
+            "def test_hook_bypass_fails() -> None:",
+            "    actual = 1 + 1",
+            "    assert actual == 3",
+            "",
+        ]
+    )
+    hook_test.write_text(hook_source, encoding="utf-8")
+    ast_findings = validator.inspect_python_test_source(
+        "tests/unit/test_hook_bypass.py",
+        hook_source,
+    )
+    assert any(f.rule_id == "CANDIDATE_PYTEST_HOOK_INTERCEPTION" for f in ast_findings)
+    with pytest.raises(ValueError, match="pytest hook or pytest_plugins"):
+        validator.execute_and_record_criteria(
+            manifest=manifest,
+            workspace=candidate_root,
+            candidate_sha=cand_sha,
+            criterion_test_nodes={"AC-01": hook_node},
+            phase_id="c03",
+            task_id="task-c03-hook-ast",
+            attempt=1,
+        )
+    hook_test.unlink()
+
+    closure_fail_test = candidate_root / "tests" / "unit" / "test_closure_tamper.py"
+    closure_fail_node = "tests/unit/test_closure_tamper.py::test_closure_tamper_after_failure"
+    closure_fail_test.write_text(
+        "\n".join(
+            [
+                "import _pytest.python",
+                "import pytest",
+                "",
+                "def test_closure_tamper_after_failure(pytestconfig, request) -> None:",
+                "    def _tamper_finalizer() -> None:",
+                "        with pytest.raises(PermissionError):",
+                "            _ = _pytest.python.Function.runtest.__closure__",
+                "        with pytest.raises(PermissionError):",
+                "            _ = _pytest.python.Function.__dict__['runtest'].__closure__",
+                "        with pytest.raises(PermissionError):",
+                "            _ = pytestconfig.pluginmanager.get_plugins.__closure__",
+                "        fake_cls = type(",
+                "            '_FakePlugin',",
+                "            (),",
+                "            {'pytest_' + 'pyfunc_call': lambda self, pyfuncitem: True},",
+                "        )",
+                "        with pytest.raises(PermissionError):",
+                "            pytestconfig.pluginmanager.register(fake_cls())",
+                "    request.addfinalizer(_tamper_finalizer)",
+                "    actual = len(request.node.nodeid)",
+                "    assert actual == -1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fail_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": closure_fail_node},
+        phase_id="c03",
+        task_id="task-c03-closure-fail",
+        attempt=1,
+    )
+    assert len(fail_receipts) == 1
+    assert fail_receipts[0].passed is False
+    assert fail_receipts[0].exit_code != 0
+
+    closure_ok_test = candidate_root / "tests" / "unit" / "test_closure_sealed_ok.py"
+    closure_ok_node = "tests/unit/test_closure_sealed_ok.py::test_closure_guards_raise"
+    closure_ok_test.write_text(
+        "\n".join(
+            [
+                "import _pytest.python",
+                "import pytest",
+                "",
+                "def test_closure_guards_raise(pytestconfig, request) -> None:",
+                "    def _verify_sealed() -> None:",
+                "        with pytest.raises(PermissionError):",
+                "            _ = _pytest.python.Function.runtest.__closure__",
+                "        with pytest.raises(PermissionError):",
+                "            _ = _pytest.python.Function.__dict__['runtest'].__closure__",
+                "        with pytest.raises(PermissionError):",
+                "            _ = pytestconfig.pluginmanager.get_plugins.__closure__",
+                "        fake_cls = type(",
+                "            '_FakePlugin',",
+                "            (),",
+                "            {'pytest_' + 'pyfunc_call': lambda self, pyfuncitem: True},",
+                "        )",
+                "        with pytest.raises(PermissionError):",
+                "            pytestconfig.pluginmanager.register(fake_cls())",
+                "    request.addfinalizer(_verify_sealed)",
+                "    assert len(request.node.nodeid) > 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    ok_receipts = validator.execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate_root,
+        candidate_sha=cand_sha,
+        criterion_test_nodes={"AC-01": closure_ok_node},
+        phase_id="c03",
+        task_id="task-c03-closure-ok",
+        attempt=1,
+    )
+    assert len(ok_receipts) == 1
+    assert ok_receipts[0].passed is True
+    assert ok_receipts[0].exit_code == 0
+
+
 def test_evaluate_candidate_rejects_missing_review_context_on_direct_evidence(
     tmp_path: Path,
 ) -> None:
