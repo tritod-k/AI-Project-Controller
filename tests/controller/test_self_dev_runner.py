@@ -463,16 +463,16 @@ def test_container_verification_hmac_receipt_valid_and_tampered(tmp_path: Path) 
                     probe_dir = Path(item[: -len(":/aipc_probe:ro")])
                 elif item.endswith(":/aipc_ctrl_out:rw"):
                     ctrl_out = Path(item[: -len(":/aipc_ctrl_out:rw")])
-            assert (probe_dir / "secret.json").is_file()
+            assert (ctrl_out / "nonce.json").is_file()
             script = (probe_dir / "run_verify.py").read_text(encoding="utf-8")
             m_o = re.search(r"AIPC_CONTAINER_ORIGIN_([0-9a-f]+):", script)
             m_d = re.search(r"AIPC_CONTAINER_DONE_([0-9a-f]+):0", script)
             assert m_o and m_d
-            sec_key = json.loads((probe_dir / "secret.json").read_text(encoding="utf-8"))[
-                "hmac_key"
+            auth_nonce_b = json.loads((ctrl_out / "nonce.json").read_text(encoding="utf-8"))[
+                "auth_nonce"
             ].encode("utf-8")
             sig = hmac.new(
-                sec_key,
+                auth_nonce_b,
                 f"/workspace/src/aipc/__init__.py|{init_sha}|0".encode(),
                 hashlib.sha256,
             ).hexdigest()
@@ -574,3 +574,195 @@ def test_isolated_subprocess_blocks_dangling_symlink_escape(tmp_path: Path) -> N
     )
     assert sub_receipt.passed is True
     assert not outside_missing.exists()
+
+
+def test_isolated_subprocess_blocks_sys_getframe_from_candidate(tmp_path: Path) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    (candidate_root / "tests" / "test_getframe_blocked.py").write_text(
+        "\n".join(
+            [
+                "import sys, pytest",
+                "def test_getframe_raises_permission_error():",
+                "    with pytest.raises(PermissionError, match='WORKSPACE_WRITE_ISOLATION'):",
+                "        sys._getframe(0)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    runner = SafeSelfDevelopmentRunner(cfg)
+    receipt = runner.run_candidate_verification(
+        pytest_targets=("tests/test_getframe_blocked.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0
+
+
+def test_isolated_subprocess_blocks_self_link_parent_traversal_escape(tmp_path: Path) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    self_link = candidate_root / "self_link"
+    outside_victim = (tmp_path / "outside_victim.txt").resolve()
+    try:
+        os.symlink(candidate_root, self_link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    escape_target = str(candidate_root / "self_link" / ".." / "outside_victim.txt")
+    (candidate_root / "tests" / "test_self_link_escape.py").write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "def test_self_link_dotdot_escape_blocked():",
+                "    with pytest.raises(PermissionError):",
+                f"        open({escape_target!r}, 'w', encoding='utf-8').write('escape')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    runner = SafeSelfDevelopmentRunner(cfg)
+    receipt = runner.run_candidate_verification(
+        pytest_targets=("tests/test_self_link_escape.py",),
+    )
+    assert receipt.passed is True
+    assert not outside_victim.exists()
+
+
+def test_container_and_subprocess_reject_candidate_pytest_shadow_and_hardens_probe(
+    tmp_path: Path,
+) -> None:
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate_wt")
+    shadow_pytest = candidate_root / "src" / "pytest" / "__init__.py"
+    shadow_pytest.parent.mkdir(parents=True, exist_ok=True)
+    shadow_pytest.write_text("def main(*a, **kw):\n    return 0\n", encoding="utf-8")
+
+    cfg = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="container",
+    )
+    runner = SafeSelfDevelopmentRunner(
+        cfg,
+        subprocess_runner=lambda argv, env, cwd: subprocess.CompletedProcess(
+            argv, 0, stdout="", stderr=""
+        ),
+    )
+    with pytest.raises(ControllerError, match=IMPORT_ORIGIN_MISMATCH):
+        runner.run_candidate_verification(pytest_targets=("tests/test_candidate_smoke.py",))
+
+    sub_runner = SafeSelfDevelopmentRunner(
+        cfg.model_copy(update={"verification_isolation": "isolated_subprocess"})
+    )
+    with pytest.raises(ControllerError, match=IMPORT_ORIGIN_MISMATCH):
+        sub_runner.run_candidate_verification(pytest_targets=("tests/test_candidate_smoke.py",))
+
+    shadow_pytest.unlink()
+    captured_scripts: list[tuple[str, str]] = []
+    init_sha = hashlib.sha256(
+        (candidate_root / "src" / "aipc" / "__init__.py").read_bytes()
+    ).hexdigest()
+
+    def inspect_probe_runner(
+        argv: list[str],
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        probe_dir = Path("")
+        ctrl_out = Path("")
+        for item in argv:
+            if item.endswith(":/aipc_probe:ro"):
+                probe_dir = Path(item[: -len(":/aipc_probe:ro")])
+            elif item.endswith(":/aipc_ctrl_out:rw"):
+                ctrl_out = Path(item[: -len(":/aipc_ctrl_out:rw")])
+        parent_script = (probe_dir / "run_verify.py").read_text(encoding="utf-8")
+        child_script = (probe_dir / "child_verify.py").read_text(encoding="utf-8")
+        captured_scripts.append((parent_script, child_script))
+        assert (ctrl_out / "nonce.json").is_file()
+        auth_nonce_b = json.loads((ctrl_out / "nonce.json").read_text(encoding="utf-8"))[
+            "auth_nonce"
+        ].encode("utf-8")
+        m_o = re.search(r"AIPC_CONTAINER_ORIGIN_([0-9a-f]+):", parent_script)
+        m_d = re.search(r"AIPC_CONTAINER_DONE_([0-9a-f]+):0", parent_script)
+        assert m_o and m_d
+        sig = hmac.new(
+            auth_nonce_b,
+            f"/workspace/src/aipc/__init__.py|{init_sha}|0".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        (ctrl_out / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "file": "/workspace/src/aipc/__init__.py",
+                    "sha256": init_sha,
+                    "path": ["/workspace/src"],
+                    "rc": 0,
+                    "hmac": sig,
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = json.dumps(
+            {
+                "file": "/workspace/src/aipc/__init__.py",
+                "sha256": init_sha,
+                "path": ["/workspace/src"],
+            }
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=(
+                f"AIPC_CONTAINER_ORIGIN_{m_o.group(1)}:{payload}\n"
+                f"1 passed\nAIPC_CONTAINER_DONE_{m_d.group(1)}:0\n"
+            ),
+            stderr="",
+        )
+
+    inspect_runner = SafeSelfDevelopmentRunner(cfg, subprocess_runner=inspect_probe_runner)
+    receipt = inspect_runner.run_candidate_verification(
+        pytest_targets=("tests/test_candidate_smoke.py",),
+    )
+    assert receipt.passed is True
+    assert len(captured_scripts) == 1
+    parent_script, child_script = captured_scripts[0]
+    assert "os.unlink('/aipc_ctrl_out/nonce.json')" in parent_script
+    assert "globals().pop('_aipc_parent_verify', None)" in parent_script
+    assert "/aipc_probe/child_verify.py" in parent_script
+    assert "import aipc" not in parent_script
+    assert "sys.path.insert(0, '/workspace/src')" not in parent_script
+    assert child_script.index("import pytest") < child_script.index(
+        "sys.path.insert(0, '/workspace/src')"
+    )
+    assert child_script.index("import pytest") < child_script.index(
+        "sys.addaudithook(_probe_audit)"
+    )
+    assert "globals().pop('_aipc_container_verify', None)" in child_script
+    assert "if ev == 'os.chdir':" in child_script
+    assert "_c_lstat(" in child_script
+    assert "os.path.realpath" not in child_script
+    assert "sys.modules.get('pytest') is not _real_pytest_mod" in child_script
+    assert "class _CtrlPlugin:" in child_script
+    assert "self.passed_calls = 0" in child_script
+    assert "self.failed_calls = 0" in child_script
+    assert child_script.index("_real_pytest_main(") < child_script.index("AIPC_CONTAINER_ORIGIN_")
+    assert "plugins=[_plugin]" in child_script
+    assert "nonce.json" not in child_script

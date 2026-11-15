@@ -5,9 +5,12 @@ from __future__ import annotations
 import ast
 import fnmatch
 import hashlib
+import hmac
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
@@ -20,6 +23,7 @@ from aipc.controller.self_dev_runner import (
     CandidateImportOriginReport,
     CandidateVerificationReceipt,
     StableCandidateConfig,
+    _write_candidate_isolation_bootstrap,
 )
 from aipc.domain.enums import ChangeType, CriterionStatus, ReviewVerdict
 from aipc.domain.models import (
@@ -417,6 +421,8 @@ class CriterionExecutionReceipt(CanonicalRecord):
     passed: StrictBool
     exit_code: StrictInt
     log_sha256: Digest | None = None
+    phase_id: str | None = Field(default=None)
+    task_id: str | None = Field(default=None)
 
 
 def record_trusted_criterion_execution(
@@ -428,6 +434,8 @@ def record_trusted_criterion_execution(
     passed: bool,
     exit_code: int,
     execution_log: str,
+    phase_id: str | None = None,
+    task_id: str | None = None,
 ) -> tuple[CriterionExecutionReceipt, Path]:
     """Persist a trusted criterion execution record and log outside candidate worktree."""
     if manifest.trusted_manifest_path is None or manifest.manifest_digest is None:
@@ -448,6 +456,8 @@ def record_trusted_criterion_execution(
         passed=passed,
         exit_code=exit_code,
         log_sha256=log_sha256,
+        phase_id=phase_id,
+        task_id=task_id,
     )
     record_path = (
         Path(manifest.trusted_manifest_path).resolve().parent
@@ -1051,12 +1061,36 @@ class TrustedAcceptanceHarnessValidator:
         python_executable: Path | str | None = None,
         parent_env: Mapping[str, str] | None = None,
         timeout_seconds: int = 120,
+        phase_id: str | None = None,
+        task_id: str | None = None,
     ) -> tuple[CriterionExecutionReceipt, ...]:
         """Execute criterion test nodes in a sanitized child env and persist trusted receipts."""
         workspace_root = Path(workspace).resolve()
         manifest_findings = _verify_manifest_integrity(manifest, workspace_root)
         if manifest_findings:
             raise ValueError(manifest_findings[0].description)
+
+        for base in (workspace_root, workspace_root / "src"):
+            if not base.exists() or not base.is_dir():
+                continue
+            for shadow_name in ("pytest.py", "sitecustomize.py", "usercustomize.py"):
+                cand = base / shadow_name
+                if cand.exists() or cand.is_symlink():
+                    raise ValueError(
+                        f"{REWARD_HACKING_DETECTED}: candidate workspace contains shadowing "
+                        f"file '{cand}'"
+                    )
+            pytest_pkg = base / "pytest" / "__init__.py"
+            if pytest_pkg.exists() or pytest_pkg.is_symlink():
+                raise ValueError(
+                    f"{REWARD_HACKING_DETECTED}: candidate workspace contains shadowing "
+                    f"package '{pytest_pkg}'"
+                )
+            for pth_file in sorted(base.glob("*.pth")):
+                raise ValueError(
+                    f"{REWARD_HACKING_DETECTED}: candidate workspace contains prohibited "
+                    f".pth file '{pth_file}'"
+                )
 
         sanitized_env = build_sanitized_child_env(parent_env)
         assert_child_env_isolated(sanitized_env)
@@ -1090,20 +1124,177 @@ class TrustedAcceptanceHarnessValidator:
                     f"AST verification failed for '{norm_test_file}': {ast_findings[0].description}"
                 )
 
-            exec_env = dict(sanitized_env)
-            exec_env["PYTHONDONTWRITEBYTECODE"] = "1"
-            proc = subprocess.run(
-                [py_exe, "-B", "-m", "pytest", "-p", "no:cacheprovider", test_node_id, "-v"],
-                cwd=str(workspace_root),
-                env=exec_env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+            with tempfile.TemporaryDirectory(prefix="aipc-crit-iso-") as tmp_iso:
+                iso_root = Path(tmp_iso).resolve()
+                boot_dir = iso_root / "boot"
+                boot_dir.mkdir()
+                candidate_src = (
+                    workspace_root / "src" if (workspace_root / "src").is_dir() else workspace_root
+                )
+                _write_candidate_isolation_bootstrap(
+                    boot_dir,
+                    stable_root=boot_dir / "disjoint_stable",
+                    candidate_src=candidate_src,
+                )
+                outcome_nonce = uuid4().hex
+                auth_nonce = uuid4().hex + uuid4().hex
+                (boot_dir / "scratch").mkdir(parents=True, exist_ok=True)
+                outcome_path = boot_dir / "scratch" / f"_aipc_outcome_{outcome_nonce}.json"
+                runner_script = boot_dir / "scratch" / "_trusted_criterion_runner.py"
+                runner_code = "\n".join(
+                    [
+                        "def _run_crit():",
+                        "    import hashlib, hmac, json, os, sys, pytest",
+                        "    globals().pop('_run_crit', None)",
+                        "    _real_pytest_main = pytest.main",
+                        "    _real_pytest_mod = sys.modules['pytest']",
+                        f"    _out_path = {str(outcome_path)!r}",
+                        f"    _ws_str = {str(workspace_root)!r}",
+                        f"    _auth_nonce = {auth_nonce!r}",
+                        "    try:",
+                        "        os.unlink(__file__)",
+                        "    except OSError:",
+                        "        pass",
+                        "    def _no_exit(*_a, **_k):",
+                        "        raise PermissionError('os._exit prohibited')",
+                        "    os._exit = _no_exit",
+                        "    _locked = [True]",
+                        "    def _crit_audit(ev, args):",
+                        "        if ev in ('gc.get_objects', 'gc.get_referrers'):",
+                        "            raise PermissionError('introspection prohibited')",
+                        "        if (",
+                        "            _locked[0]",
+                        "            and ev in (",
+                        "                'open', 'os.open', 'os.unlink',",
+                        "                'os.remove', 'os.rename', 'os.replace',",
+                        "            )",
+                        "            and args",
+                        "            and '_aipc_outcome_' in str(args[0])",
+                        "        ):",
+                        "            raise PermissionError('outcome file protected')",
+                        "    sys.addaudithook(_crit_audit)",
+                        "    del _crit_audit",
+                        "    _ws_src = os.path.join(_ws_str, 'src')",
+                        "    if os.path.isdir(_ws_src) and _ws_src not in sys.path:",
+                        "        sys.path.append(_ws_src)",
+                        "    if _ws_str not in sys.path:",
+                        "        sys.path.append(_ws_str)",
+                        "    class _NodePlugin:",
+                        "        def __init__(self):",
+                        "            self.passed_nodes = set()",
+                        "            self.failed_nodes = set()",
+                        "        def pytest_runtest_logreport(self, report):",
+                        "            if report.when == 'call' and report.outcome == 'passed':",
+                        "                self.passed_nodes.add(report.nodeid)",
+                        "            elif report.failed:",
+                        "                self.failed_nodes.add(report.nodeid)",
+                        "    _plugin = _NodePlugin()",
+                        "    _rc = int(",
+                        "        _real_pytest_main(",
+                        "            ['-p', 'no:cacheprovider', '-v', sys.argv[1]],",
+                        "            plugins=[_plugin],",
+                        "        )",
+                        "    )",
+                        "    if (",
+                        "        sys.modules.get('pytest') is not _real_pytest_mod",
+                        "        or getattr(pytest, 'main', None) is not _real_pytest_main",
+                        "    ):",
+                        "        raise RuntimeError('REWARD_HACKING_DETECTED: pytest shadowed')",
+                        "    _passed_list = sorted(_plugin.passed_nodes)",
+                        "    _failed_list = sorted(_plugin.failed_nodes)",
+                        "    _msg = json.dumps(",
+                        "        {",
+                        "            'rc': _rc,",
+                        "            'passed_nodes': _passed_list,",
+                        "            'failed_nodes': _failed_list,",
+                        "        },",
+                        "        sort_keys=True,",
+                        "    ).encode('utf-8')",
+                        "    _mac = hmac.new(",
+                        "        _auth_nonce.encode('utf-8'),",
+                        "        _msg,",
+                        "        hashlib.sha256,",
+                        "    ).hexdigest()",
+                        "    _payload = json.dumps(",
+                        "        {",
+                        "            'rc': _rc,",
+                        "            'passed_nodes': _passed_list,",
+                        "            'failed_nodes': _failed_list,",
+                        "            'mac': _mac,",
+                        "        }",
+                        "    )",
+                        "    _locked[0] = False",
+                        "    with open(_out_path, 'w', encoding='utf-8') as _f:",
+                        "        _f.write(_payload)",
+                        "    sys.exit(_rc)",
+                        "_run_crit()",
+                        "",
+                    ]
+                )
+                runner_script.write_text(runner_code, encoding="utf-8")
+                exec_env = dict(sanitized_env)
+                exec_env["PYTHONDONTWRITEBYTECODE"] = "1"
+                exec_env["PYTHONSAFEPATH"] = "1"
+                exec_env["PYTHONPATH"] = os.pathsep.join([str(boot_dir), str(candidate_src)])
+                proc = subprocess.run(
+                    [py_exe, "-P", "-B", str(runner_script), test_node_id],
+                    cwd=str(workspace_root),
+                    env=exec_env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                outcome_data: dict[str, object] = {}
+                mac_valid = False
+                if outcome_path.is_file():
+                    try:
+                        parsed_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+                        if isinstance(parsed_outcome, dict):
+                            raw_mac = str(parsed_outcome.get("mac", ""))
+                            raw_rc = parsed_outcome.get("rc")
+                            raw_passed = parsed_outcome.get("passed_nodes")
+                            raw_failed = parsed_outcome.get("failed_nodes")
+                            if (
+                                isinstance(raw_rc, int)
+                                and isinstance(raw_passed, list)
+                                and isinstance(raw_failed, list)
+                            ):
+                                expected_msg = json.dumps(
+                                    {
+                                        "rc": raw_rc,
+                                        "passed_nodes": raw_passed,
+                                        "failed_nodes": raw_failed,
+                                    },
+                                    sort_keys=True,
+                                ).encode("utf-8")
+                                expected_mac = hmac.new(
+                                    auth_nonce.encode("utf-8"),
+                                    expected_msg,
+                                    hashlib.sha256,
+                                ).hexdigest()
+                                if hmac.compare_digest(raw_mac, expected_mac):
+                                    mac_valid = True
+                                    outcome_data = parsed_outcome
+                    except ValueError:
+                        outcome_data = {}
+                passed_nodes = outcome_data.get("passed_nodes")
+                failed_nodes = outcome_data.get("failed_nodes")
+                passed = (
+                    mac_valid
+                    and proc.returncode == 0
+                    and outcome_data.get("rc") == 0
+                    and isinstance(failed_nodes, list)
+                    and not failed_nodes
+                    and isinstance(passed_nodes, list)
+                    and any(
+                        isinstance(n, str)
+                        and (n == test_node_id or n.startswith(test_node_id + "::"))
+                        for n in passed_nodes
+                    )
+                )
             execution_log = (proc.stdout or "") + (proc.stderr or "")
-            passed = proc.returncode == 0 and "PASSED" in (proc.stdout or "")
             receipt, _ = record_trusted_criterion_execution(
                 manifest,
                 criterion_id=cid,
@@ -1112,6 +1303,8 @@ class TrustedAcceptanceHarnessValidator:
                 passed=passed,
                 exit_code=int(proc.returncode),
                 execution_log=execution_log,
+                phase_id=phase_id,
+                task_id=task_id,
             )
             receipts.append(receipt)
 
@@ -1389,6 +1582,11 @@ class TrustedAcceptanceHarnessValidator:
                     and review_context.checkpoint.git_commit == candidate_sha
                     and review_context.agent_result.task_id == task_id
                     and review_context.evidence.git.head == candidate_sha
+                    and review_context.evidence.phase_id == review_context.task.phase_id
+                    and review_context.checkpoint.phase_id == review_context.task.phase_id
+                    and review_context.state.current_phase in (None, review_context.task.phase_id)
+                    and review_context.evidence.attempt == review_context.task.attempt
+                    and review_context.checkpoint.attempt == review_context.task.attempt
                 )
 
             def _matched_retained_trusted_receipt(
@@ -1502,12 +1700,28 @@ class TrustedAcceptanceHarnessValidator:
                 return False
 
             def _valid_criterion_evidence(ev: str, cid: str) -> bool:
+                if review_context is not None and not _context_bound():
+                    return False
                 if cid in failed_receipt_cids:
                     return False
                 matched = _matched_retained_trusted_receipt(cid)
                 if matched is None:
                     return False
                 exec_rec, norm_test_file = matched
+                if (
+                    exec_rec.phase_id is not None
+                    and review_context is not None
+                    and exec_rec.phase_id != review_context.task.phase_id
+                ):
+                    return False
+                if exec_rec.task_id is not None and exec_rec.task_id != task_id:
+                    return False
+                if (
+                    exec_rec.task_id is not None
+                    and review_context is not None
+                    and exec_rec.task_id != review_context.task.task_id
+                ):
+                    return False
                 assert verification_receipt is not None
                 assert manifest.manifest_digest is not None
                 expected_ev = (
@@ -1834,6 +2048,8 @@ class SelfDevelopmentDogfoodingCoordinator:
                 workspace=c_root,
                 candidate_sha=stable_candidate_config.candidate_sha,
                 criterion_test_nodes=criterion_test_nodes,
+                phase_id=gate_ctx.task.phase_id if gate_ctx is not None else None,
+                task_id=task_id,
             )
 
         trusted_acceptance = self._validator.evaluate_candidate(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import subprocess
 import sys
@@ -2020,11 +2021,11 @@ def test_container_mode_hmac_origin_receipt_valid_and_tampered(tmp_path: Path) -
                     if isinstance(item, str) and item.endswith(":/workspace-out:rw"):
                         out_dir = Path(item[: -len(":/workspace-out:rw")])
                         break
-                sec_file = out_dir / ".aipc_probe_secret"
-                assert sec_file.is_file()
-                key = sec_file.read_text(encoding="utf-8").strip().encode("utf-8")
+                nonce_file = out_dir / ".aipc_probe_nonce"
+                assert nonce_file.is_file()
+                auth_nonce_b = nonce_file.read_text(encoding="utf-8").strip().encode("utf-8")
                 sig = hmac.new(
-                    key,
+                    auth_nonce_b,
                     f"/workspace/src/aipc/__init__.py|{init_sha}|0".encode(),
                     hashlib.sha256,
                 ).hexdigest()
@@ -2078,3 +2079,166 @@ def test_container_mode_hmac_origin_receipt_valid_and_tampered(tmp_path: Path) -
     assert bad_receipt.passed is False
     assert bad_receipt.import_origin_verified is False
     assert bad_receipt.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+
+def test_c02_isolated_subprocess_blocks_getframe_and_self_link_escape(tmp_path: Path) -> None:
+    bundle, _head_sha = _make_onboarded_python_project(tmp_path)
+    ws = Path(bundle.workspace_root).resolve()
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+
+    (ws / "tests" / "test_getframe_c02.py").write_text(
+        "\n".join(
+            [
+                "import sys, pytest",
+                "def test_getframe_blocked():",
+                "    with pytest.raises(PermissionError, match='WORKSPACE_WRITE_ISOLATION'):",
+                "        sys._getframe(0)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    sha_gf = _commit_all_clean(ws, "add getframe test")
+    verifier = MultiLanguageIsolatedVerifier()
+    gf_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=sha_gf,
+        isolation_mode="isolated_subprocess",
+        command_override=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            "tests/test_getframe_c02.py",
+        ),
+    )
+    assert gf_receipt.passed is True
+    assert gf_receipt.exit_code == 0
+
+    self_link = ws / "self_link"
+    outside_victim = (tmp_path / "outside_victim.txt").resolve()
+    try:
+        os.symlink(ws, self_link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    escape_target = str(ws / "self_link" / ".." / "outside_victim.txt")
+    (ws / "tests" / "test_self_link_c02.py").write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "def test_self_link_escape_blocked():",
+                "    with pytest.raises(PermissionError):",
+                f"        open({escape_target!r}, 'w', encoding='utf-8').write('escape')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    sha_sl = _commit_all_clean(ws, "add self_link escape test")
+    sl_receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=sha_sl,
+        isolation_mode="isolated_subprocess",
+        command_override=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            "tests/test_self_link_c02.py",
+        ),
+    )
+    assert sl_receipt.passed is True
+    assert not outside_victim.exists()
+
+
+def test_c02_rejects_candidate_pytest_shadow_and_hardens_container_probe(tmp_path: Path) -> None:
+    cand_ws = tmp_path / "cand-r5"
+    cand_ws.mkdir(parents=True, exist_ok=True)
+    _git(cand_ws, "init")
+    (cand_ws / "pyproject.toml").write_text("[project]\nname='cand-r5'\n", encoding="utf-8")
+    (cand_ws / "src" / "aipc").mkdir(parents=True, exist_ok=True)
+    (cand_ws / "src" / "aipc" / "__init__.py").write_text(
+        "__version__ = 'candidate'\n", encoding="utf-8"
+    )
+    (cand_ws / "pytest.py").write_text("def main(*a, **kw):\n    return 0\n", encoding="utf-8")
+    (cand_ws / "tests").mkdir(exist_ok=True)
+    (cand_ws / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    head_sha = _commit_all_clean(cand_ws, "add candidate with pytest shadow")
+    bundle = onboard_universal_project(
+        workspace=cand_ws,
+        project_id="cand-r5",
+        project_name="Candidate R5",
+        phases=_make_phases(),
+    )
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
+    verifier = MultiLanguageIsolatedVerifier()
+
+    rejected = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+    assert rejected.passed is False
+    assert rejected.failure_reason == "IMPORT_ORIGIN_MISMATCH"
+
+    (cand_ws / "pytest.py").unlink()
+    clean_sha = _commit_all_clean(cand_ws, "remove pytest shadow")
+    init_sha = hashlib.sha256((cand_ws / "src" / "aipc" / "__init__.py").read_bytes()).hexdigest()
+    captured_probes: list[str] = []
+
+    def inspect_runner(argv, **kwargs):
+        cmd_str = " ".join(str(tok) for tok in argv)
+        m = re.search(r"AIPC_ORIGIN_[0-9a-f]+:", cmd_str)
+        m_done = re.search(r"AIPC_ORIGIN_DONE_[0-9a-f]+:0", cmd_str)
+        if m:
+            captured_probes.append(str(argv[-1]))
+            done_line = f"{m_done.group(0)}\n" if m_done else ""
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=(
+                    f'{m.group(0)}{{"file": "/workspace/src/aipc/__init__.py", '
+                    f'"sha256": "{init_sha}", "path": ["/workspace/src"]}}\n{done_line}'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="1 passed in 0.1s\n", stderr=""
+        )
+
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=clean_sha,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+        runner=inspect_runner,
+    )
+    assert receipt.passed is True
+    assert len(captured_probes) == 1
+    probe = captured_probes[0]
+    assert "def _c02_probe():" in probe
+    assert "globals().pop('_c02_probe', None)" in probe
+    assert "os.unlink(_sp)" in probe
+    assert "subprocess.run(" in probe
+    assert "if ev == 'os.chdir':" in probe
+    assert "_c_lstat(" in probe
+    assert "os.path.realpath" not in probe
