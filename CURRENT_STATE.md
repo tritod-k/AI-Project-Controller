@@ -1,6 +1,17 @@
 # Current Project State
 
-## Scheduled MC-AUDIT recovery — 2026-11-17 (authoritative current handoff)
+## MC-AUDIT-C03-SELF-HOST Closure Handoff — 2026-11-17 (authoritative current handoff)
+
+This section supersedes earlier readiness claims and historical timestamps below. Human Commander `K.TRITOD` authorized this single bounded Milestone C self-host handoff on the Local Candidate (`H:/000ProjectCode/AI_Project_Controller`, branch `gemini/aipc-2.0-milestone-c`). Source repair commit `d840b5949fe16485237f09822f12037d6f0a1ff7` (`d840b594`) is unchanged; genuine Hydrogen focused-criterion worker session `802f6f35-a6f8-4f2e-a070-71a95855708e` (`gemini-4-hydrogen-medium`, `antigravity_subscription`) added `tests/trusted/test_c03_aipc_self_host.py` in code checkpoint `ab961b678dfd2f37b817383330c8886ea65a6b22` (recorded in `H:/AIPC_Workspace/runtime_c/audit/selfhost_code_sha.txt`). Status: **AWAITING_REVIEW**; Phase Gate: **PENDING**. Exact FINAL HEAD GitHub Actions Python 3.12/3.13 CI and one subsequent fresh isolated read-only final review are **PENDING at this documentation commit**.
+
+- **MC-AUDIT-C03-SELF-HOST Closure**: `src/aipc/review/trusted_acceptance_harness.py` now permits committed `conftest.py` layouts (including AIPC's `tests/conftest.py` and `tests/approvals/conftest.py`) while unconditionally passing `--noconftest`, `-o filterwarnings=default`, and `-p no:cacheprovider`, and denying Candidate `conftest.py` execution, registration, or injected plugins/modules (`REWARD_HACKING_DETECTED`). `conftest.py` / `**/conftest.py` remain in `PROTECTED_HARNESS_GLOBS` (`TRUSTED_HARNESS_TAMPER_DETECTED`), and existing startup/`sitecustomize`/`usercustomize`/`pytest`/`.pth` shadowing bans remain intact. Six new regressions plus the prior boundary case passed in `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py` with zero MC-AUDIT-01..07 regression.
+- **Focused Real AIPC Self-Host Execution Proof (`ab961b678dfd2f37b817383330c8886ea65a6b22`)**: Executed the focused operator-owned leaf `tests/trusted/test_c03_aipc_self_host.py::test_real_aipc_conftest_is_inactive` through the real C03 trusted acceptance harness against actual AIPC snapshots on both Windows (`audit/selfhost_real_focused_windows_receipt.json`, `jobs/selfhost_real_focused_windows.log/.exit` = `0`) and restricted Linux (`audit/selfhost_real_focused_linux_receipt.json`, `audit/selfhost_real_criterion_receipt.json`, `jobs/selfhost_real_focused_linux.log/.exit` = `0`). Both receipts verify `passed: true`, `exit_code: 0`, `actual_aipc_snapshot_execution: true`, `candidate_conftest_inactive: true`, and signed MAC / log digest / observed Git tree / operator test digest checks (`controller_mac_verified`, `log_digest_verified`, `observed_git_tree_verified`, `operator_test_digest_verified` all `true`).
+- **Scope & Broad-Module Limitations**: Prior broad C03 unit module execution attempts in the trusted criterion runner failed on Windows (`Pydantic`/`zoneinfo`/`sysconfig`/`_winapi` prohibited; retained in `audit/selfhost_real_verified_d840b5949fe1`) and restricted Linux (collection fails with frame-introspection protection; retained in `audit/selfhost_real_linux_d840b5949fe1`); those retained failures are NOT PASS and no security guards were weakened. The focused leaf establishes genuine cross-platform AIPC self-host criterion isolation, but is NOT a full autonomous C02 self-development cycle (`autonomous_worker_cycle_completed: false`).
+- **Baseline Regression & Static Verification**: All selected required Windows (`254 passed, 1 skipped`, exit `0`, `audit/selfhost_windows_final.log/.exit`) and full restricted Linux (`1322 passed, 4 skipped`, exit `0`, `audit/selfhost_linux_final.log/.exit`) regression input hashes are unchanged from `d840b594` and are reused per AGENTS evidence policy rather than rerun on the leaf-only commit. `audit/selfhost_static_final.log/.exit` (`0`) verified 319 formatted files and 4 canonical / 2 project schemas; Ruff check/format after adding `tests/trusted/test_c03_aipc_self_host.py` passed 320 files.
+- **Quota & Provenance Correction**: Only `argon` hit its quota limit; `gemini-4-hydrogen-medium` (`agy.exe`) is LIVE (~57% quota remaining per Commander). Earlier Codex direct repair (`d840b594`) was authorized before this clarification; further edits were delegated to Hydrogen to conserve Codex. The genuine Hydrogen focused-criterion worker (`802f6f35-a6f8-4f2e-a070-71a95855708e`) completed via Candidate adapter with only `tests/trusted/test_c03_aipc_self_host.py` added (`jobs/selfhost_hydrogen_evidence/task-c03-selfhost-focused-criterion-01/worker_receipt.json`). This current Hydrogen documentation worker was dispatched genuinely, and its final receipt status is not asserted before parent verification. Historical failed bridge receipt (`edb766b1` recovery) remains `FAILED`; no action replay and no fabricated runtime receipt.
+- **Next Gate & Isolation**: Parent will commit docs, push `gemini/aipc-2.0-milestone-c`, require both Python 3.12 and 3.13 GitHub Actions CI green on exact FINAL HEAD, freeze that exact HEAD, run ONE fresh read-only final review, and only on `PASS` with zero blockers promote PR #7 (without merge), write the sentinel, and pause automation. Stable (`H:/AIPC_Workspace/stable_c`) remains clean and pinned at `849c86684867487f6f0ad8eb54c603cba240dd34`. Original queue/history preserved. No C.5 or D authorized.
+
+## Scheduled MC-AUDIT recovery — 2026-11-17 (superseded)
 
 This section supersedes earlier readiness claims. K.TRITOD authorized the local subscription-only recovery of MC-AUDIT-01 through MC-AUDIT-07. Code checkpoint: `edb766b165b9caaa45d1b779ecefae534dfca65d`. Status: **AWAITING_REVIEW**; Phase Gate: **PENDING**. Replacement GitHub Actions Python 3.12/3.13 CI and the subsequent fresh read-only exact-SHA review are **PENDING at this documentation commit**. Their final receipts belong in PR #7 and the external audit directory; do not mutate the frozen SHA to revise this timestamp.
 
@@ -35,25 +46,25 @@ AIPC 2.0 — Milestone C (C01–C03: Universal Project Support, End-to-End Autom
 
 ## Status
 
-AWAITING_REVIEW (MC-AUDIT-01..07 local closure verified; replacement Python 3.12/3.13 CI and fresh exact-SHA final review PENDING).
+AWAITING_REVIEW (MC-AUDIT-01..07 and MC-AUDIT-C03-SELF-HOST local closure + focused both-platform real AIPC criterion proof verified; exact FINAL HEAD Python 3.12/3.13 GitHub Actions CI and subsequent fresh read-only final review PENDING).
 
 ## Current Attempt
 
-Milestone C Attempt 01; Commander-authorized scheduled quota recovery of MC-AUDIT-01..07, resuming the eight preserved edits without restarting C01-C03.
+Milestone C Attempt 01; Commander-authorized bounded MC-AUDIT-C03-SELF-HOST closure (`d840b594` source repair + `ab961b678dfd2f37b817383330c8886ea65a6b22` Hydrogen-authored focused trusted criterion leaf `tests/trusted/test_c03_aipc_self_host.py`).
 
 ## Phase Gate
 
-PENDING. Worker does not self-approve. Local gates pass; external CI and subsequent independent release review remain prerequisites.
+PENDING. Worker does not self-approve. Local gates and focused real criterion proofs pass; exact FINAL HEAD Python 3.12/3.13 CI and subsequent fresh isolated read-only final review remain prerequisites.
 
 ## Last Stable Checkpoint
-- `master` baseline: `849c866` (Milestone B merge PR #6, following Milestone A merge PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`, Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
+- `master` baseline: `849c866` (`849c86684867487f6f0ad8eb54c603cba240dd34`, Milestone B merge PR #6, following Milestone A merge PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`, Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
 
 ## Current Branch / Worktree
 `gemini/aipc-2.0-milestone-c`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
 
-Code checkpoint `edb766b165b9caaa45d1b779ecefae534dfca65d` — AIPC Milestone C attempt 01 - close MC-AUDIT-01 through 07. This documentation is the companion checkpoint; resolve its final HEAD with git log -1. The frozen final SHA and remote receipts will be recorded externally after push.
+Code checkpoint `ab961b678dfd2f37b817383330c8886ea65a6b22` (building on unchanged source repair `d840b5949fe16485237f09822f12037d6f0a1ff7`). This documentation is the companion checkpoint; parent will commit docs, push, require green Python 3.12/3.13 CI, and freeze exact FINAL HEAD externally.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -178,31 +189,31 @@ None beyond Milestone C (`C01`–`C03`) — Milestone D (`D01`–`D03`) remains 
 
 ## Current Work
 
-MC-AUDIT-01..07 code/test closure and the installed-wheel snapshot-import regression are verified. Synchronize this handoff, push, confirm both Actions versions on exact HEAD, freeze, then obtain one fresh isolated read-only final review before PR #7 promotion.
+MC-AUDIT-01..07 and MC-AUDIT-C03-SELF-HOST code/test closure plus focused both-platform real AIPC trusted criterion execution (`ab961b678dfd2f37b817383330c8886ea65a6b22`) are verified. Synchronize this handoff and external review/PR control artifacts; parent will commit docs, push, require green Python 3.12/3.13 Actions CI on exact FINAL HEAD, freeze that exact HEAD, run ONE fresh isolated read-only final review, and only on `PASS` with zero blockers promote PR #7 without merge.
 
 ## Tests
 
-Fresh Windows: 248 passed, 1 expected POSIX skip, exit 0 (781.51s). Full Linux Python 3.13.18 non-live CI: 1316 passed, 4 expected skips, exit 0 (769.53s). Ruff lint/format, 4 canonical + 2 project schemas, offline wheel backend build, source hash verification, diff hygiene and key-pattern scan pass. GitHub Actions Python 3.12/3.13 replacement CI is PENDING at this commit. See the authoritative recovery section and external logs for commands/provenance.
+Selected required Windows suites: **254 passed, 1 expected POSIX skip**, exit `0` (`audit/selfhost_windows_final.log/.exit`). Full restricted Linux Python 3.13.18 non-live CI selection: **1322 passed, 4 expected skips**, exit `0` (`audit/selfhost_linux_final.log/.exit`). Input hashes for both suites are unchanged from `d840b594` and reused per AGENTS evidence policy on leaf-only commit `ab961b678dfd2f37b817383330c8886ea65a6b22`. Static checks: `audit/selfhost_static_final.log/.exit` (`0`, 319 files, 4 canonical / 2 project schemas); Ruff check/format after adding `tests/trusted/test_c03_aipc_self_host.py` passed 320 files. Focused real AIPC trusted criterion (`tests/trusted/test_c03_aipc_self_host.py::test_real_aipc_conftest_is_inactive`) passed on both Windows (`audit/selfhost_real_focused_windows_receipt.json`, `jobs/selfhost_real_focused_windows.log/.exit` = `0`) and restricted Linux (`audit/selfhost_real_focused_linux_receipt.json`, `audit/selfhost_real_criterion_receipt.json`, `jobs/selfhost_real_focused_linux.log/.exit` = `0`) with verified MAC/log/tree/test digests. Exact FINAL HEAD GitHub Actions Python 3.12/3.13 CI is PENDING at this documentation commit.
 
 ## Required Fixes / Remaining Work
 
-Push the companion checkpoint; require green Python 3.12/3.13 CI on its exact SHA; freeze without further commits; run a fresh subscription-only read-only final release review. Promote PR #7 only with zero confirmed release blockers; then write the completion marker and pause the scheduled automation. Human Commander retains merge authority.
+Parent commits docs, pushes `gemini/aipc-2.0-milestone-c`, requires green Python 3.12/3.13 Actions CI on exact FINAL HEAD, freezes exact HEAD without further commits, runs ONE fresh isolated read-only final review (Antigravity Hydrogen `plan`/sandbox read-only, `reduced_independence=true`, `fallback_reason=same_provider_documentation_worker`), and only on `PASS` with zero blockers promotes PR #7 without merge, writes sentinel, and pauses automation. Human Commander (`K.TRITOD`) retains exclusive merge authority.
 
 ## Warnings / Known Issues
 
-No new local test failure remains. CI and final independent review are not yet verified for this checkpoint. The failed worker bridge receipt is retained truthfully; local patch verification does not establish a successful live self-development cycle. Optional build frontend absent; the installed backend produced the wheel without new dependencies. Release remains EXPERIMENTAL / SUPERVISED; unattended production is NO-GO.
+Prior broad C03 unit module execution attempts in the trusted criterion runner failed on Windows (`Pydantic`/`zoneinfo`/`sysconfig`/`_winapi` prohibited; retained in `audit/selfhost_real_verified_d840b5949fe1`) and restricted Linux (collection fails with frame-introspection protection; retained in `audit/selfhost_real_linux_d840b5949fe1`); retained failures are NOT PASS and no guards were weakened. The focused leaf proves real cross-platform AIPC self-host criterion isolation, not a full autonomous C02 cycle (`autonomous_worker_cycle_completed: false`). Historical failed bridge receipt (`edb766b1` recovery) remains `FAILED`. Quota correction: only `argon` hit its limit; `gemini-4-hydrogen-medium` (`agy.exe`) is LIVE (~57% remaining per Commander). Release remains `EXPERIMENTAL / SUPERVISED`; unattended production is `NO-GO`.
 
 ## Recovery Notes
 
-Original eight edits and their staging were preserved/restored by hash after scratch-induced worker guard rollback; the genuine worker patch was reapplied without provider replay. Runtime scratch and all audit evidence remain outside Candidate. Original C01-C03 queue entries remain terminal and unreplayed. The old recovery-session record is historical; current progress is runtime_c/state/codex_mc_audit_progress.json. Stable is untouched.
+Source repair `d840b5949fe16485237f09822f12037d6f0a1ff7` is unchanged; genuine Hydrogen focused-criterion worker session `802f6f35-a6f8-4f2e-a070-71a95855708e` added `tests/trusted/test_c03_aipc_self_host.py` in `ab961b678dfd2f37b817383330c8886ea65a6b22` (`jobs/selfhost_hydrogen_evidence/task-c03-selfhost-focused-criterion-01/worker_receipt.json`). Current Hydrogen documentation worker was dispatched genuinely, and its final receipt status is not asserted before parent verification. All scratch/external artifacts remain under `H:/AIPC_Workspace/runtime_c/`. Original queue/history preserved without replay. Stable (`H:/AIPC_Workspace/stable_c`) untouched at `849c86684867487f6f0ad8eb54c603cba240dd34`.
 
 ## Next Action
 
-Push and verify replacement CI, freeze exact SHA, obtain fresh isolated final review, then conditionally promote PR #7 and stop for Human Commander merge approval. Do not start C.5 or D.
+Parent commits docs, pushes, verifies green Python 3.12/3.13 Actions CI on exact FINAL HEAD, freezes exact HEAD, runs ONE fresh isolated read-only final review, and conditionally promotes PR #7 without merge before stopping for Human Commander merge approval. Do not start C.5 or D.
 
 ## Timestamp
 
-2026-11-16T20:09:40.5824752Z
+2026-11-17T05:50:00+07:00
 
 ## Latest Post-03ab850 CI Closure Handoff (supersedes earlier recovery notes)
 
