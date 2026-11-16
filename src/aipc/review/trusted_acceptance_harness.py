@@ -1470,12 +1470,11 @@ def _function_has_real_assertion(fn_node: ast.FunctionDef | ast.AsyncFunctionDef
 
 
 def _scan_candidate_runner_shadowing(ws: Path) -> None:
-    """Reject candidate shadowing of pytest, conftest, startup hooks, or stdlib bootstrap."""
+    """Reject interpreter/runner shadowing; conftest inactivity is enforced by the runner."""
     shadow_files = (
         "pytest.py",
         "sitecustomize.py",
         "usercustomize.py",
-        "conftest.py",
         "socket.py",
         "subprocess.py",
         "tempfile.py",
@@ -1509,15 +1508,6 @@ def _scan_candidate_runner_shadowing(ws: Path) -> None:
                 f"{REWARD_HACKING_DETECTED}: candidate workspace contains prohibited "
                 f".pth file '{pth_file}'"
             )
-    for conftest_root in (ws / "tests", ws / "src"):
-        if not conftest_root.exists() or not conftest_root.is_dir():
-            continue
-        for conftest_file in sorted(conftest_root.rglob("conftest.py")):
-            if conftest_file.exists() or conftest_file.is_symlink():
-                raise ValueError(
-                    f"{REWARD_HACKING_DETECTED}: candidate workspace contains prohibited "
-                    f"conftest.py '{conftest_file}'"
-                )
 
 
 class TrustedAcceptanceHarnessValidator:
@@ -1805,9 +1795,23 @@ class TrustedAcceptanceHarnessValidator:
                             "    import _json, builtins, hashlib, inspect",
                             "    import pathlib, traceback, types",
                             "    import pytest, _pytest.config, _pytest.python, _pytest.runner",
+                            "    _ModuleType = types.ModuleType",
+                            "    _conftest_basename = os.path.basename",
+                            "    _conftest_realpath = os.path.realpath",
+                            "    _conftest_normcase = os.path.normcase",
+                            "    _conftest_prefix = _ws_norm + os.sep",
+                            "    def _is_candidate_conftest(path):",
+                            "        if not _b_isinstance(path, _b_str):",
+                            "            return False",
+                            "        _norm = _conftest_normcase(_conftest_realpath(path))",
+                            "        return (_conftest_basename(path).lower() == 'conftest.py'",
+                            "                and (_norm == _ws_norm or "
+                            "_norm.startswith(_conftest_prefix)))",
                             "    globals().pop('_run_crit', None)",
                             "    _b_PermissionError = builtins.PermissionError",
                             "    _b_bool = builtins.bool",
+                            "    _b_any = builtins.any",
+                            "    _b_tuple = builtins.tuple",
                             "    _b_bytes = builtins.bytes",
                             "    _b_frozenset = builtins.frozenset",
                             "    _b_getattr = builtins.getattr",
@@ -2039,16 +2043,30 @@ class TrustedAcceptanceHarnessValidator:
                             "    _pytest.python.Function.runtest = _sealed_runtest",
                             "    _orig_runtestprotocol = _pytest.runner.runtestprotocol",
                             "    def _guarded_runtestprotocol(item, log=True, nextitem=None):",
+                            "        _c_audit('aipc.conftest_check', item.config.pluginmanager)",
                             "        _c_audit('aipc.proto_in', item.nodeid)",
                             "        reports = _orig_runtestprotocol(",
                             "            item, log=log, nextitem=nextitem",
                             "        )",
+                            "        _c_audit('aipc.conftest_check', item.config.pluginmanager)",
                             "        _c_audit('aipc.proto_out', item.nodeid, reports)",
                             "        return reports",
                             "    _sealed_runtestprotocol = _seal_method(_guarded_runtestprotocol)",
                             "    _pytest.runner.runtestprotocol = _sealed_runtestprotocol",
                             "    class _NodePlugin:",
                             "        __slots__ = ()",
+                            "        @pytest.hookimpl(tryfirst=True)",
+                            "        def pytest_sessionstart(self, session):",
+                            "            _c_audit('aipc.conftest_check', "
+                            "session.config.pluginmanager)",
+                            "        @pytest.hookimpl(tryfirst=True)",
+                            "        def pytest_collection_finish(self, session):",
+                            "            _c_audit('aipc.conftest_check', "
+                            "session.config.pluginmanager)",
+                            "        @pytest.hookimpl(trylast=True)",
+                            "        def pytest_sessionfinish(self, session, exitstatus):",
+                            "            _c_audit('aipc.conftest_check', "
+                            "session.config.pluginmanager)",
                             "    _plugin = _NodePlugin()",
                             "    _pm_cls = _pytest.config.PytestPluginManager",
                             "    _orig_get_plugins = _pm_cls.get_plugins",
@@ -2076,7 +2094,6 @@ class TrustedAcceptanceHarnessValidator:
                             "    def _guarded_register(pm_self, plugin, name=None):",
                             "        if plugin is _plugin:",
                             "            return _orig_register(pm_self, plugin, name=name)",
-                            "        _c_audit('aipc.pm_register')",
                             "        mod_name = getattr(plugin, '__module__', None)",
                             "        mod_obj = sys.modules.get(mod_name) if mod_name else None",
                             "        plugin_file = getattr(plugin, '__file__', None) or (",
@@ -2084,6 +2101,12 @@ class TrustedAcceptanceHarnessValidator:
                             "            if mod_obj is not None",
                             "            else None",
                             "        )",
+                            "        if _is_candidate_conftest(plugin_file):",
+                            "            raise _b_PermissionError(",
+                            "                'REWARD_HACKING_DETECTED: candidate conftest "
+                            "plugin prohibited'",
+                            "            )",
+                            "        _c_audit('aipc.pm_register')",
                             "        if (",
                             "            _is_under_ws(plugin_file)",
                             "            and not hasattr(plugin, 'fspath')",
@@ -2189,6 +2212,10 @@ class TrustedAcceptanceHarnessValidator:
                             "                _scan_val(_mv, 0)",
                             "        for _rco in (",
                             "            _run_crit_code,",
+                            "            _is_candidate_conftest.__code__,",
+                            "            _NodePlugin.pytest_sessionstart.__code__,",
+                            "            _NodePlugin.pytest_collection_finish.__code__,",
+                            "            _NodePlugin.pytest_sessionfinish.__code__,",
                             "            _guarded_runtest.__code__,",
                             "            _invoke_body.__code__,",
                             "            _guarded_runtestprotocol.__code__,",
@@ -2309,11 +2336,38 @@ class TrustedAcceptanceHarnessValidator:
                             "                )",
                             "                in _v_pinned_sigs",
                             "            )",
+                            "        _conftest_seen = [False]",
                             "        def _vault_step(ev, args):",
+                            "            if ev == 'aipc.conftest_check':",
+                            "                _pm = args[0]",
+                            "                if _b_type(_pm) is not _pm_cls:",
+                            "                    _conftest_seen[0] = True",
+                            "                    return ('perm', 'REWARD_HACKING_DETECTED: "
+                            "invalid plugin manager')",
+                            "                _loaded = _orig_get_plugins(_pm) | "
+                            "_pm._conftest_plugins",
+                            "                _loaded |= {",
+                            "                    _m for _m in _b_tuple(sys.modules.values())",
+                            "                    if _b_type(_m) is _ModuleType",
+                            "                    and "
+                            "_is_candidate_conftest(_m.__dict__.get('__file__'))",
+                            "                }",
+                            "                if _b_any(",
+                            "                    _is_candidate_conftest(_b_getattr(_m, "
+                            "'__file__', None))",
+                            "                    for _m in _loaded",
+                            "                ):",
+                            "                    _conftest_seen[0] = True",
+                            "                    return ('perm', 'REWARD_HACKING_DETECTED: "
+                            "candidate conftest loaded')",
+                            "                return None",
                             "            if ev in ('exec', 'function.__new__', 'code.__new__'):",
                             "                if args and _b_type(args[0]) is _CodeType:",
                             "                    _co0 = args[0]",
                             "                    _fn0 = _co0.co_filename",
+                            "                    if ev == 'exec' and _is_candidate_conftest(_fn0):",
+                            "                        return ('perm', 'REWARD_HACKING_DETECTED: "
+                            "conftest execution prohibited')",
                             "                    _mark_it = (",
                             "                        _fn0 in ('<string>', '<stdin>', '')",
                             "                        or _is_under_ws(_fn0)",
@@ -2712,6 +2766,7 @@ class TrustedAcceptanceHarnessValidator:
                             "                _rc_in, _guards_ok = args",
                             "                _all_ok = (",
                             "                    _b_bool(_guards_ok)",
+                            "                    and not _conftest_seen[0]",
                             "                    and (_smap_ref == _exp_smap)",
                             "                    and (",
                             "                        _fn_cls_ref.__dict__.get('__init__')",
@@ -2843,7 +2898,8 @@ class TrustedAcceptanceHarnessValidator:
                             "    if os.path.isdir(_ws_src):",
                             "        sys.path.insert(0, _ws_src)",
                             "    _args = [",
-                            "        '--noconftest', '-p', 'no:cacheprovider', '-v',",
+                            "        '--noconftest', '-o', 'filterwarnings=default',",
+                            "        '-p', 'no:cacheprovider', '-v',",
                             "        sys.argv[1],",
                             "    ]",
                             "    _rc = int(_real_pytest_main(_args, plugins=[_plugin]))",

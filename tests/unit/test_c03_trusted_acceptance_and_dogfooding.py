@@ -190,6 +190,142 @@ def _run_audit_criterion(
     )
 
 
+def _setup_self_host_layout(
+    tmp_path: Path, test_source: str
+) -> tuple[Path, TrustedHarnessManifest, str]:
+    _, candidate, _ = _setup_candidate_workspace(tmp_path)
+    hooks = (
+        "import pytest\n"
+        "def pytest_collection_modifyitems(items):\n    items.clear()\n"
+        "def pytest_runtest_makereport(item, call):\n    raise RuntimeError('hook loaded')\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def candidate_fixture():\n    raise RuntimeError('fixture loaded')\n"
+        "raise RuntimeError('conftest loaded')\n"
+    )
+    paths = ("tests/conftest.py", "tests/approvals/conftest.py")
+    for path in paths:
+        target = candidate / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(hooks, encoding="utf-8")
+    (candidate / _AUDIT_TEST_PATH).write_text(test_source, encoding="utf-8")
+    sha = _init_git_repo(candidate)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate,
+        protected_rel_paths=(_AUDIT_TEST_PATH, *paths),
+        required_criterion_ids=("AC-01",),
+        criterion_test_nodes={"AC-01": (_AUDIT_TEST_NODE,)},
+    )
+    return candidate, manifest, sha
+
+
+@pytest.mark.parametrize("test_passes", [True, False])
+def test_self_host_conftest_layout_is_inactive_and_criterion_remains_authoritative(
+    tmp_path: Path, test_passes: bool
+) -> None:
+    candidate, manifest, sha = _setup_self_host_layout(
+        tmp_path,
+        "def test_trusted_contract():\n    result = int('2') + 2\n"
+        f"    assert result == {4 if test_passes else 5}\n",
+    )
+    validator = TrustedAcceptanceHarnessValidator()
+    task_id = "task-c03-self-host"
+    receipts = validator.execute_and_record_criteria(
+        manifest=manifest, workspace=candidate, candidate_sha=sha, task_id=task_id
+    )
+    assert receipts[0].passed is test_passes
+    changed = (FileChange(path="tests/unit/test_feature.py", change_type=ChangeType.MODIFIED),)
+    summary = TestSummary(total=1, passed=1, failed=0, skipped=0)
+    context, _ = _make_valid_review_context_and_gate_decision(
+        tmp_path, task_id, sha, candidate, changed, summary, [_AUDIT_TEST_NODE]
+    )
+    evaluation = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate,
+        task_id=task_id,
+        candidate_sha=sha,
+        changed_files=changed,
+        tests_summary=summary,
+        criterion_results=(
+            CriterionResult(
+                criterion_id="AC-01",
+                status=CriterionStatus.PASS,
+                evidence=[_AUDIT_TEST_NODE],
+                notes="Claim cannot override signed execution",
+            ),
+        ),
+        verification_receipt=_make_valid_verification_receipt(candidate, sha),
+        review_context=context,
+        criterion_execution_receipts=receipts,
+        require_source_bound_receipts=True,
+    )
+    assert evaluation.passed is test_passes
+    assert "conftest.py" in manifest.protected_harness_globs
+    assert "**/conftest.py" in manifest.protected_harness_globs
+    (candidate / "tests/conftest.py").write_text("raise RuntimeError('edited hook')\n")
+    tampered = validator.evaluate_candidate(
+        manifest=manifest,
+        workspace=candidate,
+        task_id=task_id,
+        candidate_sha=sha,
+        changed_files=(FileChange(path="tests/conftest.py", change_type=ChangeType.MODIFIED),),
+        tests_summary=summary,
+    )
+    assert tampered.rejection_code == TRUSTED_HARNESS_TAMPER_DETECTED
+
+
+@pytest.mark.parametrize("attempt", ["execute", "register"])
+def test_self_host_candidate_conftest_execution_and_registration_are_denied(
+    tmp_path: Path, attempt: str
+) -> None:
+    action = (
+        "    import importlib.util\n"
+        "    spec = importlib.util.spec_from_file_location('candidate_hooks', target)\n"
+        "    mod = importlib.util.module_from_spec(spec)\n"
+        "    invoke = lambda: spec.loader.exec_module(mod)\n"
+        if attempt == "execute"
+        else "    import types\n"
+        "    mod = types.ModuleType('candidate_hooks')\n"
+        "    mod.__file__ = str(target)\n"
+        "    mod.fspath = str(target)\n"
+        "    invoke = lambda: pytestconfig.pluginmanager.register(mod)\n"
+    )
+    candidate, manifest, sha = _setup_self_host_layout(
+        tmp_path,
+        "def test_trusted_contract(pytestconfig):\n"
+        "    from pathlib import Path\n"
+        "    target = Path('tests/conftest.py').resolve()\n" + action + "    blocked = False\n"
+        "    try:\n        invoke()\n"
+        "    except PermissionError as exc:\n"
+        "        blocked = 'REWARD_HACKING_DETECTED' in str(exc)\n"
+        "    assert blocked\n",
+    )
+    (receipt,) = _run_audit_criterion(candidate, manifest, sha)
+    assert receipt.passed is True
+
+
+@pytest.mark.parametrize("location", ["plugins", "modules"])
+def test_self_host_loaded_conftest_state_blocks_signed_pass(tmp_path: Path, location: str) -> None:
+    placement = (
+        "    pytestconfig.pluginmanager._conftest_plugins.add(mod)\n"
+        if location == "plugins"
+        else "    sys.modules['candidate_hooks'] = mod\n"
+    )
+    candidate, manifest, sha = _setup_self_host_layout(
+        tmp_path,
+        "def test_trusted_contract(pytestconfig):\n"
+        "    import sys, types\n"
+        "    from pathlib import Path\n"
+        "    mod = types.ModuleType('candidate_hooks')\n"
+        "    mod.__file__ = str(Path('tests/conftest.py').resolve())\n"
+        + placement
+        + "    assert Path(mod.__file__).is_file()\n",
+    )
+    (receipt,) = _run_audit_criterion(candidate, manifest, sha)
+    assert receipt.passed is False
+
+
 @pytest.mark.parametrize("bad_state", ["wrong_head", "dirty_source"])
 def test_mc_audit_rejects_unverified_candidate_before_execution(
     tmp_path: Path, bad_state: str
@@ -3298,7 +3434,8 @@ def test_execute_and_record_criteria_rejects_conftest_plugin_exitstatus_and_stdl
         "def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match=REWARD_HACKING_DETECTED):
+    # Untracked hook additions still fail the clean, expected Git revision check.
+    with pytest.raises(ValueError, match="CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH"):
         validator.execute_and_record_criteria(
             manifest=manifest,
             workspace=candidate_root,
