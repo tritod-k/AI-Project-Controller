@@ -10,13 +10,13 @@ AI Project Controller
 AIPC 2.0 — Milestone C (C01–C03: Universal Project Support, End-to-End Automation & Self-Development Dogfooding)
 
 ## Status
-BLOCKED (final CI recovery: both authorized repair iterations consumed; local tests and Ruff remain failing)
+AWAITING_REVIEW (post-03ab850 CI closure Iteration 1/2 complete at `12d2d9f`; 212/212 Windows + 8/8 Linux Docker `aipc-final-ci:py313-diag` tests & Ruff/schemas PASS; GitHub Actions CI PENDING)
 
 ## Current Attempt
-Milestone C Attempt 01 (`gemini/aipc-2.0-milestone-c`); final CI stabilization iterations 1 and 2 consumed (2/2, no third repair authorized).
+Milestone C Attempt 01 (`gemini/aipc-2.0-milestone-c`); post-`03ab850` continuation CI closure Iteration 1 of 2 (`12d2d9f438349927fe6906e2f9f231c8a68b0996`).
 
 ## Phase Gate
-PENDING (local validation failing; replacement CI PENDING; no frozen SHA or final independent review)
+PENDING (local Windows & Linux Docker gates PASS; GitHub Actions Python 3.12 & 3.13 CI PENDING; final independent Codex review pending green CI)
 
 ## Last Stable Checkpoint
 - `master` baseline: `849c866` (Milestone B merge PR #6, following Milestone A merge PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`, Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
@@ -25,7 +25,7 @@ PENDING (local validation failing; replacement CI PENDING; no frozen SHA or fina
 `gemini/aipc-2.0-milestone-c`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-Latest preceding checkpoint: `632f06f36c60c98278c45922836cafa1aea7c779` (Candidate SemVer/capability bootstrap). This documentation accompanies the bounded partial-repair handoff; resolve its exact SHA using `git log -1`. Earlier implementation history follows.
+`12d2d9f438349927fe6906e2f9f231c8a68b0996` (`12d2d9f` — post-`03ab850` CI closure Iteration 1/2 across `subscription_worker.py`, `milestone_c_pipeline.py`, `self_dev_runner.py`, and their B01/C02/self-runner test suites, following `03ab850` and `632f06f36c60c98278c45922836cafa1aea7c779` Candidate SemVer/capability bootstrap). This documentation accompanies `12d2d9f`; resolve the documentation commit SHA using `git log -1`. Earlier implementation history follows.
 
 `8dec3c1` (`8dec3c1` — Milestone C `C01`–`C03` nineteenth-pass `MC-IR-01`–`MC-IR-04` checkpoint across `milestone_c_pipeline.py`, `self_dev_runner.py`, and `trusted_acceptance_harness.py`, following `17742d4` eighteenth-pass hardening: closing audit-hook registration before candidate execution and removing forgeable caller-filename exceptions (`MC-IR-01`), enforcing retained code-object identity and `FrameType` descriptor sealing (`f_back`/`f_locals`/`f_code`/`f_globals`/`f_builtins`/`clear`) for criterion runner frames (`MC-IR-02`), binding pre-dispatch candidate Git baseline SHA (`git rev-parse --verify HEAD`) and fail-closed NUL-delimited `git status`/`git diff` scope verification (`MC-IR-03`), and enforcing `build_sanitized_child_env` across all C02 Git subprocess calls (`MC-IR-04`); following `3b6c890` seventeenth-pass `MC-RR2-01`–`MC-RR2-05`, `6857b52` sixteenth-pass `MC-RR-01`–`MC-RR-07`, `206cd48` / `8f99035` fifteenth-pass C15-SEC-01, C15-SEC-02, C15-ARCH-03, C15-SEC-04, C15-ARCH-05, and C15-ARCH-06 hardening, `5dc62f7`, `ccdf012`, `e7de506`, `965057a`, `e9fde2e`, `cd5e982`, `7399643`, `0c5b5c8`, `05645ec`, `2065313`, `b9c821a`, `18bf6c8`, `d12f152`, `7ffccd4`, `1934593`, `eae7689` `C03`, `2c0a84b` `C02`, `2df59c7` `C01`, `4db2134` / `4c1aab3` Gemini 4 Hydrogen worker integration, and `f997783` targeted 2-tier inline Python execution policy).
 
@@ -192,12 +192,29 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 - Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`849c866`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`, `gemini/phase-24-self-development`, `gemini/aipc-2.0-milestone-a`, `gemini/aipc-2.0-milestone-b`) are preserved intact.
 
 ## Next Action
-Prepare a clearly blocked Draft PR and stop. Human Commander direction is required for any further semantic repair: the two-iteration budget is exhausted. Resolve the listed test/lint blockers only with new bounded authorization, then require green Python 3.12/3.13 CI before freezing/reviewing an exact SHA. No merge, C.5 or D authorization exists.
+Push `gemini/aipc-2.0-milestone-c` to update PR #7, confirm GitHub Actions Python 3.12 & Python 3.13 both succeed on the exact pushed HEAD SHA, freeze that SHA, run one fresh read-only independent Codex review (`codex.cmd exec -s read-only --ephemeral`), and promote PR #7 to Ready for Review without auto-merging. Proposed Milestone C.5 remains planning-only; Milestone D remains unauthorized.
 
 ## Timestamp
-2026-11-16T17:30:23+07:00
+2026-11-16T18:50:00+07:00
 
-## Latest Final CI Recovery Handoff (supersedes the earlier recovery note)
+## Latest Post-03ab850 CI Closure Handoff (supersedes earlier recovery notes)
+
+- Human Commander `K.TRITOD` authorized a fresh bounded 2-iteration CI closure cycle starting from `03ab850ce65282152da52ca6589ce1fa52fa0349` (`03ab850`) with `PYTHONDONTWRITEBYTECODE=1` enforced across all commands and workers.
+- Iteration 1 of 2 (`12d2d9f438349927fe6906e2f9f231c8a68b0996`, worker receipt `wrec-milestone-c-post-03ab850-ci-closure-iter-01-03ab850c`, session `cf8e8db8-ebd3-47e4-923d-a5d103ed0d37`, model `gemini-4-hydrogen-medium`) resolved all remaining release-blocking issues:
+  1. **Ruff F821 (`tests/controller/test_self_dev_runner.py`)**: Replaced undefined `_make_fake_repo` calls with `Path(__file__).resolve().parents[2]` and `_create_candidate_tree(tmp_path / "candidate")`, and created the untrusted symlink probe inside `TMPDIR` so `verify_runtime_separation()` passes cleanly.
+  2. **Windows Canonical Recovery `DirtyWorkspaceError` (`tests/unit/test_b01_subscription_worker_automation.py`)**: Configured `git config core.autocrlf false` in `_init_git_repo` so fixture commits match `GitBackend`'s `GIT_CONFIG_GLOBAL=nul` / `GIT_CONFIG_SYSTEM=nul` index expectations on Windows.
+  3. **Linux POSIX B01 Child Reaping (`src/aipc/adapters/subscription_worker.py`, `tests/unit/test_b01_subscription_worker_automation.py`)**: Added bounded non-blocking `os.waitpid(-1, wnohang)` child reaping (guarded via `getattr(os, "WNOHANG", None)` for Windows compatibility) inside `_terminate_pid_tree` and delegated `_pid_alive` to `_pid_exists(pid, env)` so reparented POSIX grandchildren in container PID 1 environments are reaped and zombie `'Z'` states are recognized as dead while live/unknown PIDs fail closed.
+  4. **C02 & `self_dev_runner` Linux Python 3.12/3.13 Venv & `subprocess` Guard (`src/aipc/controller/milestone_c_pipeline.py`, `src/aipc/controller/self_dev_runner.py`, `tests/unit/test_c02_multilang_e2e_pipeline.py`)**: Disabled `subprocess._USE_POSIX_SPAWN = False` (and `Popen._execute_child.__globals__['_USE_POSIX_SPAWN'] = False`) in generated `sitecustomize.py` while proxying `subprocess._posixsubprocess` and `subprocess._fork_exec` to allow `fork_exec` only when `_popen_active[0] > 0`; expanded `_trusted_exe_variants()` to collect the full symlink chain for `sys.executable`, `sys._base_executable`, and sibling `python`/`python3`/`python3.X` aliases in the trusted interpreter directory; avoided calling `_c_readlink` inside the `subprocess.Popen` audit hook by delegating to `_resolve_link`; allowed bare Python `argv[0]` names when `executable` is a verified trusted path; and disabled `lint_commands`/`build_commands` and `cacheprovider` in `test_c02_isolated_subprocess_allows_trusted_python_and_realpath_but_blocks_untrusted_symlink`.
+- Local Verification Gate Results (100% PASS before push):
+  - `python -B -m ruff check --no-cache .`: `All checks passed!` (`0 errors`).
+  - `python -B -m ruff format --check --no-cache .`: `319 files already formatted`.
+  - `python -B -m aipc.domain.schemas --check` & `python -B -m aipc.project.schemas --check`: `Checked 4 canonical schemas` / `Checked 2 project schemas`.
+  - Windows Required Pytest Suites (`test_a01_subscription_qualification.py`, `test_a03_role_registry.py`, `test_b01_subscription_worker_automation.py`, `test_c01_universal_project_profiles.py`, `test_c02_multilang_e2e_pipeline.py`, `test_self_dev_runner.py`, `test_c03_trusted_acceptance_and_dogfooding.py`): **`212 passed in 427.94s`** (`0 failures`).
+  - Local Linux Docker Verification (`aipc-final-ci:py313-diag`, `--network none`, `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `65534:65534`): **`8 passed in 24.47s`** (`0 failures`).
+- GitHub Actions Status at Commit Time: **CI PENDING** (final Python 3.12 & 3.13 run URLs to be recorded in PR #7 after workflow completion).
+- Stable Controller (`H:/AIPC_Workspace/stable_c`): untouched and clean at `849c86684867487f6f0ad8eb54c603cba240dd34`.
+
+## Earlier Final CI Recovery Handoff (superseded)
 
 - Human Commander explicitly authorized Candidate SemVer/capability qualification and Candidate `aipc.adapters.subscription_worker` dispatch while retaining pinned Stable read-only. The former Stable runtime mismatch is resolved for this authorized Candidate route, not by changing Stable.
 - Bootstrap `632f06f`: accepts stable parseable `agy >=1.5.2,<2.0.0` only with all required CLI flags and a successful help probe. Qualification tests: 29 passed; selected transport qualification tests: 3 passed. Actual installed CLI 1.5.9 qualified; live Hydrogen session `e05c0774-3770-4143-8513-bad319f45fda` returned through the Candidate bridge. Codex CLI reports `Logged in using ChatGPT`.

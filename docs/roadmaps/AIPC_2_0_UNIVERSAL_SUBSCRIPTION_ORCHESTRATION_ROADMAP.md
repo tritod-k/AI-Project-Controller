@@ -12,7 +12,11 @@
 
 ---
 
-## Latest Milestone C final CI recovery — 2026-11-16
+## Latest Milestone C post-03ab850 CI closure — 2026-11-16
+
+**Status: AWAITING_REVIEW / Phase Gate PENDING (GitHub Actions CI PENDING); repair iterations used: 1 / 2.** K.TRITOD authorized a fresh bounded 2-iteration CI closure cycle from `03ab850` with `PYTHONDONTWRITEBYTECODE=1`. Code commit `12d2d9f438349927fe6906e2f9f231c8a68b0996` (`12d2d9f`) resolved all remaining Ruff (`F821`), Windows canonical recovery (`DirtyWorkspaceError`), Linux POSIX B01 child reaping, and Linux Python 3.12/3.13 `isolated_subprocess` (`_USE_POSIX_SPAWN`, `_PosixSubprocessProxy`, and trusted interpreter symlink chain) failures. Local verification passed 100%: Ruff check/format clean (`0 errors`, `319 files`), canonical/project schemas clean (`4`/`2`), Windows required pytest suites **`212 passed`** (`0 failed`), and Linux Docker (`aipc-final-ci:py313-diag`) **`8 passed`** (`0 failed`). Pinned Stable (`H:/AIPC_Workspace/stable_c`) remains untouched at `849c86684867487f6f0ad8eb54c603cba240dd34`. GitHub Actions Python 3.12 & 3.13 are **CI PENDING** at commit time; final CI URLs and the single fresh independent Codex review receipt will be recorded in PR #7 before promoting PR #7 to Ready for Review without auto-merging. **Milestone C.5 — Review Governance & Adaptive Repair Budget** remains a planning-only reference; Milestone D remains unauthorized.
+
+## Earlier Milestone C final CI recovery — 2026-11-16 (superseded)
 
 **BLOCKED / Phase Gate PENDING.** K.TRITOD explicitly authorized Candidate SemVer/capability qualification and Candidate worker dispatch, preserving pinned Stable. Bootstrap `632f06f` accepts `agy >=1.5.2,<2.0.0` only with a successful required-flag probe; live 1.5.9/Hydrogen subscription execution qualified.
 

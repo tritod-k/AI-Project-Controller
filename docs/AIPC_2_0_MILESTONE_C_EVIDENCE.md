@@ -1,6 +1,22 @@
 # AIPC 2.0 Milestone C Evidence — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`)
 
-## Latest bounded recovery evidence — 2026-11-16
+## Latest post-03ab850 CI closure evidence — 2026-11-16
+
+**Status: AWAITING_REVIEW / Phase Gate PENDING (GitHub Actions CI PENDING); repair iterations used: 1 / 2.** This section supersedes the earlier blocked recovery notes below. Human Commander `K.TRITOD` authorized a fresh bounded 2-iteration CI closure cycle starting from `03ab850` with `PYTHONDONTWRITEBYTECODE=1` enforced across all commands.
+
+- **Code Commit (`12d2d9f438349927fe6906e2f9f231c8a68b0996` / `12d2d9f`)**:
+  - Dispatched via Candidate `aipc.adapters.subscription_worker` (`wrec-milestone-c-post-03ab850-ci-closure-iter-01-03ab850c`, session `cf8e8db8-ebd3-47e4-923d-a5d103ed0d37`, `model_used="gemini-4-hydrogen-medium"`), preserving `632f06f` (`agy >= 1.5.2, < 2.0.0` + CLI capability probe) and `H:/AIPC_Workspace/stable_c` (`849c86684867487f6f0ad8eb54c603cba240dd34`) untouched.
+  - Resolved Ruff `F821` in `tests/controller/test_self_dev_runner.py`, Windows `DirtyWorkspaceError` (`core.autocrlf=false` in `_init_git_repo`) and POSIX child/zombie reaping (`os.waitpid(-1, wnohang)` with `getattr(os, "WNOHANG", None)` + `_pid_exists` in `_terminate_pid_tree` / `test_b01_subscription_worker_automation.py`), and Linux Python 3.12/3.13 `isolated_subprocess` `subprocess._USE_POSIX_SPAWN = False` / `_PosixSubprocessProxy` / `_trusted_exe_variants()` / `_resolve_link` audit-safe chain verification in `src/aipc/controller/milestone_c_pipeline.py` and `src/aipc/controller/self_dev_runner.py`.
+- **Local Windows + Linux Docker Verification Gate (100% PASS)**:
+  - `python -B -m ruff check --no-cache .`: `0 errors` (`All checks passed!`).
+  - `python -B -m ruff format --check --no-cache .`: `319 files already formatted`.
+  - `python -B -m aipc.domain.schemas --check` & `python -B -m aipc.project.schemas --check`: `Checked 4 canonical schemas` / `Checked 2 project schemas`.
+  - Windows Required Pytest Suites (`test_a01_subscription_qualification.py`, `test_a03_role_registry.py`, `test_b01_subscription_worker_automation.py`, `test_c01_universal_project_profiles.py`, `test_c02_multilang_e2e_pipeline.py`, `test_self_dev_runner.py`, `test_c03_trusted_acceptance_and_dogfooding.py`): **`212 passed in 427.94s`** (`0 failed`).
+  - Local Linux Docker Verification (`aipc-final-ci:py313-diag`, `--network none`, `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `65534:65534`, read-only source mount): **`8 passed in 24.47s`** (`0 failed`) across the B01, C02, `self_dev_runner`, and C03 test selection.
+- **GitHub Actions & Final Independent Review**:
+  - GitHub Actions Python 3.12 & Python 3.13 status at commit time: **CI PENDING** (final run URLs and exact frozen SHA independent Codex review verdict will be recorded in PR #7 and `H:/AIPC_Workspace/runtime_c/audit/` after CI completes).
+
+## Earlier bounded recovery evidence — 2026-11-16 (superseded)
 
 **BLOCKED / Phase Gate PENDING; repair budget 2/2 exhausted.** This section supersedes older runtime/readiness statements below. K.TRITOD authorized Candidate-only dispatch and SemVer qualification; Stable remains unchanged.
 

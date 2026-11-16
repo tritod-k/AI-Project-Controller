@@ -1,6 +1,20 @@
 # AIPC 2.0 Milestone C Completion Report — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`)
 
-## Latest Phase Completion Report — final bounded CI recovery, 2026-11-16
+## Latest Phase Completion Report — post-03ab850 CI closure, 2026-11-16
+
+- **Status:** COMPLETED (local Windows & Linux Docker gates PASS; **CI PENDING** on GitHub Actions Python 3.12 & 3.13; Phase Gate PENDING final CI + independent Codex review). Repair iterations used: **1 / 2**.
+- **Implemented (`12d2d9f438349927fe6906e2f9f231c8a68b0996`):**
+  - Fixed Ruff `F821` undefined `_make_fake_repo` in `tests/controller/test_self_dev_runner.py` using `_create_candidate_tree` and `TMPDIR` symlink placement.
+  - Fixed Windows canonical recovery `DirtyWorkspaceError` in `tests/unit/test_b01_subscription_worker_automation.py` (`git config core.autocrlf false` in `_init_git_repo`) and POSIX process-group child reaping in `src/aipc/adapters/subscription_worker.py` (`os.waitpid(-1, wnohang)` guarded with `getattr(os, "WNOHANG", None)` and `_pid_exists` zombie `'Z'` state handling).
+  - Fixed Linux Python 3.12/3.13 `isolated_subprocess` child execution in `src/aipc/controller/milestone_c_pipeline.py` and `src/aipc/controller/self_dev_runner.py` (`subprocess._USE_POSIX_SPAWN = False`, `_PosixSubprocessProxy` / `_guarded_fork_exec`, `_trusted_exe_variants()` sibling/symlink chain collection, audit-safe `_resolve_link` traversal in `_has_untrusted_component`, and bare Python `argv[0]` allowance when `executable` is a verified trusted path), plus `-p no:cacheprovider` and `no_lint_pack` in `test_c02_isolated_subprocess_allows_trusted_python_and_realpath_but_blocks_untrusted_symlink`.
+- **Tests/results:**
+  - Windows required pytest suites (`test_a01`, `test_a03`, `test_b01`, `test_c01`, `test_c02`, `test_self_dev_runner`, `test_c03`): **`212 passed in 427.94s`** (`0 failed`).
+  - Local Linux Docker (`aipc-final-ci:py313-diag`, `--network none`, `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`): **`8 passed in 24.47s`** (`0 failed`).
+  - Static analysis & schemas: `ruff check --no-cache .` PASS (`0 errors`), `ruff format --check --no-cache .` PASS (`319 files already formatted`), domain & project schemas PASS (`4` / `2`).
+- **Git handoff:** branch `gemini/aipc-2.0-milestone-c`; code commit `12d2d9f438349927fe6906e2f9f231c8a68b0996` (`12d2d9f`); preceding bootstrap `632f06f36c60c98278c45922836cafa1aea7c779`; Stable Controller `H:/AIPC_Workspace/stable_c` untouched at `849c86684867487f6f0ad8eb54c603cba240dd34`.
+- **CI & Review:** GitHub Actions Python 3.12 & 3.13 **CI PENDING** at commit time. Once both matrix jobs succeed on the frozen pushed SHA, one fresh read-only independent Codex review (`codex.cmd exec -s read-only --ephemeral`) will be executed and recorded in PR #7 before promoting PR #7 from Draft to Ready for Review without auto-merging. Proposed Milestone C.5 remains planning-only; Milestone D remains unauthorized. Attribution: K.TRITOD.
+
+## Earlier Phase Completion Report — final bounded CI recovery, 2026-11-16 (superseded)
 
 - **Status:** BLOCKED. Phase Gate PENDING. Repair iterations used **2/2**; no third semantic repair.
 - **Implemented:** Candidate SemVer/capability qualification (`632f06f`), genuine 1.5.9/Hydrogen live probe, scoped B01 process/reaping and C02 interpreter-chain attempt, C03 explicit next-frame denial regression. Stable untouched; subscription-only child sanitation preserved. C01-C03/Hydrogen release acceptance remains unqualified.
