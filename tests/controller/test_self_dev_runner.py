@@ -1689,3 +1689,68 @@ def test_c19_mc_ir_01_forged_compile_name_and_filename_cannot_register_audithook
     )
     assert receipt.passed is True
     assert receipt.exit_code == 0
+
+
+def test_isolated_subprocess_allows_trusted_python_chain_and_blocks_scratch_symlink(
+    tmp_path: Path,
+) -> None:
+    """Verify SafeSelfDevelopmentRunner allows sys.executable/realpath and blocks scratch links."""
+    stable_root = tmp_path / "stable"
+    candidate_root = tmp_path / "candidate"
+    _make_fake_repo(stable_root, STABLE_SHA, "0.24.0-stable")
+    _make_fake_repo(candidate_root, CANDIDATE_SHA, "0.24.0-candidate")
+
+    scratch_link = candidate_root / "scratch_python"
+    try:
+        os.symlink(sys.executable, scratch_link)
+        has_symlink = True
+    except OSError:
+        has_symlink = False
+
+    test_lines = [
+        "import os",
+        "import subprocess",
+        "import sys",
+        "",
+        "def test_python_chain_guard():",
+        "    r1 = subprocess.run(",
+        "        [sys.executable, '-c', 'print(\"ok_exe\")'],",
+        "        capture_output=True, text=True, check=False,",
+        "    )",
+        "    assert r1.returncode == 0 and 'ok_exe' in r1.stdout",
+        "    r2 = subprocess.run(",
+        "        [os.path.realpath(sys.executable), '-c', 'print(\"ok_real\")'],",
+        "        capture_output=True, text=True, check=False,",
+        "    )",
+        "    assert r2.returncode == 0 and 'ok_real' in r2.stdout",
+    ]
+    if has_symlink:
+        test_lines.extend(
+            [
+                f"    bad_py = {str(scratch_link)!r}",
+                "    blocked = False",
+                "    try:",
+                "        subprocess.Popen([bad_py, '-c', 'print(1)'])",
+                "    except PermissionError as exc:",
+                "        blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(exc)",
+                "    assert blocked",
+            ]
+        )
+
+    (candidate_root / "tests" / "test_python_chain.py").write_text(
+        "\n".join([*test_lines, ""]),
+        encoding="utf-8",
+    )
+
+    cfg_iso = StableCandidateConfig(
+        stable_root=str(stable_root),
+        candidate_worktree_root=str(candidate_root),
+        pinned_stable_sha=STABLE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_isolation="isolated_subprocess",
+    )
+    receipt = SafeSelfDevelopmentRunner(cfg_iso).run_candidate_verification(
+        pytest_targets=("tests/test_python_chain.py",),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0

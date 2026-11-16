@@ -1,6 +1,18 @@
 # AIPC 2.0 Milestone C Evidence — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`)
 
-## Final release qualification update — 2026-11-16
+## Latest bounded recovery evidence — 2026-11-16
+
+**BLOCKED / Phase Gate PENDING; repair budget 2/2 exhausted.** This section supersedes older runtime/readiness statements below. K.TRITOD authorized Candidate-only dispatch and SemVer qualification; Stable remains unchanged.
+
+- Bootstrap `632f06f`: `agy >=1.5.2,<2.0.0` plus mandatory successful CLI capability probe. Tests 29 + 3 passed; live 1.5.9/Hydrogen subscription execution confirmed by retained receipt. Codex login status confirms ChatGPT authentication.
+- Iteration 1 was rolled back by the bridge on ignored bytecode changes, then failed restoring an untracked cache. Its source changes are not retained. Iteration 2 used `PYTHONDONTWRITEBYTECODE=1`, retained scoped B01/C02 fixes and a C03 next-frame denial regression, and returned actual validation evidence.
+- Windows required suites: **205 passed, 3 failed**, exit 1. Failures: canonical recovery `DirtyWorkspaceError`, new C02 `WORKSPACE_MUTATED_DURING_VERIFICATION`, and undefined `_make_fake_repo` in the new self-runner test. Parsed worker receipt counters conflict with raw runner totals; the retained exit/log is authoritative.
+- Linux Python 3.13.18 selection: **2 passed, 6 failed**, exit 1. C03 and B01 PID-state case pass, while original B01 termination/C02 child-spawn failures and new regressions remain. Local image contains Git and project dependencies; verification was non-root, no-network, read-only with dropped capabilities/resource limits. No local Python 3.12 claim.
+- Ruff: FAIL (two F821 references); format: PASS (319 files); schemas: PASS (4 canonical, 2 project); diff whitespace check: PASS. Budget forbids another semantic repair.
+- Replacement Actions run **CI PENDING** at this commit. Report actual run URLs/results in the Draft PR body/external receipt. Final exact-SHA review NOT STARTED; no frozen SHA or release PASS.
+- Evidence is outside Git under `H:/AIPC_Workspace/runtime_c/`: `audit/final_ci_recovery_evidence_index.json`, `evidence/milestone-c-final-ci-repair-iteration-02/`, `logs/final_ci_linux_iteration_02.log`, and `logs/final_ci_ruff_final.log`. Stable/queue preserved; operator prompts and ignored diagnostics are excluded from commits.
+
+## Earlier final release qualification update — 2026-11-16
 
 **BLOCKED; Phase Gate PENDING.** Earlier receipts below are historical local evidence, not final release acceptance. At `6223e6f4f42fac5ab2f25deb685dc73f6b330dac`, [Actions run 43772299423](https://github.com/tritod-k/AI-Project-Controller/actions/runs/43772299423) failed: Python 3.12 `3 failed, 1260 passed, 4 skipped`; Python 3.13 `6 failed, 1257 passed, 4 skipped`. Static checks, schemas and wheel passed.
 

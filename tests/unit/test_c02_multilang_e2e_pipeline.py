@@ -3378,3 +3378,61 @@ def test_c19_mc_ir_03_04_pre_dispatch_head_rename_fail_closed_and_sanitized_git_
         assert all(k.lower() != "openai_api_key" for k in env_arg), (
             f"prohibited key leaked into git call {argv!r}"
         )
+
+
+def test_c02_isolated_subprocess_allows_trusted_python_and_realpath_but_blocks_untrusted_symlink(
+    tmp_path: Path,
+) -> None:
+    """Trusted sys.executable & realpath succeed in isolated_subprocess; untrusted symlinks fail."""
+    bundle, _ = _make_onboarded_python_project(tmp_path / "chain_case")
+    ws = Path(bundle.workspace_root).resolve()
+    untrusted_link = ws / "untrusted_python"
+    try:
+        os.symlink(sys.executable, untrusted_link)
+        has_symlink = True
+    except OSError:
+        has_symlink = False
+
+    test_lines = [
+        "import os",
+        "import pathlib",
+        "import subprocess",
+        "import sys",
+        "",
+        "def test_trusted_and_untrusted_python() -> None:",
+        "    r1 = subprocess.run(",
+        "        [sys.executable, '-c', 'print(\"ok_exe\")'],",
+        "        capture_output=True, text=True, check=False,",
+        "    )",
+        "    assert r1.returncode == 0 and 'ok_exe' in r1.stdout",
+        "    r2 = subprocess.run(",
+        "        [os.path.realpath(sys.executable), '-c', 'print(\"ok_real\")'],",
+        "        capture_output=True, text=True, check=False,",
+        "    )",
+        "    assert r2.returncode == 0 and 'ok_real' in r2.stdout",
+    ]
+    if has_symlink:
+        test_lines.extend(
+            [
+                f"    bad_py = {str(untrusted_link)!r}",
+                "    blocked = False",
+                "    try:",
+                "        subprocess.Popen([bad_py, '-c', 'print(1)'])",
+                "    except PermissionError as exc:",
+                "        blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(exc)",
+                "    assert blocked",
+            ]
+        )
+    (ws / "tests" / "test_chain_guard.py").write_text(
+        "\n".join([*test_lines, ""]), encoding="utf-8"
+    )
+    cand_sha = _commit_all_clean(ws, "add trusted python chain test")
+    verifier = MultiLanguageIsolatedVerifier()
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=cand_sha,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "-m", "pytest", "-q", "tests/test_chain_guard.py"),
+    )
+    assert receipt.passed is True
+    assert receipt.exit_code == 0

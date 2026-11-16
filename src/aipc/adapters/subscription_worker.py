@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -317,6 +319,42 @@ def _run_git(
     )
 
 
+def _parse_linux_proc_stat(raw: str) -> tuple[str, int] | None:
+    rparen = raw.rfind(")")
+    if rparen == -1:
+        return None
+    rest = raw[rparen + 1 :].split()
+    if len(rest) < 3 or not rest[0]:
+        return None
+    try:
+        pgrp = int(rest[2])
+    except ValueError:
+        return None
+    return (rest[0], pgrp)
+
+
+def _posix_pid_state(pid: int) -> str:
+    """Return 'dead', 'live', or 'unknown' for a POSIX PID."""
+    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+        return "unknown"
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except (FileNotFoundError, ProcessLookupError):
+        return "dead"
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ESRCH):
+            return "dead"
+        return "unknown"
+    parsed = _parse_linux_proc_stat(raw)
+    if parsed is None:
+        return "unknown"
+    state, _pgrp = parsed
+    if state in ("Z", "X", "x"):
+        return "dead"
+    return "live"
+
+
 def _pid_exists(pid: int, env: Mapping[str, str] | None = None) -> bool:
     if os.name == "nt":
         sanitized = build_sanitized_child_env(env)
@@ -341,11 +379,66 @@ def _pid_exists(pid: int, env: Mapping[str, str] | None = None) -> bool:
         return False
     except PermissionError:
         return True
+    if _posix_pid_state(pid) == "dead":
+        return False
     return True
 
 
 def _posix_pgid_exists(pgid: int) -> bool:
     if os.name == "nt":
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+        return True
+    saw_zombie_in_group = False
+    try:
+        with os.scandir("/proc") as entries:
+            proc_names = [entry.name for entry in entries if entry.name.isdigit()]
+    except OSError:
+        return True
+    for name in proc_names:
+        proc_pid = int(name)
+        parsed: tuple[str, int] | None = None
+        unreadable_or_malformed = False
+        try:
+            with open(f"/proc/{proc_pid}/stat", encoding="utf-8", errors="replace") as fh:
+                parsed = _parse_linux_proc_stat(fh.read())
+            if parsed is None:
+                unreadable_or_malformed = True
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
+                continue
+            unreadable_or_malformed = True
+        if unreadable_or_malformed or parsed is None:
+            getpgid_fn = getattr(os, "getpgid", None)
+            if getpgid_fn is None:
+                return True
+            try:
+                member_pgid = getpgid_fn(proc_pid)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ESRCH):
+                    continue
+                return True
+            if member_pgid == pgid:
+                return True
+            continue
+        state, stat_pgid = parsed
+        if stat_pgid != pgid:
+            continue
+        if state in ("Z", "X", "x"):
+            saw_zombie_in_group = True
+        else:
+            return True
+    if saw_zombie_in_group:
         return False
     try:
         os.killpg(pgid, 0)
@@ -781,7 +874,18 @@ async def invoke_antigravity_cli_worker(
         )
     except (asyncio.CancelledError, TimeoutError):
         try:
-            _terminate_worker_process_tree(proc, env, job_obj=job_obj)
+            if os.name == "nt":
+                _terminate_worker_process_tree(proc, env, job_obj=job_obj)
+            else:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
         finally:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)

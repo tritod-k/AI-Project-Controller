@@ -10,13 +10,13 @@ AI Project Controller
 AIPC 2.0 — Milestone C (C01–C03: Universal Project Support, End-to-End Automation & Self-Development Dogfooding)
 
 ## Status
-BLOCKED (final CI recovery: pinned Stable Controller rejects installed Antigravity 1.5.9; release qualification incomplete)
+BLOCKED (final CI recovery: both authorized repair iterations consumed; local tests and Ruff remain failing)
 
 ## Current Attempt
-Milestone C Attempt 01 (`gemini/aipc-2.0-milestone-c`)
+Milestone C Attempt 01 (`gemini/aipc-2.0-milestone-c`); final CI stabilization iterations 1 and 2 consumed (2/2, no third repair authorized).
 
 ## Phase Gate
-PENDING (GitHub Actions failures unresolved; final exact-SHA independent review not started)
+PENDING (local validation failing; replacement CI PENDING; no frozen SHA or final independent review)
 
 ## Last Stable Checkpoint
 - `master` baseline: `849c866` (Milestone B merge PR #6, following Milestone A merge PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`, Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
@@ -25,6 +25,8 @@ PENDING (GitHub Actions failures unresolved; final exact-SHA independent review 
 `gemini/aipc-2.0-milestone-c`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
+Latest preceding checkpoint: `632f06f36c60c98278c45922836cafa1aea7c779` (Candidate SemVer/capability bootstrap). This documentation accompanies the bounded partial-repair handoff; resolve its exact SHA using `git log -1`. Earlier implementation history follows.
+
 `8dec3c1` (`8dec3c1` — Milestone C `C01`–`C03` nineteenth-pass `MC-IR-01`–`MC-IR-04` checkpoint across `milestone_c_pipeline.py`, `self_dev_runner.py`, and `trusted_acceptance_harness.py`, following `17742d4` eighteenth-pass hardening: closing audit-hook registration before candidate execution and removing forgeable caller-filename exceptions (`MC-IR-01`), enforcing retained code-object identity and `FrameType` descriptor sealing (`f_back`/`f_locals`/`f_code`/`f_globals`/`f_builtins`/`clear`) for criterion runner frames (`MC-IR-02`), binding pre-dispatch candidate Git baseline SHA (`git rev-parse --verify HEAD`) and fail-closed NUL-delimited `git status`/`git diff` scope verification (`MC-IR-03`), and enforcing `build_sanitized_child_env` across all C02 Git subprocess calls (`MC-IR-04`); following `3b6c890` seventeenth-pass `MC-RR2-01`–`MC-RR2-05`, `6857b52` sixteenth-pass `MC-RR-01`–`MC-RR-07`, `206cd48` / `8f99035` fifteenth-pass C15-SEC-01, C15-SEC-02, C15-ARCH-03, C15-SEC-04, C15-ARCH-05, and C15-ARCH-06 hardening, `5dc62f7`, `ccdf012`, `e7de506`, `965057a`, `e9fde2e`, `cd5e982`, `7399643`, `0c5b5c8`, `05645ec`, `2065313`, `b9c821a`, `18bf6c8`, `d12f152`, `7ffccd4`, `1934593`, `eae7689` `C03`, `2c0a84b` `C02`, `2df59c7` `C01`, `4db2134` / `4c1aab3` Gemini 4 Hydrogen worker integration, and `f997783` targeted 2-tier inline Python execution policy).
 
 ## Completed Phases
@@ -190,10 +192,26 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 - Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`849c866`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`, `gemini/phase-24-self-development`, `gemini/aipc-2.0-milestone-a`, `gemini/aipc-2.0-milestone-b`) are preserved intact.
 
 ## Next Action
-Human Commander: restore a subscription worker runtime qualified by pinned Stable Controller, or authorize a separately qualified controller checkpoint/dispatch route. Resume final CI recovery from `6223e6f` plus the documentation-only recovery handoff. Preserve original queue records. Do not start Milestone C.5 or D.
+Prepare a clearly blocked Draft PR and stop. Human Commander direction is required for any further semantic repair: the two-iteration budget is exhausted. Resolve the listed test/lint blockers only with new bounded authorization, then require green Python 3.12/3.13 CI before freezing/reviewing an exact SHA. No merge, C.5 or D authorization exists.
 
 ## Timestamp
-2026-11-16T16:15:14+07:00
+2026-11-16T17:30:23+07:00
+
+## Latest Final CI Recovery Handoff (supersedes the earlier recovery note)
+
+- Human Commander explicitly authorized Candidate SemVer/capability qualification and Candidate `aipc.adapters.subscription_worker` dispatch while retaining pinned Stable read-only. The former Stable runtime mismatch is resolved for this authorized Candidate route, not by changing Stable.
+- Bootstrap `632f06f`: accepts stable parseable `agy >=1.5.2,<2.0.0` only with all required CLI flags and a successful help probe. Qualification tests: 29 passed; selected transport qualification tests: 3 passed. Actual installed CLI 1.5.9 qualified; live Hydrogen session `e05c0774-3770-4143-8513-bad319f45fda` returned through the Candidate bridge. Codex CLI reports `Logged in using ChatGPT`.
+- Original failures: B01 mocks dropped POSIX `start_new_session` and liveness checks counted zombies before reaping; C02 denied genuine interpreter alias chains at the executable guard; C03 expected bare `tb_next` metadata to emit an audit denial (80/90 probes), then pytest failure formatting was itself denied. The C03 regression now follows non-None `tb_next` to protected `tb_frame`, preserving 90 denial probes and making the actual frame boundary explicit.
+- Iteration 1 produced implementation changes but was automatically rolled back before validation after ignored bytecode changed outside scope; rollback then failed trying to restore an untracked `.pyc` with Git. Its raw provider output/error are retained. Parent monitoring imports could regenerate those caches. `PYTHONDONTWRITEBYTECODE=1` was enabled for iteration 2 and all subsequent applicable commands. No rollback policy or Stable source was changed.
+- Iteration 2 retained scoped B01/C02 implementation and regression changes, with an actual worker receipt under `runtime_c/evidence/milestone-c-final-ci-repair-iteration-02/`. Repair budget: **2/2 exhausted**. No third semantic repair authorized or performed. A mechanical Ruff format pass touched only the B01 test file.
+- Fresh Windows Python 3.13.0 required suites: **205 passed, 3 failed**, exit 1. Failures: canonical recovery test (`DirtyWorkspaceError`), new C02 interpreter-chain regression (`WORKSPACE_MUTATED_DURING_VERIFICATION`), new self-development-runner regression (`NameError: _make_fake_repo`, lines 1700/1701). Worker receipt parsed counters disagree with the actual runner summary; use retained `test_output.log`, exit code and the raw 205/3 summary, not the parsed 1/3 counters.
+- Linux Python 3.13.18 original six plus two new interpreter-chain tests: **2 passed, 6 failed**, exit 1. C03 and B01 PID-state test pass; B01 kills/reaps and original C02/self-runner child-spawn tests still fail, alongside the two new regressions. This is not Python 3.12 verification.
+- Disposable diagnostic image `aipc-final-ci:py313-diag`, ID `sha256:e48227829fa1e9a2423ebc1fe31b921694b560bd2e9152ab7bab478672da9eeb`, adds Git and existing project test dependencies to the prior Python 3.13 image. Verification used non-root, no network, read-only root/source mount, dropped capabilities, no-new-privileges and bounded resources. Image/bootstrap diagnostics are outside Git.
+- Fresh final static checks: Ruff FAIL (two F821 references to `_make_fake_repo`); formatting PASS (319 files); canonical/project schema checks PASS (4/2); `git diff --check` PASS. No passing release claim.
+- Replacement GitHub Actions: **CI PENDING** at this documentation commit. Actual resulting run URLs/conclusions must be recorded in the Draft PR body and external audit, without another documentation commit. Final independent review: NOT STARTED because green CI is a prerequisite. No frozen/qualified SHA exists; release and merge remain NO-GO.
+- Stable remains clean at `849c86684867487f6f0ad8eb54c603cba240dd34`. Original queue preserved, SHA-256 `D55152D80683D45F72138C43121A3FCB3A913E8FD3F9B807DE164AEE24626527`; historical C01-C03 PASS records do not establish release qualification.
+- Evidence: `H:/AIPC_Workspace/runtime_c/audit/final_ci_recovery_evidence_index.json`, `audit/final_ci_candidate_runtime_qualification.json`, `evidence/milestone-c-final-ci-repair-iteration-02/test_output.log`, `logs/final_ci_linux_iteration_02.log`, `logs/final_ci_ruff_final.log`. Operator prompts and diagnostic scripts remain unstaged and uncommitted.
+- Next action: blocked Draft PR, then Human Commander direction for another bounded repair. Proposed C.5 is planning-only; D remains unauthorized.
 
 ## Final CI Recovery Handoff (2026-11-16)
 

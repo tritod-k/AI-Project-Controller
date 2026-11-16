@@ -1,6 +1,20 @@
 # AIPC 2.0 Milestone C Completion Report — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`)
 
-## Latest recovery status — 2026-11-16
+## Latest Phase Completion Report — final bounded CI recovery, 2026-11-16
+
+- **Status:** BLOCKED. Phase Gate PENDING. Repair iterations used **2/2**; no third semantic repair.
+- **Implemented:** Candidate SemVer/capability qualification (`632f06f`), genuine 1.5.9/Hydrogen live probe, scoped B01 process/reaping and C02 interpreter-chain attempt, C03 explicit next-frame denial regression. Stable untouched; subscription-only child sanitation preserved. C01-C03/Hydrogen release acceptance remains unqualified.
+- **Recovery:** first repair was automatically rolled back on ignored bytecode mutation, with an untracked-cache restoration error. Second repair disabled bytecode writes and retained valid scoped work; its verification still fails. No rollback bypass was introduced.
+- **Tests/results:** required Windows suites **205 passed, 3 failed** (exit 1); Linux Python 3.13.18 selected tests **2 passed, 6 failed** (exit 1). Ruff FAIL (two undefined `_make_fake_repo` references); format PASS (319 files); schemas PASS (4/2); diff whitespace PASS. The raw runner totals supersede inconsistent parsed worker counters. No local Python 3.12 verification.
+- **Acceptance:** [PASS] Candidate runtime qualification and Stable isolation; [FAIL] regression/lint qualification; [UNVERIFIED] green Actions matrix, final frozen-SHA independent review and ready PR.
+- **Known blockers:** canonical recovery `DirtyWorkspaceError`, C02 verification mutation and Linux legitimate-child rejection/termination failures, undefined helper in the new self-runner regression. C03 corrected 90-probe regression passes. No findings were silently downgraded.
+- **Git handoff:** branch `gemini/aipc-2.0-milestone-c`; preceding bootstrap commit `632f06f36c60c98278c45922836cafa1aea7c779`; this bounded partial-attempt commit is resolved via `git log -1` and its exact SHA will be in the Draft PR. Stable checkpoint `849c86684867487f6f0ad8eb54c603cba240dd34`. Four release documents updated; operator prompts/diagnostic scripts excluded.
+- **CI:** replacement **CI PENDING** at this commit. Actual matrix results belong in the PR body and external audit without a post-CI documentation commit. No qualified/frozen SHA; final Codex review NOT STARTED because the green-CI prerequisite is unmet.
+- **Evidence:** `H:/AIPC_Workspace/runtime_c/audit/final_ci_recovery_evidence_index.json`, `evidence/milestone-c-final-ci-repair-iteration-02/test_output.log`, `logs/final_ci_linux_iteration_02.log`, `logs/final_ci_ruff_final.log`; latest resume details in `CURRENT_STATE.md`.
+- **Architecture deviations:** no new architecture, paid API path, Stable change or milestone expansion. Unattended production remains NO-GO.
+- **Approvals requested / next action:** open clearly blocked Draft PR, stop, and obtain new Human Commander bounded-repair direction. No merge approval requested while mandatory gates fail. Proposed C.5 is future planning only; D remains unauthorized. Attribution: K.TRITOD.
+
+## Earlier recovery status — 2026-11-16
 
 **Status: BLOCKED. Phase Gate: PENDING.** Historical implementation and local regression claims below do not qualify the release. [Actions run 43772299423](https://github.com/tritod-k/AI-Project-Controller/actions/runs/43772299423), at `6223e6f4f42fac5ab2f25deb685dc73f6b330dac`, failed on Python 3.12 (`3 failed, 1260 passed, 4 skipped`) and 3.13 (`6 failed, 1257 passed, 4 skipped`). Static analysis, schema and wheel steps passed.
 

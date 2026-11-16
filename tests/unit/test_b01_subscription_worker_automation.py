@@ -741,7 +741,7 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
         extra_kw = (
             {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
             if os.name == "nt"
-            else {}
+            else {"start_new_session": bool(kwargs.get("start_new_session", False))}
         )
         proc = await real_exec(
             sys.executable,
@@ -820,7 +820,7 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
         extra_kw = (
             {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
             if os.name == "nt"
-            else {}
+            else {"start_new_session": bool(kwargs.get("start_new_session", False))}
         )
         proc = await real_exec(
             sys.executable,
@@ -878,7 +878,7 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
         extra_kw = (
             {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
             if os.name == "nt"
-            else {}
+            else {"start_new_session": bool(kwargs.get("start_new_session", False))}
         )
         proc = await real_exec(
             sys.executable,
@@ -1545,7 +1545,7 @@ def test_b01_pid_exists_and_job_object_fail_closed(
         extra_kw = (
             {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
             if os.name == "nt"
-            else {}
+            else {"start_new_session": bool(kwargs.get("start_new_session", False))}
         )
         proc = await real_exec(
             sys.executable,
@@ -1575,6 +1575,11 @@ def test_b01_pid_exists_and_job_object_fail_closed(
             f"open({str(assign_fail_gpid)!r}, 'w', encoding='utf-8').write(str(p.pid)); "
             "time.sleep(30)"
         )
+        extra_kw = (
+            {}
+            if os.name == "nt"
+            else {"start_new_session": bool(kwargs.get("start_new_session", False))}
+        )
         proc = await real_exec(
             sys.executable,
             "-c",
@@ -1584,6 +1589,7 @@ def test_b01_pid_exists_and_job_object_fail_closed(
             stdin=kwargs["stdin"],
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],
+            **extra_kw,
         )
         for _ in range(40):
             if assign_fail_gpid.exists() and assign_fail_gpid.read_text(encoding="utf-8").strip():
@@ -1637,7 +1643,7 @@ def test_b01_pid_exists_and_job_object_fail_closed(
         extra_kw = (
             {"creationflags": int(str(kwargs.get("creationflags", 0) or 0))}
             if os.name == "nt"
-            else {}
+            else {"start_new_session": bool(kwargs.get("start_new_session", False))}
         )
         return await real_exec(
             sys.executable,
@@ -1716,6 +1722,121 @@ def test_b01_pid_exists_and_job_object_fail_closed(
 
         mp.setattr("aipc.adapters.subscription_worker.os.killpg", fake_killpg_perm, raising=False)
         assert _posix_pgid_exists(99999) is True
+
+        # Linux /proc zombie-only vs live vs unreadable same-group vs unknown state
+        from aipc.adapters.subscription_worker import _posix_pid_state
+
+        mp.setattr("aipc.adapters.subscription_worker.sys.platform", "darwin")
+        mp.setattr("aipc.adapters.subscription_worker.os.kill", lambda _p, _s: None, raising=False)
+        mp.setattr("aipc.adapters.subscription_worker.os.killpg", fake_killpg_alive, raising=False)
+        assert _posix_pid_state(99999) == "unknown"
+        assert _pid_exists(99999, env) is True
+        assert _posix_pgid_exists(99999) is True
+
+        mp.setattr("aipc.adapters.subscription_worker.sys.platform", "linux")
+        proc_dir = tmp_path / "fake_proc"
+        proc_dir.mkdir(exist_ok=True)
+        mp.setattr("aipc.adapters.subscription_worker.os.path.isdir", lambda p: p == "/proc")
+
+        class _FakeEntry:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+        class _FakeScan:
+            def __init__(self, names: list[str]) -> None:
+                self._entries = [_FakeEntry(n) for n in names]
+
+            def __enter__(self) -> list[_FakeEntry]:
+                return self._entries
+
+            def __exit__(self, *_a: object) -> None:
+                return None
+
+        import builtins
+
+        real_open = builtins.open
+        stat_map: dict[str, str | Exception] = {}
+
+        def fake_open(path: object, *args: object, **kwargs: object) -> object:
+            s_path = str(path)
+            if s_path.startswith("/proc/") and s_path.endswith("/stat"):
+                val = stat_map.get(s_path)
+                if isinstance(val, Exception):
+                    raise val
+                if isinstance(val, str):
+                    import io
+
+                    return io.StringIO(val)
+                raise FileNotFoundError(s_path)
+            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        mp.setattr(
+            "aipc.adapters.subscription_worker.os.scandir",
+            lambda _p: _FakeScan(["101", "102", "103"]),
+        )
+        mp.setattr(builtins, "open", fake_open)
+
+        # Zombie-only group (with unrelated live process 103 in pgid 888)
+        stat_map["/proc/101/stat"] = "101 (py (child)) Z 1 99999 99999"
+        stat_map["/proc/102/stat"] = FileNotFoundError("vanished")
+        stat_map["/proc/103/stat"] = "103 (other) S 1 888 888"
+        assert _posix_pid_state(101) == "dead"
+        assert _pid_exists(101, env) is False
+        assert _posix_pgid_exists(99999) is False
+
+        # Live member alongside zombie
+        stat_map["/proc/102/stat"] = "102 (worker) S 101 99999 99999"
+        assert _posix_pid_state(102) == "live"
+        assert _pid_exists(102, env) is True
+        assert _posix_pgid_exists(99999) is True
+
+        # Unreadable same-group member -> fail-closed True; unreadable unrelated group -> False
+        stat_map["/proc/102/stat"] = PermissionError("denied")
+        mp.setattr(
+            "aipc.adapters.subscription_worker.os.getpgid",
+            lambda pid: 99999 if pid == 102 else 888,
+            raising=False,
+        )
+        assert _posix_pgid_exists(99999) is True
+
+        mp.setattr(
+            "aipc.adapters.subscription_worker.os.getpgid",
+            lambda _pid: 888,
+            raising=False,
+        )
+        assert _posix_pgid_exists(99999) is False
+
+        # Unreadable member with unknown group -> fail-closed True
+        def _raise_perm(_pid: int) -> int:
+            raise PermissionError("denied")
+
+        mp.setattr("aipc.adapters.subscription_worker.os.getpgid", _raise_perm, raising=False)
+        assert _posix_pgid_exists(99999) is True
+
+    if os.name != "nt":
+        seen_pgids: list[tuple[int, int]] = []
+
+        async def _check_session_exec(
+            *_args: object, **kwargs: object
+        ) -> asyncio.subprocess.Process:
+            proc = await fast_exec(*_args, **kwargs)
+            seen_pgids.append((proc.pid, os.getpgid(proc.pid)))
+            return proc
+
+        monkeypatch.setattr(
+            "aipc.adapters.subscription_worker.find_agy_executable", lambda: fake_agy
+        )
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _check_session_exec)
+        asyncio.run(
+            invoke_antigravity_cli_worker(
+                _task(wt, task_id="task-r3-posix-pgid", timeout=10),
+                cfg,
+                env,
+                "gemini-3.8-flash-medium",
+            )
+        )
+        assert len(seen_pgids) == 1
+        assert seen_pgids[0][0] == seen_pgids[0][1]
 
 
 def test_b01_cli_worker_job_invalid_worker_config_leaves_task_eligible(tmp_path: Path) -> None:

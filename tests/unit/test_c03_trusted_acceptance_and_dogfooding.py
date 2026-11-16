@@ -4684,9 +4684,15 @@ def test_c19_mc_ir_02_forged_stdlib_filenames_and_frame_walking_blocked_in_crite
                     "                '    try:\\n        raise ValueError(1)\\n"
                     "    except ValueError as e:\\n        _ = e.__traceback__.tb_frame',"
                 ),
+                # Bare tb_next is CPython PyMemberDef linkage metadata (no audit event,
+                # no frame/locals exposure); verify it is non-None and that following
+                # tb_next.tb_frame is explicitly denied with PermissionError.
                 (
                     "                '    try:\\n        sys._getframe(0)\\n"
-                    "    except PermissionError as e:\\n        _ = e.__traceback__.tb_next',"
+                    "    except PermissionError as e:\\n"
+                    "        _nxt = e.__traceback__.tb_next\\n"
+                    "        assert _nxt is not None\\n"
+                    "        _ = _nxt.tb_frame',"
                 ),
                 "                '    g = (x for x in (1,))\\n    _ = g.gi_frame',",
                 (
