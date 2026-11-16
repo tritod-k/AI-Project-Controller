@@ -675,8 +675,25 @@ def _terminate_pid_tree(
     except (PermissionError, OSError) as exc:
         if require_tree_kill and (_pid_exists(pid, env) or _posix_pgid_exists(pid)):
             raise ControllerError(f"Failed to kill process group {pid}") from exc
+    wnohang = getattr(os, "WNOHANG", None)
+    if hasattr(os, "waitpid") and wnohang is not None:
+        for _ in range(32):
+            try:
+                wpid, _ = os.waitpid(-1, wnohang)
+            except (ChildProcessError, OSError):
+                break
+            if wpid == 0:
+                break
     if require_tree_kill:
         for _ in range(20):
+            if hasattr(os, "waitpid") and wnohang is not None:
+                for _ in range(32):
+                    try:
+                        wpid, _ = os.waitpid(-1, wnohang)
+                    except (ChildProcessError, OSError):
+                        break
+                    if wpid == 0:
+                        break
             if not _pid_exists(pid, env) and not _posix_pgid_exists(pid):
                 return
             time.sleep(0.05)

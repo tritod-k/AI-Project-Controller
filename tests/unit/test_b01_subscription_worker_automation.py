@@ -49,6 +49,7 @@ def _init_git_repo(repo_dir: Path) -> str:
     repo_dir.mkdir(parents=True, exist_ok=True)
     for cmd in (
         ["git", "init"],
+        ["git", "config", "core.autocrlf", "false"],
         ["git", "config", "user.email", "test@example.com"],
         ["git", "config", "user.name", "AIPC Test"],
     ):
@@ -716,19 +717,7 @@ def test_b01_invoke_antigravity_cli_worker_kills_reaps_child_and_requires_conv_i
     spawned: list[asyncio.subprocess.Process] = []
 
     def _pid_alive(pid: int) -> bool:
-        if os.name == "nt":
-            res = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            return str(pid) in res.stdout
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
+        return _pid_exists(pid, env)
 
     async def slow_subprocess_exec(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
         pid_file = tmp_path / f"grandchild_{len(spawned)}.pid"

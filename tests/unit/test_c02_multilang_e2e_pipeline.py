@@ -3385,6 +3385,12 @@ def test_c02_isolated_subprocess_allows_trusted_python_and_realpath_but_blocks_u
 ) -> None:
     """Trusted sys.executable & realpath succeed in isolated_subprocess; untrusted symlinks fail."""
     bundle, _ = _make_onboarded_python_project(tmp_path / "chain_case")
+    no_lint_pack = bundle.profile.validation_pack.model_copy(
+        update={"lint_commands": (), "build_commands": ()}
+    )
+    bundle = bundle.model_copy(
+        update={"profile": bundle.profile.model_copy(update={"validation_pack": no_lint_pack})}
+    )
     ws = Path(bundle.workspace_root).resolve()
     untrusted_link = ws / "untrusted_python"
     try:
@@ -3432,7 +3438,15 @@ def test_c02_isolated_subprocess_allows_trusted_python_and_realpath_but_blocks_u
         bundle=bundle,
         candidate_sha=cand_sha,
         isolation_mode="isolated_subprocess",
-        command_override=(sys.executable, "-m", "pytest", "-q", "tests/test_chain_guard.py"),
+        command_override=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            "tests/test_chain_guard.py",
+        ),
     )
     assert receipt.passed is True
     assert receipt.exit_code == 0

@@ -1695,20 +1695,12 @@ def test_isolated_subprocess_allows_trusted_python_chain_and_blocks_scratch_syml
     tmp_path: Path,
 ) -> None:
     """Verify SafeSelfDevelopmentRunner allows sys.executable/realpath and blocks scratch links."""
-    stable_root = tmp_path / "stable"
-    candidate_root = tmp_path / "candidate"
-    _make_fake_repo(stable_root, STABLE_SHA, "0.24.0-stable")
-    _make_fake_repo(candidate_root, CANDIDATE_SHA, "0.24.0-candidate")
-
-    scratch_link = candidate_root / "scratch_python"
-    try:
-        os.symlink(sys.executable, scratch_link)
-        has_symlink = True
-    except OSError:
-        has_symlink = False
+    stable_root = Path(__file__).resolve().parents[2]
+    candidate_root = _create_candidate_tree(tmp_path / "candidate")
 
     test_lines = [
         "import os",
+        "import pathlib",
         "import subprocess",
         "import sys",
         "",
@@ -1723,19 +1715,20 @@ def test_isolated_subprocess_allows_trusted_python_chain_and_blocks_scratch_syml
         "        capture_output=True, text=True, check=False,",
         "    )",
         "    assert r2.returncode == 0 and 'ok_real' in r2.stdout",
+        "    scratch_link = pathlib.Path(os.environ['TMPDIR']) / 'scratch_python'",
+        "    try:",
+        "        os.symlink(sys.executable, scratch_link)",
+        "        has_symlink = True",
+        "    except OSError:",
+        "        has_symlink = False",
+        "    if has_symlink:",
+        "        blocked = False",
+        "        try:",
+        "            subprocess.Popen([str(scratch_link), '-c', 'print(1)'])",
+        "        except PermissionError as exc:",
+        "            blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(exc)",
+        "        assert blocked",
     ]
-    if has_symlink:
-        test_lines.extend(
-            [
-                f"    bad_py = {str(scratch_link)!r}",
-                "    blocked = False",
-                "    try:",
-                "        subprocess.Popen([bad_py, '-c', 'print(1)'])",
-                "    except PermissionError as exc:",
-                "        blocked = 'SUBPROCESS_SANDBOX_BYPASS_BLOCKED' in str(exc)",
-                "    assert blocked",
-            ]
-        )
 
     (candidate_root / "tests" / "test_python_chain.py").write_text(
         "\n".join([*test_lines, ""]),
