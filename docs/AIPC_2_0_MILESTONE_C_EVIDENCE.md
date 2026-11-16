@@ -1,5 +1,15 @@
 # AIPC 2.0 Milestone C Evidence — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`)
 
+## Final release qualification update — 2026-11-16
+
+**BLOCKED; Phase Gate PENDING.** Earlier receipts below are historical local evidence, not final release acceptance. At `6223e6f4f42fac5ab2f25deb685dc73f6b330dac`, [Actions run 43772299423](https://github.com/tritod-k/AI-Project-Controller/actions/runs/43772299423) failed: Python 3.12 `3 failed, 1260 passed, 4 skipped`; Python 3.13 `6 failed, 1257 passed, 4 skipped`. Static checks, schemas and wheel passed.
+
+Fresh Stable-origin `subscription_only` qualification rejects installed `agy 1.5.9`; pinned Stable permits `1.5.2/1.5.3/1.5.5`. Stable source remains untouched. Codex qualifies; the existing Stable worker bridge has no identified production Codex invoker. Candidate qualification logic cannot replace Stable imports. Repair iterations used: **0/2**.
+
+Fresh Windows Python 3.13.0 targeted result: `1 failed, 5 passed, 154 deselected`, exit 1. C03 reproduces; retained child output denies vault traceback access during pytest failure reporting, with the initiating failure unresolved. Linux Python 3.13.18 container attempt failed at collection because the image lacks `pydantic`; this is not Python 3.12 evidence. Original queue receipts remain unchanged and do not establish release acceptance. See the latest recovery handoff in `CURRENT_STATE.md` and external evidence in `H:/AIPC_Workspace/runtime_c/audit/final_ci_runtime_qualification.json` and `runtime_c/logs/final_ci_*`.
+
+No final CI-qualified SHA, independent review, release freeze or ready PR exists for this recovery. Future CI results belong in the PR body after actual verification. Proposed Milestone C.5 is planning-only; D remains unauthorized.
+
 - **Baseline `master` Commit (Milestone B Merge PR #6)**: `849c866`
 - **Feature Branch**: `gemini/aipc-2.0-milestone-c`
 - **Date**: 2026-11-15

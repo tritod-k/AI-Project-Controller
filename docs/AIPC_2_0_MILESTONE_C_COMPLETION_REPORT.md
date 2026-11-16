@@ -1,5 +1,15 @@
 # AIPC 2.0 Milestone C Completion Report — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`)
 
+## Latest recovery status — 2026-11-16
+
+**Status: BLOCKED. Phase Gate: PENDING.** Historical implementation and local regression claims below do not qualify the release. [Actions run 43772299423](https://github.com/tritod-k/AI-Project-Controller/actions/runs/43772299423), at `6223e6f4f42fac5ab2f25deb685dc73f6b330dac`, failed on Python 3.12 (`3 failed, 1260 passed, 4 skipped`) and 3.13 (`6 failed, 1257 passed, 4 skipped`). Static analysis, schema and wheel steps passed.
+
+Pinned Stable rejects installed Antigravity 1.5.9; qualification was run through sanitized subscription-only execution with Stable import origin verified. No Stable edits or Candidate orchestration imports into Stable were made. Codex qualifies, but an existing production Stable Codex worker invoker was not identified. Restore a qualified worker runtime or separately authorize a qualified controller/dispatch route before implementation.
+
+Fresh Windows Python 3.13.0 selection: `1 failed, 5 passed, 154 deselected`, exit 1. C03 still fails; its child log shows vault traceback access denial during pytest failure reporting, without establishing the initiating cause. Linux Python 3.13.18 reproduction stopped at missing `pydantic` during collection; no Linux or 3.12 acceptance claimed. Evidence and exact recovery scope are in `CURRENT_STATE.md` and `H:/AIPC_Workspace/runtime_c/`.
+
+Repair budget consumed: **0/2**. Source/tests unchanged; documentation-only recovery handoff. Original queue records preserved. No replacement CI, final review, PR, push or merge performed. Final CI and review remain UNVERIFIED; no SHA frozen. Recommended next action is to resolve the runtime blocker and resume bounded CI recovery, then freeze/review the green exact SHA and open a PR for Human Commander approval. Proposed Milestone C.5 is future planning only; do not implement C.5 or D.
+
 ## 1. Phase / Milestone
 - **Milestone**: AIPC 2.0 Milestone C — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`) + Gemini 4 Hydrogen Subscription Worker Integration
 - **Branch**: `gemini/aipc-2.0-milestone-c`

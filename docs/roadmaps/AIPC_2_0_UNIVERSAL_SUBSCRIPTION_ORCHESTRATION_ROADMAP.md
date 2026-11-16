@@ -12,6 +12,12 @@
 
 ---
 
+## Latest Milestone C release status — 2026-11-16
+
+Milestone C final bounded CI recovery is authorized by K.TRITOD, but **BLOCKED / Phase Gate PENDING**. Earlier milestone headers and historical verification claims are not current release qualification. [Actions run 43772299423](https://github.com/tritod-k/AI-Project-Controller/actions/runs/43772299423) at `6223e6f` failed both Python 3.12 and 3.13. Fresh Stable-origin subscription-only qualification rejects installed Antigravity 1.5.9; Stable remains pinned and unchanged. Repair iterations used: **0/2**. See `CURRENT_STATE.md` for observed tests, evidence and minimum recovery action. No final CI-qualified/reviewed SHA or release PASS is claimed.
+
+Future planning reference only: **Milestone C.5 — Review Governance & Adaptive Repair Budget**, proposed between C and D. It requires separate Human Commander authorization. No C.5 implementation or new architecture is authorized. D remains unauthorized. After restoring a qualified worker route, the bounded order remains: confirmed CI fixes, green Python 3.12/3.13 CI, freeze SHA, fresh independent Codex subscription review, PR, stop for Human Commander merge approval.
+
 ## 0. Why this document exists
 
 This file permanently preserves the **intended AIPC 2.0 target architecture, operating rules, roadmap, and acceptance criteria** while Phase 24 is being developed and reviewed. New Codex, Antigravity, or future agent conversations must be able to recover the vision from repository files without relying on prior chat history.

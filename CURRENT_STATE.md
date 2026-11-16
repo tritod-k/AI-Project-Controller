@@ -10,13 +10,13 @@ AI Project Controller
 AIPC 2.0 — Milestone C (C01–C03: Universal Project Support, End-to-End Automation & Self-Development Dogfooding)
 
 ## Status
-AWAITING_HUMAN_COMMANDER_MERGE_REVIEW (Milestone C `C01`–`C03` and Gemini 4 Hydrogen subscription worker integration implemented and verified on `gemini/aipc-2.0-milestone-c`)
+BLOCKED (final CI recovery: pinned Stable Controller rejects installed Antigravity 1.5.9; release qualification incomplete)
 
 ## Current Attempt
 Milestone C Attempt 01 (`gemini/aipc-2.0-milestone-c`)
 
 ## Phase Gate
-MILESTONE_C_READY_FOR_REVIEW (Final merge authority belongs exclusively to Human Commander)
+PENDING (GitHub Actions failures unresolved; final exact-SHA independent review not started)
 
 ## Last Stable Checkpoint
 - `master` baseline: `849c866` (Milestone B merge PR #6, following Milestone A merge PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`, Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
@@ -190,8 +190,23 @@ Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner
 - Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`849c866`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`, `gemini/phase-24-self-development`, `gemini/aipc-2.0-milestone-a`, `gemini/aipc-2.0-milestone-b`) are preserved intact.
 
 ## Next Action
-Resume from Pass 19 checkpoint (`8dec3c1`) on `gemini/aipc-2.0-milestone-c` after operator workstation restart. Do not start Milestone D (`D01`–`D03`) without explicit Human Commander authorization.
+Human Commander: restore a subscription worker runtime qualified by pinned Stable Controller, or authorize a separately qualified controller checkpoint/dispatch route. Resume final CI recovery from `6223e6f` plus the documentation-only recovery handoff. Preserve original queue records. Do not start Milestone C.5 or D.
 
 ## Timestamp
-2026-11-16T05:57:30+07:00
+2026-11-16T16:15:14+07:00
+
+## Final CI Recovery Handoff (2026-11-16)
+
+This section supersedes earlier readiness and aggregate regression claims for release qualification.
+
+- Recovered Candidate: `6223e6f4f42fac5ab2f25deb685dc73f6b330dac`, branch `gemini/aipc-2.0-milestone-c`, initially clean. Stable: `H:/AIPC_Workspace/stable_c`, pinned `849c86684867487f6f0ad8eb54c603cba240dd34`, clean and unchanged. Last implementation checkpoint: `8dec3c1`.
+- GitHub Actions run [43772299423](https://github.com/tritod-k/AI-Project-Controller/actions/runs/43772299423): Python 3.12 **3 failed, 1260 passed, 4 skipped**; Python 3.13 **6 failed, 1257 passed, 4 skipped**. Lint, formatting, schemas and wheel steps succeeded. No replacement CI run requested.
+- Fresh qualification executed trusted Stable code with verified import origin and `subscription_only`. Installed Antigravity `1.5.9` is BLOCKED by Stable's qualified version set (`1.5.2`, `1.5.3`, `1.5.5`); both Hydrogen and Flash worker routes are unavailable there. Codex `0.160.0` qualifies, but no production Codex worker invoker was identified in the existing Stable bridge. The Candidate accepts newer Antigravity versions; importing Candidate orchestration into Stable would violate the isolation boundary.
+- Original persistent queue still records C01-C03 COMPLETED with historical PASS receipts, predating release stabilization. Those records do not prove final CI qualification; they were preserved without replay, overwrite or promotion. No active queue attempt was found.
+- Fresh Windows Python **3.13.0** selection: **1 failed, 5 passed, 154 deselected** (exit 1). C03 forged-filename/frame-walk failure reproduces. Its retained child output shows `PermissionError: vault traceback frame access prohibited` while pytest reports a test failure; the initiating assertion/cause remains unresolved. B01 Linux liveness failures and C02 Linux/Python 3.13 failures remain undiagnosed beyond retained CI evidence.
+- Local Docker image `aipc-verify:py313-v1`: Python **3.13.18**, not 3.12. Read-only, network-disabled reproduction stopped during collection (`ModuleNotFoundError: pydantic`, exit 1); no Linux test PASS claimed. No image changes or dependency installation performed.
+- Evidence outside Git: `H:/AIPC_Workspace/runtime_c/audit/final_ci_runtime_qualification.json`, `logs/final_ci_windows_py313_reproduction.log`, `logs/final_ci_c03_criterion_child.log`, `logs/final_ci_py313_reproduction.log`.
+- Repair iterations used: **0/2**. No worker dispatch, implementation change, final review, new CI qualification, release freeze, push, PR or merge. Supervisor Python authored: **17 lines**, runtime probe only. Local operator prompts remain outside staging and commits.
+- Required fixes: diagnose and minimally repair the confirmed CI failures using a qualified AIPC-managed worker; synchronize documentation, push, require green 3.12/3.13 CI, freeze exact SHA, independently review that SHA, then open PR and stop for Human Commander merge approval.
+- Future Considerations: proposed **Milestone C.5 — Review Governance & Adaptive Repair Budget** is planning-only, separately authorized, between C and D; no implementation authorized.
 
