@@ -1948,6 +1948,161 @@ def test_b01_cli_worker_job_rejects_contract_mismatches_before_dispatch(tmp_path
     _run_bad_job("bad_val", cfg_override={"validation_commands": ["pytest -k other"]})
 
 
+@pytest.mark.parametrize(
+    ("returncode", "pid_live", "enrolled", "active_processes", "accepted"),
+    [
+        (128, False, True, 0, True),
+        (255, False, True, 0, True),
+        (255, True, True, 0, False),
+        (255, False, False, 0, False),
+        (255, False, True, 1, False),
+        (1, False, True, 0, False),
+    ],
+)
+def test_windows_taskkill_race_requires_empty_enrolled_job(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    pid_live: bool,
+    enrolled: bool,
+    active_processes: int,
+    accepted: bool,
+) -> None:
+    import aipc.adapters.subscription_worker as worker
+
+    class Job:
+        def __init__(self) -> None:
+            self.enrolled = enrolled
+
+        def active_processes(self) -> int:
+            return active_processes
+
+        def terminate_and_wait(self) -> None:
+            if active_processes:
+                raise ControllerError("job termination could not be verified")
+
+    monkeypatch.setattr(worker.os, "name", "nt")
+    monkeypatch.setattr(worker, "_pid_exists", lambda *_: pid_live)
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, returncode, stderr="taskkill failed"),
+    )
+    if accepted:
+        worker._terminate_pid_tree(12345, {}, require_tree_kill=True, job_obj=Job())  # type: ignore[arg-type]
+    else:
+        with pytest.raises(ControllerError):
+            worker._terminate_pid_tree(12345, {}, require_tree_kill=True, job_obj=Job())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("returncode", [128, 255])
+@pytest.mark.parametrize("drained", [True, False])
+def test_windows_missing_root_terminates_and_verifies_enrolled_job(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, drained: bool
+) -> None:
+    import aipc.adapters.subscription_worker as worker
+
+    class Job:
+        enrolled = True
+        active = 1
+
+        def active_processes(self) -> int:
+            return self.active
+
+        def terminate_and_wait(self) -> None:
+            if drained:
+                self.active = 0
+
+    job = Job()
+    monkeypatch.setattr(worker.os, "name", "nt")
+    monkeypatch.setattr(worker, "_pid_exists", lambda *_: False)
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, returncode, stderr="root absent"),
+    )
+    if drained:
+        worker._terminate_pid_tree(12345, {}, require_tree_kill=True, job_obj=job)  # type: ignore[arg-type]
+        assert job.active == 0
+    else:
+        with pytest.raises(ControllerError, match="taskkill /F /T failed"):
+            worker._terminate_pid_tree(12345, {}, require_tree_kill=True, job_obj=job)  # type: ignore[arg-type]
+
+
+def test_cleanup_reaps_only_owned_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cleanup must leave sibling subprocess exit statuses to their owners."""
+    import aipc.adapters.subscription_worker as worker
+
+    calls: list[int] = []
+    monkeypatch.setattr(worker.os, "name", "posix")
+    monkeypatch.setattr(worker.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(worker.os, "killpg", lambda *_: None, raising=False)
+    monkeypatch.setattr(worker.os, "WNOHANG", 1, raising=False)
+
+    def waitpid(target: int, _flags: int) -> tuple[int, int]:
+        calls.append(target)
+        return (0, 0)
+
+    monkeypatch.setattr(worker.os, "waitpid", waitpid, raising=False)
+    monkeypatch.setattr(worker, "_pid_exists", lambda *_: False)
+    monkeypatch.setattr(worker, "_posix_pgid_exists", lambda *_: False)
+    worker._terminate_pid_tree(12345, {})
+    assert calls == [-12345, -12345]
+
+
+def test_best_effort_cleanup_waits_for_owned_descendants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enrollment failure cleanup waits for asynchronous SIGKILL delivery."""
+    import aipc.adapters.subscription_worker as worker
+
+    monkeypatch.setattr(worker.os, "name", "posix")
+    monkeypatch.setattr(worker.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(worker.os, "killpg", lambda *_: None, raising=False)
+    monkeypatch.setattr(worker.os, "WNOHANG", 1, raising=False)
+    monkeypatch.setattr(worker.os, "waitpid", lambda *_: (0, 0), raising=False)
+    monkeypatch.setattr(worker, "_pid_exists", lambda *_: False)
+    group_live = iter([True, True, False])
+    monkeypatch.setattr(worker, "_posix_pgid_exists", lambda *_: next(group_live))
+    sleeps: list[float] = []
+    monkeypatch.setattr(worker.time, "sleep", sleeps.append)
+
+    worker._terminate_pid_tree(12345, {}, require_tree_kill=False)
+
+    assert sleeps == [0.05, 0.05]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_cleanup_preserves_sibling_nonzero_exit_status() -> None:
+    env = build_sanitized_child_env()
+    sibling = subprocess.Popen(
+        [sys.executable, "-B", "-c", "raise SystemExit(23)"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
+    owned = subprocess.Popen(
+        [sys.executable, "-B", "-c", "import time; time.sleep(30)"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        # Wait for exit without collecting the sibling's wait status.
+        import time
+
+        for _ in range(100):
+            stat = Path(f"/proc/{sibling.pid}/stat")
+            if stat.exists() and stat.read_text().split(")", 1)[1].split()[0] == "Z":
+                break
+            time.sleep(0.01)
+        _terminate_pid_tree(owned.pid, env, require_tree_kill=True)
+        assert sibling.wait(timeout=5) == 23
+    finally:
+        if owned.poll() is None:
+            owned.kill()
+        owned.wait(timeout=5)
+        if sibling.poll() is None:
+            sibling.kill()
+        sibling.wait(timeout=5)
+
+
 def test_b01_cli_worker_job_recovery_uses_canonical_recovery_manager(tmp_path: Path) -> None:
     """MC-RR-06: valid RecoveryDecision succeeds; forged HEAD sha or bad identity fails."""
     import hashlib

@@ -175,6 +175,165 @@ def _setup_candidate_workspace(tmp_path: Path) -> tuple[Path, Path, TrustedHarne
     return stable_root, candidate_root, manifest
 
 
+_AUDIT_TEST_PATH = "tests/trusted/test_contract.py"
+_AUDIT_TEST_NODE = f"{_AUDIT_TEST_PATH}::test_trusted_contract"
+
+
+def _run_audit_criterion(
+    candidate: Path, manifest: TrustedHarnessManifest, sha: str
+) -> tuple[CriterionExecutionReceipt, ...]:
+    return TrustedAcceptanceHarnessValidator().execute_and_record_criteria(
+        manifest=manifest,
+        workspace=candidate,
+        candidate_sha=sha,
+        criterion_test_nodes={"AC-01": _AUDIT_TEST_NODE},
+    )
+
+
+@pytest.mark.parametrize("bad_state", ["wrong_head", "dirty_source"])
+def test_mc_audit_rejects_unverified_candidate_before_execution(
+    tmp_path: Path, bad_state: str
+) -> None:
+    _, candidate, manifest = _setup_candidate_workspace(tmp_path)
+    sha = _git_head_sha(candidate) if bad_state == "dirty_source" else "f" * 40
+    source = candidate / "src/aipc/__init__.py"
+    original = source.read_bytes()
+    if bad_state == "dirty_source":
+        source.write_bytes(b"VALUE = 17\n")
+    try:
+        with pytest.raises(ValueError, match="CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH"):
+            _run_audit_criterion(candidate, manifest, sha)
+    finally:
+        source.write_bytes(original)
+
+
+def test_mc_audit_operator_tests_survive_committed_candidate_test_edit(tmp_path: Path) -> None:
+    _, candidate, manifest = _setup_candidate_workspace(tmp_path)
+    candidate_test = candidate / _AUDIT_TEST_PATH
+    candidate_test.write_text(
+        "def test_trusted_contract():\n    result = int('2')\n    assert result == 3\n",
+        encoding="utf-8",
+    )
+    sha = _init_git_repo(candidate)
+
+    (receipt,) = _run_audit_criterion(candidate, manifest, sha)
+
+    assert receipt.passed is True
+    assert receipt.test_file_sha256 == manifest.pinned_file_sha256[_AUDIT_TEST_PATH]
+
+
+def test_mc_audit_signed_receipt_binds_source_and_operator_test_digests(tmp_path: Path) -> None:
+    _, candidate, manifest = _setup_candidate_workspace(tmp_path)
+    (receipt,) = _run_audit_criterion(candidate, manifest, _git_head_sha(candidate))
+    assert manifest.trusted_manifest_path is not None
+    store = Path(manifest.trusted_manifest_path).parent
+    keyring = TrustedExecutionKeyring.load_or_create(store / "digest-test-keys.json")
+    key_id, mac = keyring.sign(manifest, receipt)
+    assert keyring.verify(manifest, receipt, key_id=key_id, controller_mac=mac)
+    for field in ("candidate_sha", "source_tree_sha256", "test_file_sha256"):
+        changed = receipt.model_copy(update={field: "f" * len(getattr(receipt, field))})
+        assert not keyring.verify(manifest, changed, key_id=key_id, controller_mac=mac)
+
+
+def test_mc_audit_corrupted_external_operator_blob_blocks_execution(tmp_path: Path) -> None:
+    _, candidate, manifest = _setup_candidate_workspace(tmp_path)
+    assert manifest.trusted_manifest_path is not None
+    blob = (
+        Path(manifest.trusted_manifest_path).parent
+        / "operator-test-blobs"
+        / manifest.pinned_file_sha256[_AUDIT_TEST_PATH]
+    )
+    assert not blob.is_relative_to(candidate)
+    assert hashlib.sha256(blob.read_bytes()).hexdigest() == blob.name
+    # Simulate external store corruption by an actor with operator permissions.
+    blob.chmod(0o600)
+    blob.write_bytes(b"def test_trusted_contract():\n    assert False\n")
+    with pytest.raises(ValueError, match="operator test digest mismatch"):
+        _run_audit_criterion(candidate, manifest, _git_head_sha(candidate))
+
+
+@pytest.mark.parametrize("restore_source", [False, True])
+def test_mc_audit_candidate_source_mutation_at_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_source: bool
+) -> None:
+    _, candidate, _ = _setup_candidate_workspace(tmp_path)
+    source = candidate / "src/aipc/__init__.py"
+    original = b"VALUE = 24\n"
+    source.write_bytes(original)
+    (candidate / _AUDIT_TEST_PATH).write_text(
+        "def test_trusted_contract():\n    from aipc import VALUE\n    assert VALUE == 24\n",
+        encoding="utf-8",
+    )
+    sha = _init_git_repo(candidate)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate,
+        protected_rel_paths=(_AUDIT_TEST_PATH,),
+    )
+    real_run = subprocess.run
+
+    def mutate_at_launch(argv, *args, **kwargs):
+        if not any(str(arg).endswith("_trusted_criterion_runner.py") for arg in argv):
+            return real_run(argv, *args, **kwargs)
+        source.write_bytes(b"VALUE = 25\n")
+        try:
+            return real_run(argv, *args, **kwargs)
+        finally:
+            if restore_source:
+                source.write_bytes(original)
+
+    monkeypatch.setattr(subprocess, "run", mutate_at_launch)
+    if restore_source:
+        (receipt,) = _run_audit_criterion(candidate, manifest, sha)
+        assert receipt.passed is True
+        assert receipt.candidate_sha == sha
+        assert receipt.source_tree_sha256 is not None
+    else:
+        with pytest.raises(ValueError, match="CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH"):
+            _run_audit_criterion(candidate, manifest, sha)
+
+
+def test_mc_audit_snapshot_import_precedes_site_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, candidate, _ = _setup_candidate_workspace(tmp_path)
+    (candidate / "src/aipc/__init__.py").write_text("VALUE = 24\n", encoding="utf-8")
+    (candidate / _AUDIT_TEST_PATH).write_text(
+        "def test_trusted_contract():\n    from aipc import VALUE\n    assert VALUE == 24\n",
+        encoding="utf-8",
+    )
+    sha = _init_git_repo(candidate)
+    manifest = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c",
+        workspace=candidate,
+        protected_rel_paths=(_AUDIT_TEST_PATH,),
+    )
+    site_packages = tmp_path / "site-packages"
+    installed_package = site_packages / "aipc"
+    installed_package.mkdir(parents=True)
+    (installed_package / "__init__.py").write_text("VALUE = 25\n", encoding="utf-8")
+    real_run = subprocess.run
+
+    def add_site_packages_at_launch(argv, *args, **kwargs):
+        for arg in argv:
+            if str(arg).endswith("_trusted_criterion_runner.py"):
+                runner = Path(arg)
+                # Simulate an installed wheel without modifying the test interpreter.
+                runner.write_text(
+                    f"import sys\nsys.path.append({str(site_packages)!r})\n"
+                    + runner.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+                break
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", add_site_packages_at_launch)
+    (receipt,) = _run_audit_criterion(candidate, manifest, sha)
+    assert receipt.passed is True
+
+
 def test_review_package_lazy_exports_c03_symbols() -> None:
     expected_names = (
         "TrustedHarnessManifest",
@@ -3071,7 +3230,7 @@ def test_execute_and_record_criteria_unlinks_runner_and_rejects_forged_outcome(
         ),
         encoding="utf-8",
     )
-    cand_sha = _git_head_sha(candidate_root)
+    cand_sha = _init_git_repo(candidate_root)
     manifest = build_trusted_harness_manifest(
         project_id="aipc",
         milestone_id="milestone-c",
@@ -3118,7 +3277,7 @@ def test_execute_and_record_criteria_rejects_conftest_plugin_exitstatus_and_stdl
         ),
         encoding="utf-8",
     )
-    cand_sha = _git_head_sha(candidate_root)
+    cand_sha = _init_git_repo(candidate_root)
     manifest = build_trusted_harness_manifest(
         project_id="aipc",
         milestone_id="milestone-c",
@@ -3183,7 +3342,6 @@ def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspecti
     tmp_path: Path,
 ) -> None:
     _, candidate_root, _ = _setup_candidate_workspace(tmp_path)
-    cand_sha = _git_head_sha(candidate_root)
 
     hook_test = candidate_root / "tests" / "trusted" / "test_hook_bypass.py"
     hook_node = "tests/trusted/test_hook_bypass.py::test_hook_bypass_fails"
@@ -3378,6 +3536,7 @@ def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspecti
         encoding="utf-8",
     )
 
+    cand_sha = _init_git_repo(candidate_root)
     manifest = build_trusted_harness_manifest(
         project_id="aipc",
         milestone_id="milestone-c",
@@ -3413,6 +3572,7 @@ def test_execute_and_record_criteria_blocks_pytest_hooks_and_closure_introspecti
             attempt=1,
         )
     hook_test.unlink()
+    cand_sha = _init_git_repo(candidate_root)
 
     fail_receipts = validator.execute_and_record_criteria(
         manifest=manifest,

@@ -6,12 +6,14 @@ import ast
 import fnmatch
 import hashlib
 import hmac
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from uuid import uuid4
@@ -46,6 +48,7 @@ from aipc.version.models import Commit
 UNAUTHORIZED_MILESTONE_D_BLOCKED = "UNAUTHORIZED_MILESTONE_D_BLOCKED"
 TRUSTED_HARNESS_TAMPER_DETECTED = "TRUSTED_HARNESS_TAMPER_DETECTED"
 REWARD_HACKING_DETECTED = "REWARD_HACKING_DETECTED"
+_CANDIDATE_GIT_MISMATCH = "CANDIDATE_WORKTREE_DIRTY_OR_SHA_MISMATCH"
 
 AUTHORIZED_MILESTONE_IDS: tuple[str, ...] = (
     "phase-24",
@@ -254,7 +257,9 @@ class TrustedHarnessManifest(CanonicalRecord):
 _SNAPSHOT_IGNORED_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv"})
 
 
-def _snapshot_workspace_files(workspace_root: Path) -> dict[str, str]:
+def _snapshot_workspace_files(
+    workspace_root: Path, *, ignored_dirs: frozenset[str] = _SNAPSHOT_IGNORED_DIRS
+) -> dict[str, str]:
     """Capture normalized relative path -> SHA-256 hex digest for all workspace files."""
     snapshot: dict[str, str] = {}
     if not workspace_root.exists() or not workspace_root.is_dir():
@@ -263,11 +268,141 @@ def _snapshot_workspace_files(workspace_root: Path) -> dict[str, str]:
         if not path.is_file():
             continue
         rel = path.relative_to(workspace_root)
-        if any(part in _SNAPSHOT_IGNORED_DIRS for part in rel.parts):
+        if any(part in ignored_dirs for part in rel.parts):
             continue
         norm_rel = _normalize_rel_path(rel.as_posix())
         snapshot[norm_rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return snapshot
+
+
+def _operator_test_blob(manifest_path: Path, workspace: Path, sha256: str) -> Path:
+    store = manifest_path.parent / "operator-test-blobs"
+    blob = store / sha256
+    if store.resolve() != store or blob.resolve() != blob or blob.is_relative_to(workspace):
+        raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: unsafe operator test store")
+    return blob
+
+
+def _workspace_file(path: str) -> PurePosixPath:
+    rel = PurePosixPath(path)
+    if (
+        rel.as_posix() != path
+        or rel.is_absolute()
+        or not rel.parts
+        or ".." in rel.parts
+        or any(part.casefold() == ".git" for part in rel.parts)
+        or "\\" in path
+        or ":" in path
+    ):
+        raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: invalid relative path")
+    return rel
+
+
+def _read_operator_test(manifest: TrustedHarnessManifest, workspace: Path, test_file: str) -> bytes:
+    _workspace_file(test_file)
+    expected = manifest.pinned_file_sha256[test_file]
+    assert manifest.trusted_manifest_path is not None
+    manifest_path = Path(manifest.trusted_manifest_path).resolve()
+    try:
+        content = _operator_test_blob(manifest_path, workspace, expected).read_bytes()
+    except OSError as exc:
+        raise ValueError(
+            f"{TRUSTED_HARNESS_TAMPER_DETECTED}: operator test blob unavailable"
+        ) from exc
+    if hashlib.sha256(content).hexdigest() != expected:
+        raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: operator test digest mismatch")
+    return content
+
+
+def _candidate_git(workspace: Path, *args: str, input_data: bytes | None = None) -> bytes:
+    env = {
+        name: value
+        for name, value in build_sanitized_child_env().items()
+        if not name.upper().startswith("GIT_")
+    }
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "--no-replace-objects",
+                "-c",
+                "core.fsmonitor=false",
+                *args,
+            ],
+            cwd=workspace,
+            env=env,
+            stdin=subprocess.DEVNULL if input_data is None else None,
+            input=input_data,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: Git unavailable") from exc
+    if result.returncode != 0:
+        raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: Git command failed")
+    return result.stdout
+
+
+def _observe_candidate_tree(workspace: Path, candidate_sha: str) -> tuple[str, bytes]:
+    root = _candidate_git(workspace, "rev-parse", "--show-toplevel").decode().rstrip("\r\n")
+    head = _candidate_git(workspace, "rev-parse", "--verify", "HEAD").decode().strip()
+    if Path(root).resolve() != workspace or head != candidate_sha:
+        raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: expected candidate HEAD")
+    status = _candidate_git(
+        workspace, "status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules=none"
+    )
+    index_files = _candidate_git(workspace, "ls-files", "-v", "-z")
+    if status or any(
+        line[:1] == b"S" or line[:1].islower() for line in index_files.split(b"\0") if line
+    ):
+        raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: candidate checkout is dirty or masked")
+    tree = _candidate_git(workspace, "ls-tree", "-r", "-z", head)
+    return head, tree
+
+
+def _read_candidate_snapshot(workspace: Path, tree: bytes) -> dict[str, tuple[bytes, bool]]:
+    """Read raw Git blobs so Git attributes and checkout filters cannot transform them."""
+    entries: list[tuple[str, bytes, bool]] = []
+    for entry in tree.split(b"\0")[:-1]:
+        header, name = entry.split(b"\t", 1)
+        mode, kind, object_id = header.split()
+        rel = _workspace_file(name.decode()).as_posix()
+        if kind != b"blob" or mode not in (b"100644", b"100755") or rel.endswith((".pyc", ".pyo")):
+            raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: unsupported candidate tree entry")
+        entries.append((rel, object_id, mode == b"100755"))
+
+    snapshot: dict[str, tuple[bytes, bool]] = {}
+    objects = b"".join(object_id + b"\n" for _, object_id, _ in entries)
+    stream = io.BytesIO(_candidate_git(workspace, "cat-file", "--batch", input_data=objects))
+    for rel, object_id, executable in entries:
+        header = stream.readline().split()
+        if len(header) != 3 or header[:2] != [object_id, b"blob"] or not header[2].isdigit():
+            raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: Git blob unavailable")
+        size = int(header[2])
+        content = stream.read(size)
+        blob_hash = hashlib.new("sha1" if len(object_id) == 40 else "sha256")
+        blob_hash.update(f"blob {size}\0".encode("ascii"))
+        blob_hash.update(content)
+        if stream.read(1) != b"\n" or blob_hash.hexdigest().encode("ascii") != object_id:
+            raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: Git blob differs from tree")
+        snapshot[rel] = (content, executable)
+    return snapshot
+
+
+def _write_execution_snapshot(
+    root: Path, files: dict[str, tuple[bytes, bool]], test_file: str, test_bytes: bytes
+) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    for rel, (content, executable) in (files | {test_file: (test_bytes, False)}).items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("xb") as output:
+            output.write(content)
+        target.chmod(0o555 if executable else 0o444)
+        digests[rel] = hashlib.sha256(content).hexdigest()
+    return digests
 
 
 def build_trusted_harness_manifest(
@@ -290,14 +425,20 @@ def build_trusted_harness_manifest(
     assert_milestone_c_scope_authorized(milestone_id)
     workspace_root = Path(workspace).resolve()
     pinned: dict[str, str] = {}
+    operator_tests: dict[str, bytes] = {}
     for rel_path in protected_rel_paths:
         norm_rel = _normalize_rel_path(rel_path)
+        _workspace_file(norm_rel)
         target = (workspace_root / norm_rel).resolve()
         if not target.is_relative_to(workspace_root):
             raise ValueError(f"Protected path escapes workspace: {rel_path}")
         if not target.is_file():
             raise FileNotFoundError(f"Protected file not found in workspace: {norm_rel}")
-        pinned[norm_rel] = hashlib.sha256(target.read_bytes()).hexdigest()
+        content = target.read_bytes()
+        file_digest = hashlib.sha256(content).hexdigest()
+        pinned[norm_rel] = file_digest
+        if norm_rel.startswith("tests/") and norm_rel.endswith(".py"):
+            operator_tests[file_digest] = content
 
     pre_snap = _snapshot_workspace_files(workspace_root)
     resolved_manifest_id = manifest_id or f"manifest-{uuid4().hex[:12]}"
@@ -355,6 +496,27 @@ def build_trusted_harness_manifest(
     )
     out_path = Path(trusted_path_str)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    for file_digest, content in operator_tests.items():
+        blob = _operator_test_blob(out_path, workspace_root, file_digest)
+        blob.parent.mkdir(exist_ok=True)
+        if blob.is_file() and blob.read_bytes() == content:
+            blob.chmod(0o444)
+            continue
+        with tempfile.NamedTemporaryFile(dir=blob.parent, delete=False) as pending:
+            pending_path = Path(pending.name)
+            try:
+                pending.write(content)
+                pending.flush()
+                os.fsync(pending.fileno())
+            except BaseException:
+                pending.close()
+                pending_path.unlink(missing_ok=True)
+                raise
+        try:
+            pending_path.replace(blob)
+            blob.chmod(0o444)
+        finally:
+            pending_path.unlink(missing_ok=True)
     out_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
     return manifest
 
@@ -488,6 +650,14 @@ class CriterionExecutionReceipt(CanonicalRecord):
     phase_id: str | None = Field(default=None)
     task_id: str | None = Field(default=None)
     attempt: StrictInt | None = Field(default=None, ge=1)
+    source_tree_sha256: Digest | None = None
+    test_file_sha256: Digest | None = None
+
+    @model_validator(mode="after")
+    def validate_execution_binding(self) -> Self:
+        if (self.source_tree_sha256 is None) != (self.test_file_sha256 is None):
+            raise ValueError("Source tree and test file digests must be supplied together")
+        return self
 
 
 def _retained_exec_record_filename(
@@ -673,6 +843,8 @@ class TrustedExecutionKeyring:
             receipt.task_id,
             receipt.attempt,
         )
+        if receipt.source_tree_sha256 is not None or receipt.test_file_sha256 is not None:
+            payload = (*payload, receipt.source_tree_sha256, receipt.test_file_sha256)
         encoded = json.dumps(
             payload,
             sort_keys=True,
@@ -728,6 +900,8 @@ def record_trusted_criterion_execution(
     task_id: str | None = "task-c03",
     attempt: int | None = 1,
     keyring: TrustedExecutionKeyring | None = None,
+    source_tree_sha256: str | None = None,
+    test_file_sha256: str | None = None,
 ) -> tuple[CriterionExecutionReceipt, Path]:
     """Persist a trusted criterion execution record and log outside candidate worktree."""
     if manifest.trusted_manifest_path is None or manifest.manifest_digest is None:
@@ -740,6 +914,10 @@ def record_trusted_criterion_execution(
     ):
         raise ValueError(f"Invalid criterion_id for execution record: {criterion_id!r}")
     norm_node = _normalize_test_node_id(test_node_id)
+    if test_file_sha256 is not None and test_file_sha256 != manifest.pinned_file_sha256.get(
+        norm_node.split("::", 1)[0]
+    ):
+        raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: execution test digest mismatch")
     log_sha256 = hashlib.sha256(execution_log.encode("utf-8")).hexdigest()
     receipt = CriterionExecutionReceipt(
         criterion_id=criterion_id,
@@ -752,6 +930,8 @@ def record_trusted_criterion_execution(
         phase_id=phase_id,
         task_id=task_id,
         attempt=attempt,
+        source_tree_sha256=source_tree_sha256,
+        test_file_sha256=test_file_sha256,
     )
     active_keyring = keyring or TrustedExecutionKeyring.load_or_create(
         _default_keyring_path(manifest)
@@ -1536,6 +1716,9 @@ class TrustedAcceptanceHarnessValidator:
         sanitized_env = build_sanitized_child_env(parent_env)
         assert_child_env_isolated(sanitized_env)
         py_exe = str(python_executable) if python_executable is not None else sys.executable
+        observed_head, tree = _observe_candidate_tree(workspace_root, candidate_sha)
+        source_tree_sha256 = hashlib.sha256(tree).hexdigest()
+        candidate_snapshot = _read_candidate_snapshot(workspace_root, tree)
 
         receipts: list[CriterionExecutionReceipt] = []
         for cid, node_list in norm_nodes_map.items():
@@ -1552,25 +1735,17 @@ class TrustedAcceptanceHarnessValidator:
                     or not norm_test_file.endswith(".py")
                 ):
                     raise ValueError(f"Invalid test_node_id '{test_node_id}' for criterion '{cid}'")
-                test_path = (workspace_root / norm_test_file).resolve()
-                if not test_path.is_relative_to(workspace_root) or not test_path.is_file():
-                    raise ValueError(
-                        f"Test file not found for criterion '{cid}': '{norm_test_file}'"
-                    )
-                if (
-                    norm_test_file not in manifest.pinned_file_sha256
-                    or not any(
-                        fnmatch.fnmatchcase(norm_test_file, glob_pat)
-                        for glob_pat in manifest.protected_harness_globs
-                    )
-                    or hashlib.sha256(test_path.read_bytes()).hexdigest()
-                    != manifest.pinned_file_sha256[norm_test_file]
+                if norm_test_file not in manifest.pinned_file_sha256 or not any(
+                    fnmatch.fnmatchcase(norm_test_file, glob_pat)
+                    for glob_pat in manifest.protected_harness_globs
                 ):
                     raise ValueError(
                         f"{TRUSTED_HARNESS_TAMPER_DETECTED}: criterion test file "
                         f"'{norm_test_file}' must be pinned in manifest"
                     )
-                source = test_path.read_text(encoding="utf-8")
+                test_bytes = _read_operator_test(manifest, workspace_root, norm_test_file)
+                test_file_sha256 = manifest.pinned_file_sha256[norm_test_file]
+                source = test_bytes.decode("utf-8")
                 if not _test_function_exists_in_source(source, func_name):
                     raise ValueError(
                         f"Test function '{func_name}' not found in '{norm_test_file}' for '{cid}'"
@@ -1584,12 +1759,19 @@ class TrustedAcceptanceHarnessValidator:
 
                 with tempfile.TemporaryDirectory(prefix="aipc-crit-iso-") as tmp_iso:
                     iso_root = Path(tmp_iso).resolve()
+                    execution_root = iso_root / "snapshot"
+                    execution_root.mkdir()
+                    snapshot = _write_execution_snapshot(
+                        execution_root, candidate_snapshot, norm_test_file, test_bytes
+                    )
+                    _scan_candidate_runner_shadowing(execution_root)
+                    test_path = execution_root / norm_test_file
                     boot_dir = iso_root / "boot"
                     boot_dir.mkdir()
                     candidate_src = (
-                        workspace_root / "src"
-                        if (workspace_root / "src").is_dir()
-                        else workspace_root
+                        execution_root / "src"
+                        if (execution_root / "src").is_dir()
+                        else execution_root
                     )
                     (boot_dir / "scratch").mkdir(parents=True, exist_ok=True)
                     payload_path = boot_dir / "scratch" / "_aipc_runner_payload.py"
@@ -1607,7 +1789,7 @@ class TrustedAcceptanceHarnessValidator:
                         [
                             "def _run_crit():",
                             "    import os, sys",
-                            f"    _ws_str = {str(workspace_root)!r}",
+                            f"    _ws_str = {str(execution_root)!r}",
                             "    _ws_norm = os.path.normcase(os.path.realpath(_ws_str))",
                             "    def _is_under_ws(path_str):",
                             "        if not path_str:",
@@ -1756,6 +1938,8 @@ class TrustedAcceptanceHarnessValidator:
                             "    import ast as _ast",
                             "    import _pytest.assertion.rewrite as _par",
                             "    _p_bytes = pathlib.Path(_test_file_abs).read_bytes()",
+                            f"    if hashlib.sha256(_p_bytes).hexdigest() != {test_file_sha256!r}:",
+                            "        raise _b_ValueError('Operator test digest mismatch')",
                             "    _p_mod_co = compile(_p_bytes, _test_file_abs, 'exec')",
                             "    _rw_tree = _ast.parse(_p_bytes, _test_file_abs)",
                             "    _par.rewrite_asserts(",
@@ -2653,11 +2837,11 @@ class TrustedAcceptanceHarnessValidator:
                             "        _sc_codes,",
                             "        _sc_chk_co,",
                             "    )",
+                            # Expose the snapshot only after trusted bootstrap, ahead of wheels.
                             "    _ws_src = os.path.join(_ws_str, 'src')",
-                            "    if os.path.isdir(_ws_src) and _ws_src not in sys.path:",
-                            "        sys.path.append(_ws_src)",
-                            "    if _ws_str not in sys.path:",
-                            "        sys.path.append(_ws_str)",
+                            "    sys.path.insert(0, _ws_str)",
+                            "    if os.path.isdir(_ws_src):",
+                            "        sys.path.insert(0, _ws_src)",
                             "    _args = [",
                             "        '--noconftest', '-p', 'no:cacheprovider', '-v',",
                             "        sys.argv[1],",
@@ -2715,9 +2899,14 @@ class TrustedAcceptanceHarnessValidator:
                     exec_env["TMPDIR"] = scratch_tmp
                     exec_env["TEMP"] = scratch_tmp
                     exec_env["TMP"] = scratch_tmp
+                    if _observe_candidate_tree(workspace_root, observed_head) != (
+                        observed_head,
+                        tree,
+                    ):
+                        raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: source tree changed")
                     proc = subprocess.run(
                         [py_exe, "-P", "-B", str(runner_script), test_node_id],
-                        cwd=str(workspace_root),
+                        cwd=str(execution_root),
                         env=exec_env,
                         stdin=subprocess.DEVNULL,
                         capture_output=True,
@@ -2725,6 +2914,16 @@ class TrustedAcceptanceHarnessValidator:
                         timeout=timeout_seconds,
                         check=False,
                     )
+                    if _observe_candidate_tree(workspace_root, observed_head) != (
+                        observed_head,
+                        tree,
+                    ):
+                        raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: source tree changed")
+                    after_snapshot = _snapshot_workspace_files(
+                        execution_root, ignored_dirs=frozenset()
+                    )
+                    if after_snapshot != snapshot:
+                        raise ValueError(f"{_CANDIDATE_GIT_MISMATCH}: execution snapshot changed")
                     outcome_data: dict[str, object] = {}
                     mac_valid = False
                     if outcome_path.is_file():
@@ -2777,7 +2976,7 @@ class TrustedAcceptanceHarnessValidator:
                 receipt, _ = record_trusted_criterion_execution(
                     manifest,
                     criterion_id=cid,
-                    candidate_sha=candidate_sha,
+                    candidate_sha=observed_head,
                     test_node_id=test_node_id,
                     passed=passed,
                     exit_code=int(proc.returncode),
@@ -2786,6 +2985,8 @@ class TrustedAcceptanceHarnessValidator:
                     task_id=task_id,
                     attempt=attempt,
                     keyring=keyring,
+                    source_tree_sha256=source_tree_sha256,
+                    test_file_sha256=test_file_sha256,
                 )
                 receipts.append(receipt)
 
@@ -2807,6 +3008,7 @@ class TrustedAcceptanceHarnessValidator:
         criterion_execution_receipts: tuple[CriterionExecutionReceipt, ...] = (),
         criterion_test_nodes: Mapping[str, str | Sequence[str]] | None = None,
         keyring: TrustedExecutionKeyring | None = None,
+        require_source_bound_receipts: bool = False,
     ) -> TrustedAcceptanceEvaluation:
         """Evaluate candidate changes and test evidence against TrustedHarnessManifest."""
         assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
@@ -3038,6 +3240,14 @@ class TrustedAcceptanceHarnessValidator:
                 and (not rec.passed or rec.exit_code != 0)
             }
 
+            @cache
+            def _observed_source_tree_sha256() -> str | None:
+                try:
+                    _, tree = _observe_candidate_tree(workspace_root, candidate_sha)
+                except ValueError:
+                    return None
+                return hashlib.sha256(tree).hexdigest()
+
             def _verify_test_node(test_node_id: str) -> str | None:
                 parts = test_node_id.split("::")
                 if len(parts) < 2:
@@ -3205,6 +3415,14 @@ class TrustedAcceptanceHarnessValidator:
                     norm_test_file = _verify_test_node(retained_rec.test_node_id)
                     if norm_test_file is None:
                         return None
+                    if require_source_bound_receipts or retained_rec.source_tree_sha256 is not None:
+                        if (
+                            retained_rec.source_tree_sha256 is None
+                            or retained_rec.source_tree_sha256 != _observed_source_tree_sha256()
+                            or retained_rec.test_file_sha256
+                            != manifest.pinned_file_sha256[norm_test_file]
+                        ):
+                            return None
                     if cid_exec_receipts and not any(
                         rec == retained_rec for rec in cid_exec_receipts
                     ):
@@ -3642,6 +3860,7 @@ class SelfDevelopmentDogfoodingCoordinator:
             review_context=gate_ctx,
             criterion_execution_receipts=effective_exec_receipts,
             criterion_test_nodes=criterion_test_nodes,
+            require_source_bound_receipts=True,
         )
 
         blockers: list[str] = []

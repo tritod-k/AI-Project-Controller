@@ -602,24 +602,28 @@ class _WindowsKillOnCloseJob:
             return 0
         return int(acct.ActiveProcesses)
 
+    def terminate_and_wait(self) -> None:
+        """Terminate the enrolled tree and independently verify job exhaustion."""
+        if os.name != "nt" or self._handle is None:
+            raise ControllerError("Windows Job Object unavailable for termination verification")
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        if not k32.TerminateJobObject(self._handle, 1):
+            raise ControllerError("TerminateJobObject failed")
+        for _ in range(20):
+            if self.active_processes() == 0:
+                return
+            time.sleep(0.05)
+        raise ControllerError(
+            "Windows Job Object still has active processes after TerminateJobObject"
+        )
+
     def close(self) -> None:
         if os.name != "nt" or self._handle is None:
             return
         k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         h_job = self._handle
         try:
-            ok = k32.TerminateJobObject(h_job, 1)
-            if self._strict and not ok:
-                raise ControllerError("TerminateJobObject failed")
-            for _ in range(20):
-                if self.active_processes() == 0:
-                    break
-                time.sleep(0.05)
-            else:
-                if self._strict and self.active_processes() > 0:
-                    raise ControllerError(
-                        "Windows Job Object still has active processes after TerminateJobObject"
-                    )
+            self.terminate_and_wait()
         finally:
             self._handle = None
             k32.CloseHandle(h_job)
@@ -654,15 +658,23 @@ def _terminate_pid_tree(
                     f"Failed to terminate worker process tree for PID {pid}: {kill_err}"
                 ) from kill_err
             if res is not None and res.returncode != 0:
-                already_gone = (
-                    res.returncode == 128
+                missing_root = (
+                    res.returncode in (128, 255)
                     and not _pid_exists(pid, env)
                     and job_obj is not None
                     and job_obj.enrolled
                 )
+                if missing_root and job_obj is not None:
+                    # taskkill cannot find descendants once their root has exited.
+                    # The enrolled Job Object remains authoritative for that tree.
+                    job_obj.terminate_and_wait()
+                already_gone = (
+                    missing_root and job_obj is not None and job_obj.active_processes() == 0
+                )
                 if not already_gone:
                     raise ControllerError(
-                        f"taskkill /F /T failed (rc={res.returncode}) for PID {pid}"
+                        f"taskkill /F /T failed (rc={res.returncode}) for PID {pid}: "
+                        f"{(res.stderr or '').strip()}"
                     )
             elif _pid_exists(pid, env):
                 rc = res.returncode if res is not None else "none"
@@ -679,28 +691,27 @@ def _terminate_pid_tree(
     if hasattr(os, "waitpid") and wnohang is not None:
         for _ in range(32):
             try:
-                wpid, _ = os.waitpid(-1, wnohang)
+                wpid, _ = os.waitpid(-pid, wnohang)
             except (ChildProcessError, OSError):
                 break
             if wpid == 0:
                 break
-    if require_tree_kill:
-        for _ in range(20):
-            if hasattr(os, "waitpid") and wnohang is not None:
-                for _ in range(32):
-                    try:
-                        wpid, _ = os.waitpid(-1, wnohang)
-                    except (ChildProcessError, OSError):
-                        break
-                    if wpid == 0:
-                        break
-            if not _pid_exists(pid, env) and not _posix_pgid_exists(pid):
-                return
-            time.sleep(0.05)
-        if _pid_exists(pid, env) or _posix_pgid_exists(pid):
-            raise ControllerError(
-                f"POSIX process group {pid} still has active processes after SIGKILL"
-            )
+    # SIGKILL delivery is asynchronous. Even best-effort cleanup must give owned
+    # descendants time to exit before returning from an enrollment failure.
+    for _ in range(20):
+        if hasattr(os, "waitpid") and wnohang is not None:
+            for _ in range(32):
+                try:
+                    wpid, _ = os.waitpid(-pid, wnohang)
+                except (ChildProcessError, OSError):
+                    break
+                if wpid == 0:
+                    break
+        if not _pid_exists(pid, env) and not _posix_pgid_exists(pid):
+            return
+        time.sleep(0.05)
+    if require_tree_kill and (_pid_exists(pid, env) or _posix_pgid_exists(pid)):
+        raise ControllerError(f"POSIX process group {pid} still has active processes after SIGKILL")
 
 
 def _default_validation_command_runner(

@@ -70,7 +70,7 @@ from aipc.review.subscription_reviewer_gate import (
     SessionIsolationAuditReceipt,
     SubscriptionReviewerGateDecision,
 )
-from aipc.version.models import CheckpointMetadata, CheckpointType
+from aipc.version.models import CheckpointMetadata, CheckpointType, GitWorkspace
 
 _SHA_CANDIDATE = "a" * 40
 _SHA256_DUMMY = "0" * 64
@@ -111,6 +111,17 @@ def _commit_all_clean(ws: Path, message: str = "init") -> str:
     _git(ws, "add", ".")
     _git(ws, "commit", "-m", message)
     return _git(ws, "rev-parse", "HEAD")
+
+
+def _candidate_workspace(bundle: OnboardedProjectBundle) -> GitWorkspace:
+    ws = Path(bundle.workspace_root)
+    return GitWorkspace(
+        root=str(ws),
+        common_dir=_git(ws, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+        head=_git(ws, "rev-parse", "HEAD"),
+        branch=_git(ws, "rev-parse", "--abbrev-ref", "HEAD"),
+        status=b"",
+    )
 
 
 def _make_onboarded_python_project(
@@ -471,7 +482,7 @@ def test_python_container_command_and_execution(tmp_path: Path) -> None:
         runner=fake_runner,
     )
 
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert receipt.isolation_mode == "container"
     assert receipt.container_argv is not None
     assert isinstance(receipt.resource_limits, ContainerResourceLimits)
@@ -547,7 +558,7 @@ def test_node_test_output_parsing_and_isolated_verification(tmp_path: Path) -> N
         container_runtime_bin="docker",
         runner=fake_node_runner,
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert receipt.stack_type == "node_javascript_typescript"
     assert receipt.tool_versions["commands_count"] == "3"
     assert receipt.tests_summary == TestSummary(total=4, passed=4, failed=0, skipped=0)
@@ -582,7 +593,7 @@ def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
         container_runtime_bin="docker",
         runner=ok_runner,
     )
-    assert static_receipt.passed is True
+    assert static_receipt.aggregate_checks_passed is True
     assert static_receipt.offline_mock_only is False
 
     gas_receipt = verifier.verify_project_candidate(
@@ -592,7 +603,7 @@ def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
         container_runtime_bin="docker",
         runner=ok_runner,
     )
-    assert gas_receipt.passed is True
+    assert gas_receipt.aggregate_checks_passed is True
     assert gas_receipt.offline_mock_only is True
     assert gas_receipt.live_deployment_or_external_proof_claimed is False
     assert gas_receipt.simulation_disclaimer is not None
@@ -614,7 +625,9 @@ def test_static_web_and_gas_offline_mock_verification(tmp_path: Path) -> None:
         )
 
 
-def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(tmp_path: Path) -> None:
+def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bundle, head_sha = _make_onboarded_python_project(tmp_path)
     verifier = MultiLanguageIsolatedVerifier()
 
@@ -626,12 +639,16 @@ def test_fail_closed_blocked_missing_runtime_mutation_and_zero_tests(tmp_path: P
     assert blocked_receipt.passed is False
     assert blocked_receipt.failure_reason == VERIFICATION_ISOLATION_BLOCKED
 
-    missing_runtime_receipt = verifier.verify_project_candidate(
-        bundle=bundle,
-        candidate_sha=head_sha,
-        isolation_mode="container",
-        container_runtime_bin=None,
-    )
+    with monkeypatch.context() as runtime_unavailable:
+        runtime_unavailable.setattr(
+            "aipc.controller.milestone_c_pipeline.shutil.which", lambda _: None
+        )
+        missing_runtime_receipt = verifier.verify_project_candidate(
+            bundle=bundle,
+            candidate_sha=head_sha,
+            isolation_mode="container",
+            container_runtime_bin=None,
+        )
     assert missing_runtime_receipt.passed is False
     assert missing_runtime_receipt.failure_reason == "CONTAINER_RUNTIME_OR_IMAGE_UNAVAILABLE"
 
@@ -732,7 +749,141 @@ def _make_worker_binding() -> RoleModelBinding:
     )
 
 
-def test_e2e_pipeline_stops_at_human_merge_review(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "bad_boundary",
+    [
+        "stable_overlap",
+        "stable_parent",
+        "stable_child",
+        "dirty",
+        "missing_git",
+        "wrong_head",
+        "wrong_root",
+    ],
+)
+def test_mc_audit_04_rejects_candidate_before_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_boundary: str
+) -> None:
+    bundle, head = _make_onboarded_python_project(tmp_path)
+    workspace = Path(bundle.workspace_root)
+    candidate = _candidate_workspace(bundle)
+    queue = _setup_queue(tmp_path, bundle.project_definition.project.id)
+    if bad_boundary == "wrong_head":
+        candidate = candidate.model_copy(update={"head": "f" * 40})
+    if bad_boundary == "wrong_root":
+        candidate = candidate.model_copy(update={"root": str(tmp_path)})
+    if bad_boundary == "dirty":
+        (workspace / "untracked.txt").write_text("dirty", encoding="utf-8")
+    if bad_boundary == "missing_git":
+        real_run = subprocess.run
+
+        def broken_git(argv, **kwargs):
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 128, "", "Git inspection failed")
+            return real_run(argv, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", broken_git)
+
+    def worker(*args, **kwargs):
+        pytest.fail("worker dispatched before validating candidate boundary")
+
+    with pytest.raises(ControllerError, match="CANDIDATE_WORKTREE"):
+        MilestoneCEndToEndPipeline().run_e2e_cycle(
+            bundle=bundle,
+            candidate_workspace=candidate,
+            task_queue=queue,
+            worker_step=worker,
+            worker_binding=_make_worker_binding(),
+            review_callback=lambda **kwargs: _make_gate_decision(
+                bundle=bundle, candidate_sha=head, verdict=ReviewVerdict.PASS, gate_outcome="PASS"
+            ),
+            stable_root={
+                "stable_overlap": workspace,
+                "stable_parent": workspace.parent,
+                "stable_child": workspace / "stable",
+            }.get(bad_boundary),
+        )
+    assert queue.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+
+def test_mc_audit_05_printed_pytest_summary_is_only_an_observation(tmp_path: Path) -> None:
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    bundle = bundle.model_copy(
+        update={
+            "profile": bundle.profile.model_copy(
+                update={
+                    "validation_pack": (
+                        bundle.profile.validation_pack.model_copy(update={"lint_commands": ()})
+                    )
+                }
+            )
+        }
+    )
+    workspace = Path(bundle.workspace_root)
+    (workspace / "tests" / "test_ok.py").unlink()
+    (workspace / "spoof.py").write_text("print('1 passed')\n", encoding="utf-8")
+    head = _commit_all_clean(workspace, "console output without test execution")
+    receipt = MultiLanguageIsolatedVerifier().verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head,
+        isolation_mode="isolated_subprocess",
+        command_override=(sys.executable, "spoof.py"),
+    )
+    assert receipt.tests_summary.passed == 1
+    assert receipt.passed is False
+    assert receipt.failure_reason == "TEST_EXECUTION_UNAUTHENTICATED"
+    assert re.fullmatch(r"Python \d+\.\d+\.\d+.*", receipt.tool_versions["python"])
+    assert re.fullmatch(r"ruff \d+\.\d+\.\d+.*", receipt.tool_versions["ruff"])
+
+
+@pytest.mark.parametrize("unavailable", [None, "image", "ruff"])
+def test_mc_audit_06_container_versions_are_measured_and_missing_tools_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unavailable: str | None
+) -> None:
+    bundle, head = _make_onboarded_python_project(tmp_path)
+    verifier = MultiLanguageIsolatedVerifier()
+    calls: list[list[str]] = []
+    image_id = "sha256:" + "b" * 64
+
+    def invoke(argv, cwd, env, runner):
+        calls.append(argv)
+        if argv[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(
+                argv, 1 if unavailable == "image" else 0, image_id, ""
+            )
+        if argv[-1] == "--version":
+            tool = argv[-2] if "-m" in argv else "python"
+            versions = {"python": "Python 3.13.9", "pytest": "pytest 8.4.2", "ruff": "ruff 0.14.0"}
+            return subprocess.CompletedProcess(
+                argv, 127 if unavailable == tool else 0, versions[tool], ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "1 passed", "")
+
+    monkeypatch.setattr(verifier, "_invoke_runner", invoke)
+    receipt = verifier.verify_project_candidate(
+        bundle=bundle,
+        candidate_sha=head,
+        isolation_mode="container",
+        container_runtime_bin="docker",
+    )
+    assert receipt.passed is False
+    if unavailable is None:
+        assert receipt.aggregate_checks_passed
+        assert receipt.tool_versions["image_id"] == image_id
+        assert receipt.tool_versions["python"] == "Python 3.13.9"
+        assert receipt.tool_versions["pytest"] == "pytest 8.4.2"
+        assert receipt.tool_versions["ruff"] == "ruff 0.14.0"
+        assert all(image_id in argv for argv in calls if argv[1] == "run")
+    else:
+        assert receipt.failure_reason == (
+            "CONTAINER_RUNTIME_OR_IMAGE_UNAVAILABLE"
+            if unavailable == "image"
+            else "REQUIRED_TOOLCHAIN_UNAVAILABLE"
+        )
+        assert not any("check" in argv or "-q" in argv for argv in calls)
+
+
+def test_mc_audit_01_missing_c03_blocks_passing_review(tmp_path: Path) -> None:
     bundle, head_sha = _make_onboarded_python_project(tmp_path)
     queue = _setup_queue(tmp_path, bundle.project_definition.project.id)
     worker_binding = _make_worker_binding()
@@ -761,6 +912,7 @@ def test_e2e_pipeline_stops_at_human_merge_review(tmp_path: Path) -> None:
     pipeline = MilestoneCEndToEndPipeline()
     pr_bundle = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=queue,
         worker_step=worker_step,
         worker_binding=worker_binding,
@@ -770,13 +922,91 @@ def test_e2e_pipeline_stops_at_human_merge_review(tmp_path: Path) -> None:
     )
 
     assert isinstance(pr_bundle, PRReadinessBundle)
-    assert pr_bundle.pr_ready is True
+    assert pr_bundle.pr_ready is False
     assert pr_bundle.human_merge_approval_required is True
     assert pr_bundle.auto_merge_performed is False
-    assert pr_bundle.next_authorized_action == "HUMAN_MERGE_REVIEW"
-    assert pr_bundle.gate_verdict == "PASS"
+    assert pr_bundle.next_authorized_action == "HALT_ON_BLOCKER"
+    assert pr_bundle.gate_verdict == "BLOCKED"
     assert pr_bundle.review_verdict == ReviewVerdict.PASS
-    assert queue.load().tasks[0].status == QueuedTaskStatus.COMPLETED
+    assert queue.load().tasks[0].status == QueuedTaskStatus.BLOCKED
+
+
+@pytest.mark.parametrize("criterion_case", ["pass", "fail", "missing"])
+def test_mc_audit_01_controller_criteria_gate_real_e2e_handoff(
+    tmp_path: Path, criterion_case: str
+) -> None:
+    from aipc.review.trusted_acceptance_harness import build_trusted_harness_manifest
+
+    bundle, _ = _make_onboarded_python_project(tmp_path)
+    # Native lint binaries require container isolation; exercise the real restricted
+    # Python runner with a syntax check that stays within its execution boundary.
+    bundle = bundle.model_copy(
+        update={
+            "profile": bundle.profile.model_copy(
+                update={
+                    "validation_pack": (
+                        bundle.profile.validation_pack.model_copy(
+                            update={"lint_commands": ("python -m ast src/feature.py",)}
+                        )
+                    )
+                }
+            )
+        }
+    )
+    ws = Path(bundle.workspace_root)
+    (ws / "src").mkdir()
+    (ws / "src" / "feature.py").write_text(
+        "def calculate(value):\n    return value * 2\n", encoding="utf-8"
+    )
+    (ws / "tests" / "trusted").mkdir()
+    trusted_rel = "tests/trusted/feature_checks.py"
+    expected = 9 if criterion_case == "fail" else 8
+    (ws / trusted_rel).write_text(
+        "def test_calculation():\n    from feature import calculate\n"
+        f"    assert calculate(4) == {expected}\n",
+        encoding="utf-8",
+    )
+    head = _commit_all_clean(ws, "candidate with operator acceptance contract")
+    manifest = build_trusted_harness_manifest(
+        project_id=bundle.project_definition.project.id,
+        milestone_id="milestone-c",
+        workspace=ws,
+        protected_rel_paths=(trusted_rel,),
+        required_criterion_ids=("AC-01",),
+        criterion_test_nodes=(
+            {} if criterion_case == "missing" else {"AC-01": f"{trusted_rel}::test_calculation"}
+        ),
+        trusted_manifest_dir=tmp_path / "operator-store",
+    )
+    queue = _setup_queue(tmp_path / "queue", bundle.project_definition.project.id)
+    context = _make_review_context(bundle, head)
+    result = MilestoneCEndToEndPipeline().run_e2e_cycle(
+        bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
+        task_queue=queue,
+        worker_step=lambda *_: WorkerAttemptExecutionOutcome(
+            candidate_sha=head, verification_passed=True, review_context=context
+        ),
+        worker_binding=_make_worker_binding(),
+        review_callback=lambda **_: _make_gate_decision(
+            bundle=bundle, candidate_sha=head, verdict=ReviewVerdict.PASS, gate_outcome="PASS"
+        ),
+        isolation_mode="isolated_subprocess",
+        trusted_manifest=manifest,
+    )
+    assert result.verification_receipt.aggregate_checks_passed
+    assert result.review_verdict == ReviewVerdict.PASS
+    assert result.verification_receipt.tool_versions["pytest"].startswith("pytest ")
+    if criterion_case == "pass":
+        assert result.pr_ready is True
+        assert result.trusted_acceptance_evaluation_id is not None
+        assert result.next_authorized_action == "HUMAN_MERGE_REVIEW"
+        assert queue.load().tasks[0].status == QueuedTaskStatus.COMPLETED
+    else:
+        assert result.pr_ready is False
+        assert result.blockers == ("TRUSTED_ACCEPTANCE_UNVERIFIED",)
+        assert result.trusted_acceptance_evaluation_id is None
+        assert queue.load().tasks[0].status == QueuedTaskStatus.BLOCKED
 
 
 def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_path: Path) -> None:
@@ -802,6 +1032,7 @@ def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_pa
     pipeline = MilestoneCEndToEndPipeline()
     blocked_bundle = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=queue_fail,
         worker_step=worker_step,
         worker_binding=worker_binding,
@@ -830,6 +1061,7 @@ def test_e2e_pipeline_blocks_on_verification_failure_and_revise_on_review(tmp_pa
 
     revise_bundle = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=queue_revise,
         worker_step=worker_step,
         worker_binding=worker_binding,
@@ -876,7 +1108,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", net_probe),
     )
-    assert net_receipt.passed is True
+    assert net_receipt.aggregate_checks_passed is True
 
     udp_probe = (
         "import socket\n"
@@ -897,7 +1129,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", udp_probe),
     )
-    assert udp_receipt.passed is True
+    assert udp_receipt.aggregate_checks_passed is True
 
     outside_file = tmp_path / "outside_escape.txt"
     write_probe = (
@@ -916,7 +1148,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", write_probe),
     )
-    assert write_receipt.passed is True
+    assert write_receipt.aggregate_checks_passed is True
     assert not outside_file.exists()
 
     os_open_probe = (
@@ -936,7 +1168,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", os_open_probe),
     )
-    assert os_open_receipt.passed is True
+    assert os_open_receipt.aggregate_checks_passed is True
     assert not outside_file.exists()
 
     child_probe = (
@@ -967,7 +1199,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", child_probe),
     )
-    assert child_receipt.passed is True
+    assert child_receipt.aggregate_checks_passed is True
 
     non_py_child_probe = (
         "import os, subprocess\n"
@@ -986,7 +1218,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", non_py_child_probe),
     )
-    assert non_py_child_receipt.passed is True
+    assert non_py_child_receipt.aggregate_checks_passed is True
 
     for bad_cmd in (
         (sys.executable, "-S", "-c", "print('1 passed')"),
@@ -1018,7 +1250,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", closure_probe),
     )
-    assert closure_receipt.passed is True
+    assert closure_receipt.aggregate_checks_passed is True
 
     os_system_probe = (
         "import os\n"
@@ -1033,7 +1265,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", os_system_probe),
     )
-    assert os_system_receipt.passed is True
+    assert os_system_receipt.aggregate_checks_passed is True
 
     ctypes_probe = (
         "try:\n    import ctypes\nexcept (ImportError, PermissionError):\n    print('1 passed')\n"
@@ -1044,7 +1276,7 @@ def test_python_isolated_subprocess_guard_blocks_network_and_outside_writes(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", ctypes_probe),
     )
-    assert ctypes_receipt.passed is True
+    assert ctypes_receipt.aggregate_checks_passed is True
 
 
 def test_wrong_head_or_dirty_worktree_and_lint_failure_fail_closed(tmp_path: Path) -> None:
@@ -1117,6 +1349,7 @@ def test_e2e_pipeline_rejects_mismatched_review_provenance(tmp_path: Path) -> No
     )
     res1 = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=q1,
         worker_step=worker_step,
         worker_binding=worker_binding,
@@ -1139,6 +1372,7 @@ def test_e2e_pipeline_rejects_mismatched_review_provenance(tmp_path: Path) -> No
     bad_task_decision = valid_decision.model_copy(update={"task_id": "other-task"})
     res2 = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=q2,
         worker_step=worker_step,
         worker_binding=worker_binding,
@@ -1157,6 +1391,7 @@ def test_e2e_pipeline_rejects_mismatched_review_provenance(tmp_path: Path) -> No
     bad_attempt_decision = valid_decision.model_copy(update={"bound_review": bad_bound})
     res3 = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=q3,
         worker_step=worker_step,
         worker_binding=worker_binding,
@@ -1181,6 +1416,7 @@ def test_e2e_pipeline_validates_reviewer_before_dispatch_and_marks_interrupted(
     with pytest.raises(ControllerError, match="Either reviewer_gate or review_callback"):
         pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q_missing,
             worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
                 candidate_sha=head_sha,
@@ -1200,6 +1436,7 @@ def test_e2e_pipeline_validates_reviewer_before_dispatch_and_marks_interrupted(
     with pytest.raises(RuntimeError, match="worker crashed"):
         pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q_worker_err,
             worker_step=crashing_worker,
             worker_binding=worker_binding,
@@ -1221,6 +1458,7 @@ def test_e2e_pipeline_validates_reviewer_before_dispatch_and_marks_interrupted(
     with pytest.raises(RuntimeError, match="reviewer crashed"):
         pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q_rev_err,
             worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
                 candidate_sha=head_sha,
@@ -1300,6 +1538,7 @@ def test_e2e_pipeline_rejects_mismatched_phase_gate_decision(tmp_path: Path) -> 
         bad_decision = valid.model_copy(update={"phase_gate_decision": bad_pg})
         res = pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q,
             worker_step=worker_step,
             worker_binding=worker_binding,
@@ -1338,6 +1577,7 @@ def test_e2e_pipeline_rejects_non_callable_reviewer_and_marks_post_dispatch_erro
     with pytest.raises(ControllerError, match="review_callback must be callable"):
         pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q_non_call,
             worker_step=worker_step,
             worker_binding=worker_binding,
@@ -1350,6 +1590,7 @@ def test_e2e_pipeline_rejects_non_callable_reviewer_and_marks_post_dispatch_erro
     with pytest.raises(ControllerError, match="SubscriptionReviewerGateDecision"):
         pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q_none,
             worker_step=worker_step,
             worker_binding=worker_binding,
@@ -1375,6 +1616,7 @@ def test_e2e_pipeline_rejects_non_callable_reviewer_and_marks_post_dispatch_erro
     with pytest.raises(RuntimeError, match="queue write failed"):
         pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q_rec_err,
             worker_step=worker_step,
             worker_binding=worker_binding,
@@ -1439,6 +1681,7 @@ def test_e2e_pipeline_enforces_candidate_import_origin_with_stable_root(
     )
     res_ok = pipeline.run_e2e_cycle(
         bundle=cand_bundle,
+        candidate_workspace=_candidate_workspace(cand_bundle),
         task_queue=q_ok,
         worker_step=worker_step,
         worker_binding=worker_binding,
@@ -1447,7 +1690,8 @@ def test_e2e_pipeline_enforces_candidate_import_origin_with_stable_root(
         runner=ok_runner,
         stable_root=stable_root,
     )
-    assert res_ok.pr_ready is True
+    assert res_ok.pr_ready is False
+    assert res_ok.blockers == ("TRUSTED_ACCEPTANCE_UNVERIFIED",)
     assert res_ok.verification_receipt.import_origin_verified is True
     assert res_ok.verification_receipt.import_origin_report is not None
 
@@ -1459,6 +1703,7 @@ def test_e2e_pipeline_enforces_candidate_import_origin_with_stable_root(
     )
     res_missing = pipeline.run_e2e_cycle(
         bundle=plain_bundle,
+        candidate_workspace=_candidate_workspace(plain_bundle),
         task_queue=q_missing,
         worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
             candidate_sha=plain_sha,
@@ -1541,6 +1786,7 @@ def test_e2e_pipeline_rejects_mismatched_phase_gate_or_nested_provenance(
         q = _setup_queue(tmp_path / f"q_nested_{idx}", bundle.project_definition.project.id)
         res = pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q,
             worker_step=worker_step,
             worker_binding=worker_binding,
@@ -1688,7 +1934,7 @@ def test_isolated_subprocess_blocks_raw_fd_and_dir_fd(tmp_path: Path) -> None:
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", fd_code),
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert not outside.exists()
 
 
@@ -1763,6 +2009,7 @@ def test_e2e_pipeline_rejects_forged_context_or_agent_result_digest(tmp_path: Pa
         q = _setup_queue(tmp_path / f"q_forged_{idx}", bundle.project_definition.project.id)
         res = pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q,
             worker_step=worker_step,
             worker_binding=worker_binding,
@@ -1967,7 +2214,7 @@ def test_container_mode_import_origin_probe_rejects_wrong_package_origin(
         container_runtime_bin="docker",
         runner=good_origin_runner,
     )
-    assert good_receipt.passed is True
+    assert good_receipt.aggregate_checks_passed is True
     assert good_receipt.import_origin_verified is True
     assert good_receipt.import_origin_report is not None
     assert good_receipt.import_origin_report.actual_imported_file == (
@@ -2085,7 +2332,7 @@ def test_container_mode_hmac_origin_receipt_valid_and_tampered(tmp_path: Path) -
         container_runtime_bin="docker",
         runner=_make_hmac_runner(tamper=False),
     )
-    assert good_receipt.passed is True
+    assert good_receipt.aggregate_checks_passed is True
     assert good_receipt.import_origin_verified is True
 
     bad_receipt = verifier.verify_project_candidate(
@@ -2138,7 +2385,7 @@ def test_c02_isolated_subprocess_blocks_getframe_and_self_link_escape(tmp_path: 
             "tests/test_getframe_c02.py",
         ),
     )
-    assert gf_receipt.passed is True
+    assert gf_receipt.aggregate_checks_passed is True
     assert gf_receipt.exit_code == 0
 
     self_link = ws / "self_link"
@@ -2176,7 +2423,7 @@ def test_c02_isolated_subprocess_blocks_getframe_and_self_link_escape(tmp_path: 
             "tests/test_self_link_c02.py",
         ),
     )
-    assert sl_receipt.passed is True
+    assert sl_receipt.aggregate_checks_passed is True
     assert not outside_victim.exists()
 
 
@@ -2251,7 +2498,7 @@ def test_c02_rejects_candidate_pytest_shadow_and_hardens_container_probe(tmp_pat
         container_runtime_bin="docker",
         runner=inspect_runner,
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert len(captured_probes) == 1
     probe = captured_probes[0]
     assert "def _c02_probe():" in probe
@@ -2392,7 +2639,7 @@ def test_c02_isolated_subprocess_seals_popen_and_blocks_scratch_pythonpath(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", probe),
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
 
 
 def test_c02_isolated_subprocess_popen_closure_mutation_does_not_bypass_audit(
@@ -2448,7 +2695,7 @@ def test_c02_isolated_subprocess_popen_closure_mutation_does_not_bypass_audit(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", probe),
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
 
 
 def test_isolated_subprocess_blocks_builtin_isinstance_mutation_and_native_open(
@@ -2496,7 +2743,7 @@ def test_isolated_subprocess_blocks_builtin_isinstance_mutation_and_native_open(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", probe),
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert not ext_sentinel.exists()
 
 
@@ -2557,7 +2804,7 @@ def test_c15_sec01_meta_path_closure_and_audit_frame_callback_blocked(tmp_path: 
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", probe),
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert not outside_target.exists()
 
 
@@ -2720,6 +2967,7 @@ def test_c16_mc_rr_05_e2e_pipeline_enforces_approved_contract_scope_and_phase(
     with pytest.raises(ControllerError):
         pipeline.run_e2e_cycle(
             bundle=bundle,
+            candidate_workspace=_candidate_workspace(bundle),
             task_queue=q_phase,
             worker_step=ok_worker,
             worker_binding=worker_binding,
@@ -2738,6 +2986,7 @@ def test_c16_mc_rr_05_e2e_pipeline_enforces_approved_contract_scope_and_phase(
     with pytest.raises(ControllerError):
         pipeline.run_e2e_cycle(
             bundle=bad_bundle,
+            candidate_workspace=_candidate_workspace(bad_bundle),
             task_queue=q_proj,
             worker_step=ok_worker,
             worker_binding=worker_binding,
@@ -2759,6 +3008,7 @@ def test_c16_mc_rr_05_e2e_pipeline_enforces_approved_contract_scope_and_phase(
     bad_ctx = review_ctx.model_copy(update={"agent_result": bad_ar})
     res_scope = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=q_scope,
         worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
             candidate_sha=head_sha,
@@ -2783,6 +3033,7 @@ def test_c16_mc_rr_05_e2e_pipeline_enforces_approved_contract_scope_and_phase(
     bad_cmd_ctx = review_ctx.model_copy(update={"agent_result": bad_cmd_ar})
     res_cmd = pipeline.run_e2e_cycle(
         bundle=bundle,
+        candidate_workspace=_candidate_workspace(bundle),
         task_queue=q_cmd,
         worker_step=lambda b, a, r: WorkerAttemptExecutionOutcome(
             candidate_sha=head_sha,
@@ -2878,7 +3129,7 @@ def test_c16_mc_rr_01_02_synthetic_audit_and_fake_python_and_winapi_blocked(
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", probe),
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert not outside_file.exists()
 
 
@@ -3056,7 +3307,7 @@ def test_c16_mc_rr2_01_02_blocks_addaudithook_and_symlinked_python_in_isolated_a
         isolation_mode="isolated_subprocess",
         command_override=(sys.executable, "-c", iso_probe),
     )
-    assert iso_receipt.passed is True
+    assert iso_receipt.aggregate_checks_passed is True
 
     (aipc_dir / "__init__.py").write_text(
         "\n".join(
@@ -3224,6 +3475,7 @@ def test_c19_mc_ir_03_04_pre_dispatch_head_rename_fail_closed_and_sanitized_git_
 
     pr1 = pipeline.run_e2e_cycle(
         bundle=bundle1,
+        candidate_workspace=_candidate_workspace(bundle1),
         task_queue=queue1,
         worker_step=worker_step_forged_commit,
         worker_binding=worker_binding,
@@ -3267,6 +3519,7 @@ def test_c19_mc_ir_03_04_pre_dispatch_head_rename_fail_closed_and_sanitized_git_
 
     pr2a = pipeline.run_e2e_cycle(
         bundle=bundle2a,
+        candidate_workspace=_candidate_workspace(bundle2a),
         task_queue=queue2a,
         worker_step=worker_step_uncommitted_rename,
         worker_binding=worker_binding,
@@ -3311,6 +3564,7 @@ def test_c19_mc_ir_03_04_pre_dispatch_head_rename_fail_closed_and_sanitized_git_
 
     pr2b = pipeline.run_e2e_cycle(
         bundle=bundle2b,
+        candidate_workspace=_candidate_workspace(bundle2b),
         task_queue=queue2b,
         worker_step=worker_step_committed_rename,
         worker_binding=worker_binding,
@@ -3324,27 +3578,23 @@ def test_c19_mc_ir_03_04_pre_dispatch_head_rename_fail_closed_and_sanitized_git_
     # 3a. Failed git status --porcelain -z -> fail closed
     bundle3a, head3a = _make_onboarded_python_project(tmp_path / "case3a")
     queue3a = _setup_queue(tmp_path / "q3a", bundle3a.project_definition.project.id)
-    ctx3a = _make_review_context(bundle3a, head3a)
 
     fail_git_status = True
     try:
-        pr3a = pipeline.run_e2e_cycle(
-            bundle=bundle3a,
-            task_queue=queue3a,
-            worker_step=lambda b, a, rp: WorkerAttemptExecutionOutcome(
-                candidate_sha=head3a,
-                verification_passed=True,
-                review_context=ctx3a,
-            ),
-            worker_binding=worker_binding,
-            review_callback=pass_review(bundle3a, head3a),
-            isolation_mode="isolated_subprocess",
-            runner=ok_runner,
-        )
+        with pytest.raises(ControllerError, match="CANDIDATE_WORKTREE_HEAD_OR_DIRTY_MISMATCH"):
+            pipeline.run_e2e_cycle(
+                bundle=bundle3a,
+                candidate_workspace=_candidate_workspace(bundle3a),
+                task_queue=queue3a,
+                worker_step=lambda *_: pytest.fail("dispatch occurred after failed git status"),
+                worker_binding=worker_binding,
+                review_callback=pass_review(bundle3a, head3a),
+                isolation_mode="isolated_subprocess",
+                runner=ok_runner,
+            )
     finally:
         fail_git_status = False
-    assert pr3a.gate_verdict == "BLOCKED"
-    assert pr3a.blockers == ("CONTRACT_SCOPE_VIOLATION",)
+    assert queue3a.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
 
     # 3b. Failed git diff --name-status -z -> fail closed
     bundle3b, head3b = _make_onboarded_python_project(tmp_path / "case3b")
@@ -3355,6 +3605,7 @@ def test_c19_mc_ir_03_04_pre_dispatch_head_rename_fail_closed_and_sanitized_git_
     try:
         pr3b = pipeline.run_e2e_cycle(
             bundle=bundle3b,
+            candidate_workspace=_candidate_workspace(bundle3b),
             task_queue=queue3b,
             worker_step=lambda b, a, rp: WorkerAttemptExecutionOutcome(
                 candidate_sha=head3b,
@@ -3448,5 +3699,5 @@ def test_c02_isolated_subprocess_allows_trusted_python_and_realpath_but_blocks_u
             "tests/test_chain_guard.py",
         ),
     )
-    assert receipt.passed is True
+    assert receipt.aggregate_checks_passed is True
     assert receipt.exit_code == 0

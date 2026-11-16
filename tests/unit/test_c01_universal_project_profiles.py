@@ -115,6 +115,13 @@ def test_builtin_profiles_cover_required_stacks() -> None:
         get_builtin_project_profile("custom_toolchain")
 
 
+@pytest.mark.parametrize("stack", ["python_cli_or_package", "python_web_or_api"])
+def test_mc_audit_06_python_defaults_declare_the_offline_toolchain(stack) -> None:
+    pack = get_builtin_project_profile(stack).validation_pack
+    assert set(pack.required_toolchains) == {"python", "pytest", "ruff"}
+    assert pack.recommended_container_image == "aipc-verify:python-pytest-ruff-v1"
+
+
 def test_onboard_python_package_layout_and_render_yaml(tmp_path: Path) -> None:
     repo = tmp_path / "py_pkg"
     (repo / "src" / "demo_pkg").mkdir(parents=True)

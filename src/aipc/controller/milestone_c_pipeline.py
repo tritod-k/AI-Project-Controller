@@ -14,12 +14,13 @@ import hmac
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 from uuid import uuid4
 
 from pydantic import Field, StrictBool, ValidationError, model_validator
@@ -28,11 +29,12 @@ from aipc.agents.role_registry import RoleModelBinding
 from aipc.controller.errors import ControllerError
 from aipc.controller.milestone_b_orchestrator import (
     HandoffNextAuthorizedAction,
-    WorkerStepCallable,
+    WorkerAttemptExecutionOutcome,
 )
 from aipc.controller.self_dev_runner import (
     VERIFICATION_ISOLATION_BLOCKED,
     CandidateImportOriginReport,
+    CandidateVerificationReceipt,
     _assert_no_candidate_startup_hooks,
     verify_candidate_import_origin,
 )
@@ -44,8 +46,8 @@ from aipc.controller.task_queue import (
     _is_forbidden_phase_token,
     _is_unapproved_future_scope,
 )
-from aipc.domain.enums import ReviewVerdict
-from aipc.domain.models import CanonicalRecord, NonBlank, PositiveInt, TestSummary
+from aipc.domain.enums import CriterionStatus, ReviewVerdict
+from aipc.domain.models import CanonicalRecord, CriterionResult, NonBlank, PositiveInt, TestSummary
 from aipc.hardening.env_isolation import (
     assert_argv_no_credentials,
     assert_child_env_isolated,
@@ -62,9 +64,16 @@ from aipc.review.subscription_reviewer_gate import (
     IndependentSubscriptionReviewerGate,
     SubscriptionReviewerGateDecision,
 )
-from aipc.version.models import Commit
+from aipc.version.models import Commit, GitWorkspace
+
+if TYPE_CHECKING:
+    from aipc.review.trusted_acceptance_harness import (
+        TrustedAcceptanceEvaluation,
+        TrustedHarnessManifest,
+    )
 
 MultiLanguageIsolationMode = Literal["blocked", "container", "isolated_subprocess"]
+_TEST_EXECUTION_UNAUTHENTICATED = "TEST_EXECUTION_UNAUTHENTICATED"
 
 _DEFAULT_GAS_DISCLAIMER = (
     "Offline simulation only: offline GAS mocks do not confirm live TradingView, "
@@ -125,6 +134,11 @@ class MultiLanguageVerificationReceipt(CanonicalRecord):
     sanitized_env: Literal[True] = True
     import_origin_verified: StrictBool = False
     import_origin_report: CandidateImportOriginReport | None = None
+
+    @property
+    def aggregate_checks_passed(self) -> bool:
+        """Whether the command checks succeeded, pending trusted behavioral evidence."""
+        return self.failure_reason == _TEST_EXECUTION_UNAUTHENTICATED and self.exit_code == 0
 
     @model_validator(mode="after")
     def validate_receipt_invariants(self) -> Self:
@@ -2031,6 +2045,7 @@ class MultiLanguageIsolatedVerifier:
             runtime_bin.strip(),
             "run",
             "--rm",
+            "--pull=never",
             "--network",
             effective_limits.network_mode,
         ]
@@ -2279,21 +2294,49 @@ class MultiLanguageIsolatedVerifier:
 
         if effective_mode == "container":
             image = bundle.profile.validation_pack.recommended_container_image
-            if (
-                container_runtime_bin is None
-                or not container_runtime_bin.strip()
-                or image is None
-                or not image.strip()
-            ):
+            runtime = container_runtime_bin
+            if runtime is None and runner is None:
+                runtime = shutil.which("docker") or shutil.which("podman")
+            if not runtime or not runtime.strip() or not image:
                 return _fail_receipt("CONTAINER_RUNTIME_OR_IMAGE_UNAVAILABLE", mode="container")
             resource_limits = ContainerResourceLimits()
             with tempfile.TemporaryDirectory(prefix="aipc-c02-out-") as tmp_out:
                 out_dir = Path(tmp_out)
+                if runner is None:
+                    inspect = self._invoke_runner(
+                        [runtime, "image", "inspect", "--format", "{{.Id}}", image],
+                        out_dir,
+                        sanitized_env,
+                        None,
+                    )
+                    image_id = inspect.stdout.strip() if inspect.returncode == 0 else ""
+                    if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", image_id):
+                        return _fail_receipt("CONTAINER_RUNTIME_OR_IMAGE_UNAVAILABLE")
+                    tool_versions.update(image=image, image_id=image_id)
+                    image = image_id
+                    for tool in pack.required_toolchains:
+                        probe = self._version_probe(tool)
+                        if probe is None:
+                            return _fail_receipt("REQUIRED_TOOLCHAIN_UNAVAILABLE")
+                        argv = self.build_container_command(
+                            runtime_bin=runtime,
+                            image=image,
+                            workspace=out_dir,
+                            out_dir=out_dir,
+                            command=probe,
+                            limits=resource_limits,
+                        )
+                        version = self._version_output(
+                            self._invoke_runner(list(argv), out_dir, sanitized_env, None)
+                        )
+                        if version is None:
+                            return _fail_receipt("REQUIRED_TOOLCHAIN_UNAVAILABLE")
+                        tool_versions[tool] = version
 
                 def _run_one(cmd: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
                     nonlocal container_argv
                     c_argv = self.build_container_command(
-                        runtime_bin=container_runtime_bin,
+                        runtime_bin=runtime,
                         image=image,
                         workspace=workspace_path,
                         out_dir=out_dir,
@@ -2867,6 +2910,17 @@ class MultiLanguageIsolatedVerifier:
                     )
         else:
             with tempfile.TemporaryDirectory(prefix="aipc-c02-boot-") as tmp_boot:
+                if runner is None:
+                    for tool in pack.required_toolchains:
+                        probe = self._version_probe(tool, python=sys.executable)
+                        if probe is None:
+                            return _fail_receipt("REQUIRED_TOOLCHAIN_UNAVAILABLE")
+                        version = self._version_output(
+                            self._invoke_runner(list(probe), Path(tmp_boot), sanitized_env, None)
+                        )
+                        if version is None:
+                            return _fail_receipt("REQUIRED_TOOLCHAIN_UNAVAILABLE")
+                        tool_versions[tool] = version
                 _write_isolated_python_guard(
                     Path(tmp_boot),
                     workspace_path,
@@ -2876,8 +2930,17 @@ class MultiLanguageIsolatedVerifier:
                 exec_env = dict(sanitized_env)
                 exec_env["PYTHONPATH"] = tmp_boot
                 exec_env["PYTHONDONTWRITEBYTECODE"] = "1"
+                exec_env["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
+                exec_env["RUFF_NO_CACHE"] = "true"
 
                 def _run_one(cmd: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+                    if runner is None and cmd[0] in (
+                        "python",
+                        "python3",
+                        "python.exe",
+                        "python3.exe",
+                    ):
+                        cmd = (sys.executable, *cmd[1:])
                     exec_argv = list(assert_argv_no_credentials(cmd))
                     return self._invoke_runner(exec_argv, workspace_path, exec_env, runner)
 
@@ -2909,8 +2972,8 @@ class MultiLanguageIsolatedVerifier:
             passed = False
             failure_reason = "VALIDATION_LINT_OR_BUILD_FAILED"
         else:
-            passed = True
-            failure_reason = None
+            passed = False
+            failure_reason = _TEST_EXECUTION_UNAUTHENTICATED
 
         return MultiLanguageVerificationReceipt(
             receipt_id=receipt_id,
@@ -2932,6 +2995,25 @@ class MultiLanguageIsolatedVerifier:
             import_origin_verified=import_origin_verified,
             import_origin_report=import_origin_report,
         )
+
+    @staticmethod
+    def _version_probe(tool: str, *, python: str = "python") -> tuple[str, ...] | None:
+        if tool == "python":
+            return (python, "--version")
+        if tool in ("pytest", "ruff"):
+            return (python, "-I", "-B", "-m", tool, "--version")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", tool):
+            return (tool, "--version")
+        return None
+
+    @staticmethod
+    def _version_output(proc: subprocess.CompletedProcess[str]) -> str | None:
+        if proc.returncode != 0:
+            return None
+        output = (proc.stdout or proc.stderr or "").strip().splitlines()
+        if output and re.fullmatch(r"[\w .,+()/_-]{0,60}\d+\.\d+[\w .,+()/_-]{0,60}", output[0]):
+            return output[0]
+        return None
 
     def _run_command_batches(
         self,
@@ -3029,14 +3111,15 @@ class PRReadinessBundle(CanonicalRecord):
     auto_merge_performed: Literal[False] = False
     next_authorized_action: HandoffNextAuthorizedAction
     blockers: tuple[str, ...] = ()
+    trusted_acceptance_evaluation_id: NonBlank | None = None
 
     @model_validator(mode="after")
     def validate_pr_readiness_invariants(self) -> Self:
         if self.pr_ready:
-            if not self.verification_receipt.passed:
-                raise ValueError(
-                    "pr_ready cannot be True when verification_receipt.passed is False"
-                )
+            if not self.verification_receipt.aggregate_checks_passed:
+                raise ValueError("pr_ready requires successful aggregate command checks")
+            if self.trusted_acceptance_evaluation_id is None:
+                raise ValueError("pr_ready requires trusted acceptance")
             if self.review_verdict != ReviewVerdict.PASS:
                 raise ValueError("pr_ready cannot be True when review_verdict != PASS")
             if self.gate_verdict != "PASS":
@@ -3122,12 +3205,99 @@ class MilestoneCEndToEndPipeline:
     ) -> None:
         self.verifier = verifier or MultiLanguageIsolatedVerifier()
 
+    @staticmethod
+    def _evaluate_trusted_acceptance(
+        manifest: TrustedHarnessManifest,
+        workspace: Path,
+        context: ReviewContext,
+        receipt: MultiLanguageVerificationReceipt,
+        required_criteria: set[str],
+        milestone_id: str,
+    ) -> TrustedAcceptanceEvaluation | None:
+        # The harness uses the Milestone C scope guard from this module.
+        from aipc.review.trusted_acceptance_harness import TrustedAcceptanceHarnessValidator
+
+        task = context.task
+        if (
+            not required_criteria
+            or set(manifest.required_criterion_ids) != required_criteria
+            or set(manifest.criterion_test_nodes) != required_criteria
+            or manifest.project_id != task.project_id
+            or manifest.milestone_id != milestone_id
+            or manifest.trusted_manifest_path is None
+            or manifest.manifest_digest is None
+            or not manifest.require_behavioral_assertions
+        ):
+            return None
+
+        validator = TrustedAcceptanceHarnessValidator()
+        executions = validator.execute_and_record_criteria(
+            manifest=manifest,
+            workspace=workspace,
+            candidate_sha=receipt.candidate_sha,
+            phase_id=task.phase_id,
+            task_id=task.task_id,
+            attempt=task.attempt,
+        )
+        expected_nodes = {
+            (criterion, node)
+            for criterion, nodes in manifest.criterion_test_nodes.items()
+            for node in nodes
+        }
+        if (
+            len(executions) != len(expected_nodes)
+            or {(run.criterion_id, run.test_node_id) for run in executions} != expected_nodes
+            or any(
+                not run.passed
+                or run.exit_code != 0
+                or run.candidate_sha != receipt.candidate_sha
+                or run.manifest_digest != manifest.manifest_digest
+                or (run.phase_id, run.task_id, run.attempt)
+                != (task.phase_id, task.task_id, task.attempt)
+                for run in executions
+            )
+        ):
+            return None
+
+        count = len(executions)
+        return validator.evaluate_candidate(
+            manifest=manifest,
+            workspace=workspace,
+            task_id=task.task_id,
+            candidate_sha=receipt.candidate_sha,
+            changed_files=tuple(context.agent_result.files_changed),
+            tests_summary=TestSummary(total=count, passed=count, failed=0, skipped=0),
+            criterion_results=tuple(
+                CriterionResult(
+                    criterion_id=criterion,
+                    status=CriterionStatus.PASS,
+                    evidence=list(nodes),
+                    notes="Controller criterion execution",
+                )
+                for criterion, nodes in manifest.criterion_test_nodes.items()
+            ),
+            verification_receipt=CandidateVerificationReceipt(
+                candidate_sha=receipt.candidate_sha,
+                isolation_mode=receipt.isolation_mode,
+                import_origin_verified=receipt.import_origin_verified,
+                import_origin_report=receipt.import_origin_report,
+                sanitized_env_verified=True,
+                exit_code=0,
+                passed=True,
+                status_code="OK",
+                summary="Isolated command checks and controller criterion executions succeeded",
+            ),
+            review_context=context,
+            criterion_execution_receipts=executions,
+            require_source_bound_receipts=True,
+        )
+
     def run_e2e_cycle(
         self,
         *,
         bundle: OnboardedProjectBundle,
         task_queue: PersistentTaskQueue,
-        worker_step: WorkerStepCallable,
+        worker_step: Callable[[RoleModelBinding, int, Path], WorkerAttemptExecutionOutcome],
         worker_binding: RoleModelBinding,
         reviewer_gate: IndependentSubscriptionReviewerGate | None = None,
         review_callback: Callable[..., SubscriptionReviewerGateDecision] | None = None,
@@ -3139,6 +3309,8 @@ class MilestoneCEndToEndPipeline:
         phase_id: str | None = None,
         evidence_root: Path | None = None,
         stable_root: Path | None = None,
+        candidate_workspace: GitWorkspace,
+        trusted_manifest: TrustedHarnessManifest | None = None,
     ) -> PRReadinessBundle:
         """Execute one end-to-end Milestone C cycle stopping at Human Merge Review."""
         assert_subscription_only_mode(
@@ -3189,7 +3361,11 @@ class MilestoneCEndToEndPipeline:
             raise ControllerError(
                 "project_definition.project.workspace conflicts with bundle.workspace_root"
             )
-        if resolved_phase_id not in {p.id for p in bundle.project_definition.phases}:
+        phase = next(
+            (phase for phase in bundle.project_definition.phases if phase.id == resolved_phase_id),
+            None,
+        )
+        if phase is None:
             raise ControllerError(
                 f"phase_id '{resolved_phase_id}' not found in project_definition.phases"
             )
@@ -3203,23 +3379,49 @@ class MilestoneCEndToEndPipeline:
             raise ControllerError("Task contract in_scope must not be empty")
 
         ws_path = Path(bundle.workspace_root).resolve()
-        sanitized_git_env = build_sanitized_child_env()
+        stable_path = (stable_root or Path(__file__).resolve().parents[3]).resolve()
+        if (
+            ws_path != Path(candidate_workspace.root).resolve()
+            or not ws_path.is_dir()
+            or ws_path.is_relative_to(stable_path)
+            or stable_path.is_relative_to(ws_path)
+        ):
+            raise ControllerError("CANDIDATE_WORKTREE_BOUNDARY_MISMATCH")
+        sanitized_git_env = {
+            key: value
+            for key, value in build_sanitized_child_env().items()
+            if not key.upper().startswith("GIT_")
+        }
+        sanitized_git_env["GIT_OPTIONAL_LOCKS"] = "0"
         assert_child_env_isolated(sanitized_git_env)
-        _pre_head_proc = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=str(ws_path),
-            env=sanitized_git_env,
-        )
-        _pre_dispatch_sha = _pre_head_proc.stdout.strip()
-        _pre_head_ok = (
-            _pre_head_proc.returncode == 0
-            and len(_pre_dispatch_sha) == 40
-            and all(c in "0123456789abcdefABCDEF" for c in _pre_dispatch_sha)
-        )
+
+        def git_identity(*args: str) -> str:
+            result = subprocess.run(
+                ["git", "rev-parse", *args],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=ws_path,
+                env=sanitized_git_env,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                raise ControllerError("CANDIDATE_WORKTREE_IDENTITY_UNVERIFIED")
+            return result.stdout.strip()
+
+        _pre_dispatch_sha = candidate_workspace.head
+        try:
+            if (
+                candidate_workspace.status
+                or Path(git_identity("--show-toplevel")).resolve() != ws_path
+                or Path(git_identity("--path-format=absolute", "--git-common-dir")).resolve()
+                != Path(candidate_workspace.common_dir).resolve()
+                or git_identity("--abbrev-ref", "HEAD") != candidate_workspace.branch
+                or not _verify_candidate_git_worktree(ws_path, _pre_dispatch_sha, sanitized_git_env)
+            ):
+                raise ControllerError("CANDIDATE_WORKTREE_HEAD_OR_DIRTY_MISMATCH")
+        except OSError as exc:
+            raise ControllerError("CANDIDATE_WORKTREE_IDENTITY_UNVERIFIED") from exc
 
         task_queue.begin_dispatch(
             task_id,
@@ -3229,7 +3431,7 @@ class MilestoneCEndToEndPipeline:
         )
 
         try:
-            worker_outcome = worker_step(worker_binding, attempt_num, None)
+            worker_outcome = worker_step(worker_binding, attempt_num, ws_path)
             r_ctx = worker_outcome.review_context
             changed_paths = [
                 *(fc.path for fc in r_ctx.agent_result.files_changed),
@@ -3252,8 +3454,7 @@ class MilestoneCEndToEndPipeline:
                 and all(c in "0123456789abcdefABCDEF" for c in _cand_sha)
             )
             _git_inspect_ok = (
-                _pre_head_ok
-                and _cand_sha_valid
+                _cand_sha_valid
                 and _post_head_proc.returncode == 0
                 and _post_head_sha.lower() == _cand_sha.lower()
             )
@@ -3463,10 +3664,10 @@ class MilestoneCEndToEndPipeline:
                 and receipt.import_origin_report is not None
                 and receipt.import_origin_report.verified is True
             )
-            if not receipt.passed or (origin_required and not origin_ok):
+            if not receipt.aggregate_checks_passed or (origin_required and not origin_ok):
                 blocker = (
                     receipt.failure_reason
-                    if not receipt.passed and receipt.failure_reason
+                    if not receipt.aggregate_checks_passed and receipt.failure_reason
                     else (
                         "IMPORT_ORIGIN_MISMATCH"
                         if origin_required and not origin_ok
@@ -3582,6 +3783,41 @@ class MilestoneCEndToEndPipeline:
                     gate_decision, worker_outcome.review_context
                 )
             )
+            acceptance = None
+            acceptance_ok = False
+            if (
+                provenance_ok
+                and trusted_manifest is not None
+                and runner is None
+                and r_ctx.task.attempt == attempt_num
+            ):
+                try:
+                    acceptance = self._evaluate_trusted_acceptance(
+                        trusted_manifest,
+                        ws_path,
+                        r_ctx,
+                        receipt,
+                        {
+                            criterion.id
+                            for criterion in phase.acceptance_criteria
+                            if criterion.required
+                        },
+                        milestone_id,
+                    )
+                    acceptance_ok = (
+                        acceptance is not None
+                        and acceptance.passed
+                        and acceptance.project_id == project_id
+                        and acceptance.milestone_id == milestone_id
+                        and acceptance.task_id == task_id
+                        and acceptance.candidate_sha == worker_outcome.candidate_sha
+                        and _verify_candidate_git_worktree(
+                            ws_path, worker_outcome.candidate_sha, sanitized_git_env
+                        )
+                    )
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    acceptance_ok = False
+
             if gate_decision.gate_outcome == "PASS" and review_verdict == ReviewVerdict.PASS:
                 if not provenance_ok:
                     review_verdict = ReviewVerdict.BLOCKED
@@ -3591,6 +3827,13 @@ class MilestoneCEndToEndPipeline:
                     blockers: tuple[str, ...] = ("REVIEW_PROVENANCE_MISMATCH",)
                     q_review: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
                     q_gate: Literal["PASS", "REVISE", "BLOCKED"] = "BLOCKED"
+                elif not acceptance_ok:
+                    gate_verdict = "BLOCKED"
+                    pr_ready = False
+                    next_action = "HALT_ON_BLOCKER"
+                    blockers = ("TRUSTED_ACCEPTANCE_UNVERIFIED",)
+                    q_review = "PASS"
+                    q_gate = "BLOCKED"
                 else:
                     gate_verdict = "PASS"
                     pr_ready = True
@@ -3640,6 +3883,9 @@ class MilestoneCEndToEndPipeline:
                 pr_ready=pr_ready,
                 next_authorized_action=next_action,
                 blockers=blockers,
+                trusted_acceptance_evaluation_id=(
+                    acceptance.evaluation_id if acceptance_ok and acceptance is not None else None
+                ),
             )
         except Exception as exc:
             task_queue.mark_interrupted(
