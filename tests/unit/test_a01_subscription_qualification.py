@@ -28,6 +28,60 @@ SYNTHETIC_API_KEY = "sk-" + "A" * 48
 SYNTHETIC_GOOGLE_KEY = "AIza" + "B" * 35
 
 
+@pytest.mark.parametrize(
+    "version,missing,help_exit,expected",
+    [
+        (v, "", 0, ok)
+        for v, ok in (
+            ("1.5.2", True),
+            ("1.5.9", True),
+            ("1.5.10", True),
+            ("1.6.0", True),
+            ("1.5.1", False),
+            ("2.0.0", False),
+            ("invalid", False),
+            ("1.6.0-rc1", False),
+        )
+    ]
+    + [
+        ("1.5.9", flag, 0, False)
+        for flag in (
+            "--sandbox",
+            "--settings",
+            "--mode",
+            "--disable-slash-commands",
+            "--output-format",
+        )
+    ]
+    + [("1.5.9", "", 1, False)],
+)
+def test_agy_semver_and_actual_cli_capabilities(
+    tmp_path: Path,
+    monkeypatch,
+    version: str,
+    missing: str,
+    help_exit: int,
+    expected: bool,
+) -> None:
+    import subprocess
+
+    from aipc.adapters.gemini import doctor
+
+    exe = tmp_path / "agy.exe"
+    exe.write_text("fake CLI", encoding="utf-8")
+    doctor._cli_compat_cache.clear()
+
+    def run(argv, **kwargs):
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, version, "")
+        flags = " ".join(f for f in doctor.REQUIRED_AGY_FLAGS if f != missing)
+        return subprocess.CompletedProcess(argv, help_exit, flags, "")
+
+    monkeypatch.setattr(doctor.subprocess, "run", run)
+    result = doctor.qualify_antigravity_runtime(executable=exe, security_verified=True)
+    assert result.qualified is expected
+
+
 def test_a01_probes_subscription_metadata_without_reading_raw_credentials(
     tmp_path: Path,
 ) -> None:

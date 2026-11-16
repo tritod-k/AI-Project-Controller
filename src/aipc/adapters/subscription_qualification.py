@@ -23,7 +23,7 @@ from pydantic import StrictBool, model_validator
 from aipc.adapters.codex.transport import RUNTIME_VERSIONS as CODEX_QUALIFIED_RUNTIME_VERSIONS
 from aipc.adapters.codex.transport import SDK_VERSION as CODEX_PINNED_SDK_VERSION
 from aipc.adapters.gemini.doctor import (
-    QUALIFIED_AGY_VERSIONS,
+    AGY_VERSION_RANGE,
     AntigravityQualificationResult,
     find_agy_executable,
     qualify_antigravity_runtime,
@@ -487,7 +487,7 @@ def qualify_antigravity_subscription_runtime(
         supported_model_ids=models,
         unverified_or_unavailable_model_ids=UNVERIFIED_ANTIGRAVITY_MODELS,
         account_independent_metadata={
-            "qualified_cli_versions": ",".join(sorted(QUALIFIED_AGY_VERSIONS)),
+            "qualified_cli_versions": AGY_VERSION_RANGE,
             "secret_read_performed": False,
             "sanitized_child_env": True,
         },
