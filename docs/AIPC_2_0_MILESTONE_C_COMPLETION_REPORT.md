@@ -1,5 +1,59 @@
 # AIPC 2.0 Milestone C Completion Report — Universal Project Support, End-to-End Automation & Self-Development Dogfooding (`C01`–`C03`)
 
+## Phase Completion Report — scheduled MC-AUDIT recovery, 2026-11-17
+
+### Phase
+AIPC 2.0 Milestone C, C01-C03, MC-AUDIT-01..07 closure only.
+
+### Status
+PARTIAL — local implementation/verification completed; replacement CI and fresh exact-SHA final review PENDING at documentation time.
+
+### Summary / Implemented
+Pre-dispatch candidate validation, mandatory C03 handoff gate, external pinned operator tests, immutable source binding, authenticated receipt digests, measured tool/image provenance, scoped POSIX reaping, and installed-wheel import-precedence regression. See the current evidence document for details and compatibility rationale.
+
+### Files Changed
+`src/aipc/adapters/subscription_worker.py`, `src/aipc/controller/milestone_c_pipeline.py`, `src/aipc/project/universal_profiles.py`, `src/aipc/review/trusted_acceptance_harness.py`; their B01/C01/C02/C03 unit test files; CURRENT_STATE and the three required milestone/roadmap documents.
+
+### Tests Executed / Test Results
+- Windows required A01/A03/B01/C01/C02/self_dev_runner/C03 suites: 248 passed, 1 expected skip, exit 0.
+- Full CI non-live Linux selection from `.github/workflows/ci.yml`: 1316 passed, 4 expected skips, exit 0.
+- Ruff check/format (319 files), domain/project schema checks (4/2), offline backend wheel build, input hashes, diff hygiene and key-pattern scan: pass.
+- All Python/provider/container execution sanitized; bytecode disabled. Details and exact commands/logs: evidence document and external audit directory.
+
+### Acceptance Criteria
+- [PASS] Local regression closure for MC-AUDIT-01..07, including source/test substitution and spoofed-count denial.
+- [PASS] Required Windows and Linux gates, static/schema/build checks, preserved edits and Stable isolation.
+- [UNVERIFIED] Replacement exact-SHA Python 3.12/3.13 GitHub Actions CI.
+- [UNVERIFIED] Ordered fresh isolated read-only final review and PR #7 Ready-for-Review promotion.
+
+### Evidence
+`H:/AIPC_Workspace/runtime_c/audit/scheduled_verification_inputs.json`, `scheduled_static_receipt.json`, `scheduled_windows_required.log`, `scheduled_linux_full_ci.log`, and retained real worker output/FAILED bridge receipt. Prior unrelated accepted receipts are retained; no live self-development success is inferred from local tests.
+
+### Git Handoff
+- Branch/worktree: `gemini/aipc-2.0-milestone-c`, `H:/000ProjectCode/AI_Project_Controller`, Local mode.
+- Code commit: `edb766b165b9caaa45d1b779ecefae534dfca65d`.
+- Message: `AIPC Milestone C attempt 01 - close MC-AUDIT-01 through 07`.
+- This companion docs commit is resolved by `git log -1`; freeze/publish its exact SHA externally after CI.
+- Last stable checkpoint: `849c86684867487f6f0ad8eb54c603cba240dd34`; Stable untouched.
+
+### CURRENT_STATE.md
+Updated: yes. Status: AWAITING_REVIEW. Phase Gate: PENDING.
+
+### Warnings / Known Issues
+Remote CI and final review pending. Failed bridge guard receipt preserved; no provider action replayed. Optional build frontend absent, backend wheel succeeded. Historical documentation below is superseded by this section. EXPERIMENTAL / SUPERVISED only.
+
+### Architecture Deviations
+None from the authorized scope. Optional receipt fields preserve legacy parsing; release/dogfooding gates enforce the stronger source-bound contract. Canonical domain schema versions unchanged.
+
+### Future Considerations
+C.5 and D remain planning-only and unauthorized; no next phase started.
+
+### Approvals Requested
+None for the already authorized push/review/promotion workflow. Final merge remains exclusively the Human Commander's decision.
+
+### Recommended Next Action
+Require green exact-SHA CI, freeze, obtain final independent review, conditionally promote PR #7, write the done marker, pause the automation, and stop for Human Commander merge approval. Attribution: K.TRITOD.
+
 ## Latest Phase Completion Report — post-03ab850 CI closure, 2026-11-16
 
 - **Status:** COMPLETED (local Windows & Linux Docker gates PASS; **CI PENDING** on GitHub Actions Python 3.12 & 3.13; Phase Gate PENDING final CI + independent Codex review). Repair iterations used: **1 / 2**.

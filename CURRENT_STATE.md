@@ -1,5 +1,29 @@
 # Current Project State
 
+## Scheduled MC-AUDIT recovery — 2026-11-17 (authoritative current handoff)
+
+This section supersedes earlier readiness claims. K.TRITOD authorized the local subscription-only recovery of MC-AUDIT-01 through MC-AUDIT-07. Code checkpoint: `edb766b165b9caaa45d1b779ecefae534dfca65d`. Status: **AWAITING_REVIEW**; Phase Gate: **PENDING**. Replacement GitHub Actions Python 3.12/3.13 CI and the subsequent fresh read-only exact-SHA review are **PENDING at this documentation commit**. Their final receipts belong in PR #7 and the external audit directory; do not mutate the frozen SHA to revise this timestamp.
+
+- MC-AUDIT-01/04: C02 validates controller-owned candidate identity, baseline, cleanliness, approved scope and Stable disjointness before dispatch; release handoff requires source-bound, exact-task/phase/attempt C03 acceptance for every required criterion.
+- MC-AUDIT-02/03: criteria execute from immutable Git blobs with external operator-pinned test bytes; observed HEAD, source-tree digest and test digest are authenticated in retained receipts. Wrong HEAD, dirty/mutated source and modified candidate test cases are covered.
+- MC-AUDIT-05/06: console counts remain observations until trusted criterion execution; default verification probes actual required tool versions, pins the local image ID, and fails closed on unavailable tools/images. Earlier genuine Python/Node container observations are retained in `audit/mc06_real_container_receipts.json`; they are aggregate observations, not behavioral acceptance.
+- MC-AUDIT-07: POSIX reaping targets the owned process group, preserving sibling exit status. Windows Job Object cleanup handles a root that already exited.
+- Linux import repair: immutable snapshot paths take precedence over installed wheels only after trusted pytest/vault bootstrap. A competing-package regression fails before the repair and passes after it. The unchanged-source image masking control also passed all three affected cases.
+
+Fresh local evidence (all commands use `.venv/Scripts/python.exe -B -m tools.sanitized_exec`, with `PYTHONDONTWRITEBYTECODE=1`):
+
+- Required Windows suites: **248 passed, 1 POSIX-only skip**, exit 0, 781.51s.
+- Full non-live CI selection on Linux Python 3.13.18: **1316 passed, 4 expected platform/runtime skips**, exit 0, 769.53s. Container image `sha256:b7b6ffb860ad69ac632ede85ea933d593494cf03937978dfc7123864966a9172`; network none, read-only source/root, non-root, all capabilities dropped, no-new-privileges. Snapshot import origin and source digests were verified.
+- Ruff lint and format: exit 0, 319 files formatted; canonical/project schemas: 4/2 checked; wheel: built using existing backend with `pip wheel --no-index --no-deps --no-build-isolation`; diff hygiene and key-pattern scan: clean. The optional `build` frontend was absent; no dependency installation was needed.
+
+Receipt compatibility: the two digest fields are optional for legacy receipt parsing; mandatory C02 and dogfooding gates require source-bound receipts. Canonical domain models and their schema versions are unchanged. Legacy receipts alone cannot satisfy the strengthened release gate.
+
+Recovery/provenance: all eight interrupted source/test edits were preserved and their saved hashes verified. Qualified Codex subscription worker session `01a1e5e4-c49b-7a41-b418-90b35334dd88` produced the bounded import fix and four passing targeted cases. Its bridge guard rejected test scratch outside the approved file scope and restored the pre-run source/index; the original eight hashes and staging were restored, and the saved worker patch was reapplied and freshly verified. Scratch artifacts were preserved outside Candidate; the provider action was not replayed. The failed bridge receipt is retained as FAILED and is not represented as a successful self-development cycle.
+
+External evidence root: `H:/AIPC_Workspace/runtime_c/audit/` (`scheduled_verification_inputs.json`, `scheduled_static_receipt.json`, `scheduled_windows_required.log`, `scheduled_linux_full_ci.log`, `resume_codex_worker.jsonl`, and the failed bridge outcome). Durable progress is `state/codex_mc_audit_progress.json`. Original queue terminal attempts were preserved without replay; historical `final_ci_recovery_session.json` predates this recovery and is not current release state.
+
+Stable remains clean and pinned at `849c86684867487f6f0ad8eb54c603cba240dd34`. Work remains in Local mode on `gemini/aipc-2.0-milestone-c` at `H:/000ProjectCode/AI_Project_Controller`; no new implementation worktree was created. C.5 and D remain planning-only/unauthorized. No merge or auto-merge is authorized.
+
 ## Project
 AI Project Controller
 
@@ -10,13 +34,16 @@ AI Project Controller
 AIPC 2.0 — Milestone C (C01–C03: Universal Project Support, End-to-End Automation & Self-Development Dogfooding)
 
 ## Status
-AWAITING_REVIEW (post-03ab850 CI closure Iteration 1/2 complete at `12d2d9f`; 212/212 Windows + 8/8 Linux Docker `aipc-final-ci:py313-diag` tests & Ruff/schemas PASS; GitHub Actions CI PENDING)
+
+AWAITING_REVIEW (MC-AUDIT-01..07 local closure verified; replacement Python 3.12/3.13 CI and fresh exact-SHA final review PENDING).
 
 ## Current Attempt
-Milestone C Attempt 01 (`gemini/aipc-2.0-milestone-c`); post-`03ab850` continuation CI closure Iteration 1 of 2 (`12d2d9f438349927fe6906e2f9f231c8a68b0996`).
+
+Milestone C Attempt 01; Commander-authorized scheduled quota recovery of MC-AUDIT-01..07, resuming the eight preserved edits without restarting C01-C03.
 
 ## Phase Gate
-PENDING (local Windows & Linux Docker gates PASS; GitHub Actions Python 3.12 & 3.13 CI PENDING; final independent Codex review pending green CI)
+
+PENDING. Worker does not self-approve. Local gates pass; external CI and subsequent independent release review remain prerequisites.
 
 ## Last Stable Checkpoint
 - `master` baseline: `849c866` (Milestone B merge PR #6, following Milestone A merge PR #5 `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`, Phase 24 merge PR #4 `26f455fd40d7728d99dcf5494c1cad9353e45988`, Phase 23 merge PR #3 `83578a4e56b4e549d33e8c941ea1679992ab4ebc`, PR #2 `0c4e9466f0a31330637565ebdef204a184cd44e0`, PR #1 `9a74822d50dad88e54590e4904af5f56dfd329c1`, and historical Phase 22 baseline `aipc-phase-22-pass` at `41db10ae933ec0ca0f9d7207bf1e6b8c3d227833`).
@@ -25,9 +52,8 @@ PENDING (local Windows & Linux Docker gates PASS; GitHub Actions Python 3.12 & 3
 `gemini/aipc-2.0-milestone-c`, `H:/000ProjectCode/AI_Project_Controller`.
 
 ## Last Commit
-`12d2d9f438349927fe6906e2f9f231c8a68b0996` (`12d2d9f` — post-`03ab850` CI closure Iteration 1/2 across `subscription_worker.py`, `milestone_c_pipeline.py`, `self_dev_runner.py`, and their B01/C02/self-runner test suites, following `03ab850` and `632f06f36c60c98278c45922836cafa1aea7c779` Candidate SemVer/capability bootstrap). This documentation accompanies `12d2d9f`; resolve the documentation commit SHA using `git log -1`. Earlier implementation history follows.
 
-`8dec3c1` (`8dec3c1` — Milestone C `C01`–`C03` nineteenth-pass `MC-IR-01`–`MC-IR-04` checkpoint across `milestone_c_pipeline.py`, `self_dev_runner.py`, and `trusted_acceptance_harness.py`, following `17742d4` eighteenth-pass hardening: closing audit-hook registration before candidate execution and removing forgeable caller-filename exceptions (`MC-IR-01`), enforcing retained code-object identity and `FrameType` descriptor sealing (`f_back`/`f_locals`/`f_code`/`f_globals`/`f_builtins`/`clear`) for criterion runner frames (`MC-IR-02`), binding pre-dispatch candidate Git baseline SHA (`git rev-parse --verify HEAD`) and fail-closed NUL-delimited `git status`/`git diff` scope verification (`MC-IR-03`), and enforcing `build_sanitized_child_env` across all C02 Git subprocess calls (`MC-IR-04`); following `3b6c890` seventeenth-pass `MC-RR2-01`–`MC-RR2-05`, `6857b52` sixteenth-pass `MC-RR-01`–`MC-RR-07`, `206cd48` / `8f99035` fifteenth-pass C15-SEC-01, C15-SEC-02, C15-ARCH-03, C15-SEC-04, C15-ARCH-05, and C15-ARCH-06 hardening, `5dc62f7`, `ccdf012`, `e7de506`, `965057a`, `e9fde2e`, `cd5e982`, `7399643`, `0c5b5c8`, `05645ec`, `2065313`, `b9c821a`, `18bf6c8`, `d12f152`, `7ffccd4`, `1934593`, `eae7689` `C03`, `2c0a84b` `C02`, `2df59c7` `C01`, `4db2134` / `4c1aab3` Gemini 4 Hydrogen worker integration, and `f997783` targeted 2-tier inline Python execution policy).
+Code checkpoint `edb766b165b9caaa45d1b779ecefae534dfca65d` — AIPC Milestone C attempt 01 - close MC-AUDIT-01 through 07. This documentation is the companion checkpoint; resolve its final HEAD with git log -1. The frozen final SHA and remote receipts will be recorded externally after push.
 
 ## Completed Phases
 - Phase 00 — Repository Bootstrap: PASS (external approval).
@@ -151,51 +177,32 @@ None beyond Milestone C (`C01`–`C03`) — Milestone D (`D01`–`D03`) remains 
 ---
 
 ## Current Work
-Completed Phase 23 Attempt 01 & Attempt 02 (`feature/operational-cli-live-runner`):
-1. **Stage 1 & 2 (Live Provider CLI)**: Extended `src/aipc/cli.py` with `--run-phase`, `--provider`, `--verification-isolation` (default `"blocked"`), `--container-image`, `--container-runtime`, `--verify-command`, `--model`, `--timeout`, `--max-attempts`, `--auto-repair`, and `--preflight`, while preserving 100% backward compatibility with all existing CLI flags and `--providers` contracts.
-2. **Stage 3 (10-Stage Preflight Safety)**: Implemented `run_live_preflight()` verifying project definition validity, disjoint workspace/runtime roots, Git worktree cleanliness & phase dependency order, provider qualification, Antigravity OAuth session, Docker daemon readiness, verification image presence, container security configuration, approval requirements, and recovery state.
-3. **Stage 4 (Three-Phase Live Validation)**: Executed Phases 01, 02, and 03 consecutively via the official `aipc` CLI with live Gemini (`agy.exe 1.5.3`) and Docker container verification (`aipc-verify:py313-v1`), achieving `PASS` across all 3 phases and `COMPLETED` project status.
-4. **Stage 5 (Recovery & Failure Validation)**: Added deterministic CLI tests in `tests/integration/test_cli.py` verifying that failed tests prevent Phase Gate PASS, interrupted execution preserves recovery state, duplicate dispatch is idempotent, uncommitted user edits are preserved, invalid providers/blocked isolation fail closed, missing Docker images block execution, and completed phases are not accidentally replayed.
-5. **Stage 6 (Documentation)**: Created beginner-friendly `docs/OPERATIONAL_CLI_GUIDE.md` with verified PowerShell commands and updated `CURRENT_STATE.md`.
-6. **Attempt 02 Review Corrections (Priorities 1, 2, 3)**:
-   - **Priority 1 (Git Fast-Forward Failure Handling)**: Replaced fragile merge call with `sync_primary_to_stable()` enforcing clean tree check, ancestor validation, `--ff-only`, stat cache refresh (`update-index -q --refresh`), and HEAD SHA verification. Returns `SYNC_EXIT_CODE = 3` and reports `outcome="RECONCILIATION_REQUIRED"` on failure, preserving Phase Gate PASS and checkpoint tags without data loss.
-   - **Priority 2 (Independent Acceptance Verification)**: Added `load_acceptance_rules()`, `--acceptance-rules`, and `--require-explicit-acceptance` enforcing that operator-defined rules reside outside the repository/worktree roots. Outputs `_acceptance_report` distinguishing `EXPLICIT_CRITERION_RULES` from `GENERIC_TEST_EXECUTION_ONLY`. Added tests proving missing functionality cannot receive a misleading acceptance PASS.
-   - **Priority 3 (Accurate Docker Qualification Reporting)**: Added `classify_container_readiness()` accurately distinguishing `CONTAINER_READY`, `CONTAINER_LIVE_VERIFIED`, `CONTAINER_BLOCKED`, and `CONTAINER_FAILED`, with `live_verification_rerun: false`.
-7. **Final Review Corrections (Correction A & B)**:
-   - **Correction A (Acceptance Rules Documentation & Guide Validation)**: Corrected `docs/OPERATIONAL_CLI_GUIDE.md` Section 4.3 with valid YAML schema matching `load_acceptance_rules()` (`schema_version: "1.0"`, `phases` mapping, phase ID keys, valid `CriterionRule` fields). Removed unsupported `target_test`. Added `test_acceptance_rules_guide_example_loads_successfully` verifying that the exact guide YAML example parses cleanly.
-   - **Correction B (Accurate Acceptance Reporting & Deterministic Reviewer Tests)**: Refined `_acceptance_report()` to report `explicit_rules_evaluated`, `verification_scope`, and `semantic_limitation` without overstating independence. Explicitly documented that `file_changed` verifies Git modifications (not semantic functional correctness) and `tests` verifies suite pass counts (not named test isolation). Added 5 deterministic Reviewer tests in `tests/review/test_reviewer.py` proving: (1) missing/unmodified files prevent Phase Gate PASS, (2) missing artifacts do not PASS, (3) failed tests prevent Reviewer PASS, (4) generic passing tests alone do not establish functional completeness without explicit criterion evaluation, and (5) valid explicit rules are evaluated by the canonical Reviewer. Documented semantic acceptance limitations and proposed bounded acceptance test harness.
+
+MC-AUDIT-01..07 code/test closure and the installed-wheel snapshot-import regression are verified. Synchronize this handoff, push, confirm both Actions versions on exact HEAD, freeze, then obtain one fresh isolated read-only final review before PR #7 promotion.
 
 ## Tests
-- **Milestone C & Hydrogen Worker Suites (`gemini/aipc-2.0-milestone-c`)**:
-  - `tests/unit/test_a01_subscription_qualification.py`, `tests/unit/test_a03_role_registry.py`, `tests/unit/test_b01_subscription_worker_automation.py`: `35 passed` (`15 passed` in `test_b01_subscription_worker_automation.py`).
-  - `tests/unit/test_a04_planner_engine.py`, `tests/controller/test_task_queue.py`: `10 passed` (`8f99035`).
-  - `tests/unit/test_c01_universal_project_profiles.py`: `17 passed` (`2df59c7`, `1115726`).
-  - `tests/unit/test_c02_multilang_e2e_pipeline.py`: `36 passed` (`8dec3c1`).
-  - `tests/unit/test_c03_trusted_acceptance_and_dogfooding.py`: `86 passed` (`8dec3c1`).
-  - `tests/controller/test_self_dev_runner.py`: `23 passed` (`8dec3c1`).
-  - **Sixteenth-Pass, Seventeenth-Pass, Eighteenth-Pass & Nineteenth-Pass Hardening (`MC-RR-01`–`MC-RR-07`, `MC-RR2-01`–`MC-RR2-05`, `MC-IR-01`–`MC-IR-04`, `6857b52`, `3b6c890`, `17742d4`, `8dec3c1`)**: Verified across `milestone_c_pipeline.py`, `self_dev_runner.py`, `trusted_acceptance_harness.py`, `subscription_worker.py`, and `recovery/manager.py` (non-reentrant C descriptor slot getters, unforgeable audit-hook registration closure before candidate execution across all 5 audit hooks + sealed module wrappers without caller-filename exceptions, canonical `_trusted_exes` + ancestor symlink/reparse point rejection + `args[0]`/`executable` validation + `_winapi.CreateProcess` blocking, `_SealedMeta` vault dispatch + `FrameType` descriptor sealing + retained code-object identity protecting runner frames `_vc_runner` against test frame-walk, C02 parent/child `_ctrl_key`/`_auth_nonce` separation, queue contract project/phase/workspace/path-scope + controller-captured pre-dispatch Git baseline SHA + fail-closed sanitized NUL-delimited `git status`/`git diff` verification + `validation_commands` execution binding, canonical `RecoveryManager.plan`/`inspect`/`execute` journal verification with pre-action `PLANNED` status and post-recovery review gate requirement, and durable `.aipc_controller_keyring.json` `TrustedExecutionKeyring` with `key_id` rotation).
-  - **Full CI Regression**: `1264 passed` (`17742d4`), plus targeted Pass 19 `MC-IR-01`..`MC-IR-04` checkpoint (`8dec3c1`).
-  - `ruff check` and `ruff format --check`: clean (`0 errors`, `319 files already formatted`).
-  - Domain and project JSON schemas: verified (`Checked 4 canonical schemas`, `Checked 2 project schemas`).
+
+Fresh Windows: 248 passed, 1 expected POSIX skip, exit 0 (781.51s). Full Linux Python 3.13.18 non-live CI: 1316 passed, 4 expected skips, exit 0 (769.53s). Ruff lint/format, 4 canonical + 2 project schemas, offline wheel backend build, source hash verification, diff hygiene and key-pattern scan pass. GitHub Actions Python 3.12/3.13 replacement CI is PENDING at this commit. See the authoritative recovery section and external logs for commands/provenance.
 
 ## Required Fixes / Remaining Work
-- Resume after operator machine restart: finish verifying `test_c19_mc_ir_02_forged_stdlib_filenames_and_frame_walking_blocked_in_criterion_vault`, run full regression (`1,267` tests), run live read-only Codex independent review, and open the Milestone C Pull Request targeting `master`.
-- Milestone D (`D01`–`D03`) remains unauthorized.
+
+Push the companion checkpoint; require green Python 3.12/3.13 CI on its exact SHA; freeze without further commits; run a fresh subscription-only read-only final release review. Promote PR #7 only with zero confirmed release blockers; then write the completion marker and pause the scheduled automation. Human Commander retains merge authority.
 
 ## Warnings / Known Issues
-- `CONTAINER_LIVE_VERIFIED` requires a running Docker Desktop / Linux Engine daemon and local `aipc-verify:py313-v1` image on the host machine; if Docker is stopped, `verification_isolation="container"` fails closed (`BLOCKED`).
-- Live Codex execution and live Codex-to-Gemini handoff remain `DEFERRED` due to Codex weekly quota exhaustion.
-- Unattended production execution remains `NO-GO`.
-- Semantic code acceptance is bounded by structural verification (file modifications, artifact collections, aggregate test execution); full per-criterion behavioral isolation is a documented future consideration.
+
+No new local test failure remains. CI and final independent review are not yet verified for this checkpoint. The failed worker bridge receipt is retained truthfully; local patch verification does not establish a successful live self-development cycle. Optional build frontend absent; the installed backend produced the wheel without new dependencies. Release remains EXPERIMENTAL / SUPERVISED; unattended production is NO-GO.
 
 ## Recovery Notes
-- Historical Phase 00–22 checkpoint tags (`aipc-phase-00-pass` .. `aipc-phase-22-pass`), merged `master` (`849c866`), and validation branches (`validation/operational-readiness`, `validation/docker-container-qualification`, `gemini/phase-24-self-development`, `gemini/aipc-2.0-milestone-a`, `gemini/aipc-2.0-milestone-b`) are preserved intact.
+
+Original eight edits and their staging were preserved/restored by hash after scratch-induced worker guard rollback; the genuine worker patch was reapplied without provider replay. Runtime scratch and all audit evidence remain outside Candidate. Original C01-C03 queue entries remain terminal and unreplayed. The old recovery-session record is historical; current progress is runtime_c/state/codex_mc_audit_progress.json. Stable is untouched.
 
 ## Next Action
-Push `gemini/aipc-2.0-milestone-c` to update PR #7, confirm GitHub Actions Python 3.12 & Python 3.13 both succeed on the exact pushed HEAD SHA, freeze that SHA, run one fresh read-only independent Codex review (`codex.cmd exec -s read-only --ephemeral`), and promote PR #7 to Ready for Review without auto-merging. Proposed Milestone C.5 remains planning-only; Milestone D remains unauthorized.
+
+Push and verify replacement CI, freeze exact SHA, obtain fresh isolated final review, then conditionally promote PR #7 and stop for Human Commander merge approval. Do not start C.5 or D.
 
 ## Timestamp
-2026-11-16T18:50:00+07:00
+
+2026-11-16T20:09:40.5824752Z
 
 ## Latest Post-03ab850 CI Closure Handoff (supersedes earlier recovery notes)
 

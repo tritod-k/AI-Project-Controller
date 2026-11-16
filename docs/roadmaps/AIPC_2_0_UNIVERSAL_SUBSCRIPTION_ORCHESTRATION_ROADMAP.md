@@ -1,11 +1,35 @@
 # AIPC 2.0 — Universal Subscription-Based Multi-Agent Orchestration
 
+## Scheduled MC-AUDIT recovery — 2026-11-17 (authoritative current handoff)
+
+This section supersedes earlier readiness claims. K.TRITOD authorized the local subscription-only recovery of MC-AUDIT-01 through MC-AUDIT-07. Code checkpoint: `edb766b165b9caaa45d1b779ecefae534dfca65d`. Status: **AWAITING_REVIEW**; Phase Gate: **PENDING**. Replacement GitHub Actions Python 3.12/3.13 CI and the subsequent fresh read-only exact-SHA review are **PENDING at this documentation commit**. Their final receipts belong in PR #7 and the external audit directory; do not mutate the frozen SHA to revise this timestamp.
+
+- MC-AUDIT-01/04: C02 validates controller-owned candidate identity, baseline, cleanliness, approved scope and Stable disjointness before dispatch; release handoff requires source-bound, exact-task/phase/attempt C03 acceptance for every required criterion.
+- MC-AUDIT-02/03: criteria execute from immutable Git blobs with external operator-pinned test bytes; observed HEAD, source-tree digest and test digest are authenticated in retained receipts. Wrong HEAD, dirty/mutated source and modified candidate test cases are covered.
+- MC-AUDIT-05/06: console counts remain observations until trusted criterion execution; default verification probes actual required tool versions, pins the local image ID, and fails closed on unavailable tools/images. Earlier genuine Python/Node container observations are retained in `audit/mc06_real_container_receipts.json`; they are aggregate observations, not behavioral acceptance.
+- MC-AUDIT-07: POSIX reaping targets the owned process group, preserving sibling exit status. Windows Job Object cleanup handles a root that already exited.
+- Linux import repair: immutable snapshot paths take precedence over installed wheels only after trusted pytest/vault bootstrap. A competing-package regression fails before the repair and passes after it. The unchanged-source image masking control also passed all three affected cases.
+
+Fresh local evidence (all commands use `.venv/Scripts/python.exe -B -m tools.sanitized_exec`, with `PYTHONDONTWRITEBYTECODE=1`):
+
+- Required Windows suites: **248 passed, 1 POSIX-only skip**, exit 0, 781.51s.
+- Full non-live CI selection on Linux Python 3.13.18: **1316 passed, 4 expected platform/runtime skips**, exit 0, 769.53s. Container image `sha256:b7b6ffb860ad69ac632ede85ea933d593494cf03937978dfc7123864966a9172`; network none, read-only source/root, non-root, all capabilities dropped, no-new-privileges. Snapshot import origin and source digests were verified.
+- Ruff lint and format: exit 0, 319 files formatted; canonical/project schemas: 4/2 checked; wheel: built using existing backend with `pip wheel --no-index --no-deps --no-build-isolation`; diff hygiene and key-pattern scan: clean. The optional `build` frontend was absent; no dependency installation was needed.
+
+Receipt compatibility: the two digest fields are optional for legacy receipt parsing; mandatory C02 and dogfooding gates require source-bound receipts. Canonical domain models and their schema versions are unchanged. Legacy receipts alone cannot satisfy the strengthened release gate.
+
+Recovery/provenance: all eight interrupted source/test edits were preserved and their saved hashes verified. Qualified Codex subscription worker session `01a1e5e4-c49b-7a41-b418-90b35334dd88` produced the bounded import fix and four passing targeted cases. Its bridge guard rejected test scratch outside the approved file scope and restored the pre-run source/index; the original eight hashes and staging were restored, and the saved worker patch was reapplied and freshly verified. Scratch artifacts were preserved outside Candidate; the provider action was not replayed. The failed bridge receipt is retained as FAILED and is not represented as a successful self-development cycle.
+
+External evidence root: `H:/AIPC_Workspace/runtime_c/audit/` (`scheduled_verification_inputs.json`, `scheduled_static_receipt.json`, `scheduled_windows_required.log`, `scheduled_linux_full_ci.log`, `resume_codex_worker.jsonl`, and the failed bridge outcome). Durable progress is `state/codex_mc_audit_progress.json`. Original queue terminal attempts were preserved without replay; historical `final_ci_recovery_session.json` predates this recovery and is not current release state.
+
+Stable remains clean and pinned at `849c86684867487f6f0ad8eb54c603cba240dd34`. Work remains in Local mode on `gemini/aipc-2.0-milestone-c` at `H:/000ProjectCode/AI_Project_Controller`; no new implementation worktree was created. C.5 and D remain planning-only/unauthorized. No merge or auto-merge is authorized.
+
 > **Document ID:** AIPC-ROADMAP-2.0
 > **Version:** 0.5 — Milestone A (`A01`–`A04`) Merged via PR #5; Milestone B (`B01`–`B03`) Realigned with Full `B01`–`B04` Criteria Preservation
 > **Prepared:** 2026-11-10 (Updated: 2026-11-12)
 > **Project:** [AI Project Controller](https://github.com/tritod-k/AI-Project-Controller)
 > **Project owner / attribution:** K.TRITOD
-> **Status:** **MILESTONE B (`B01`–`B03`) AUTHORIZED FOR IMPLEMENTATION ON `gemini/aipc-2.0-milestone-b` (MILESTONES C & D REMAIN PLANNING ONLY)**
+> **Status:** Milestone B merged; Milestone C MC-AUDIT recovery authorized, local gates verified, CI/final review PENDING. C.5 and D remain planning-only/unauthorized.
 > **Dependency:** Phase 24 (PR #4, `26f455fd40d7728d99dcf5494c1cad9353e45988`) and AIPC 2.0 Milestone A (`A01`–`A04`, PR #5, `ff1fa4a58f5a21fb71897afb55ce557a3d424b2e`) — independently reviewed, accepted, and merged by the Human Commander.
 > **Release policy:** EXPERIMENTAL / SUPERVISED until independently qualified for another classification.
 > **Billing policy:** Subscription-authenticated Codex and Antigravity integrations only; **no separately billed AI APIs**.
