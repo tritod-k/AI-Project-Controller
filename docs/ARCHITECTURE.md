@@ -212,3 +212,24 @@ methods, manifest identity alignment, and probe normalization. `PluginRegistry` 
 bridges into `AgentRegistry`, `AgentRouter` qualifications, `MetricsTracker`, and `SharedToolRegistry`.
 Registering or operating plugins requires zero edits to core orchestration (`phase_manager.py`,
 `phase_gate.py`, `state_manager.py`) or the canonical domain schemas. See [Plugin Extension Model](PLUGIN_EXTENSION_MODEL.md).
+
+## Milestone C.5 review governance and adaptive repair budget
+
+Milestone C.5 (`RG01`–`RG04`) integrates controller-owned review governance and cumulative repair
+budget enforcement at the existing repair-dispatch boundary without altering canonical
+`ReviewResult`, `PhaseGate`, or creating a second gate:
+
+- **External Policy (`aipc.review.governance_policy`)**: loads version `1.0` operator-owned YAML
+  policy from an explicit external root (excluding Candidate/worker roots), verifying SHA-256
+  digest, `MilestoneAuthorizationEvidence`, and strict boolean/type contracts fail-closed.
+- **Evidence-Based Triage (`aipc.review.governance_triage`)**: evaluates `BoundReview` findings
+  at `BoundedRepairCoordinator` dispatch into `RELEASE_BLOCKER`, `NEEDS_TRIAGE`, or
+  `NON_BLOCKING_ADVISORY`. Raw `ReviewResult` and `PhaseGate` verdicts are preserved untouched;
+  advisories and uncertain/unbacked/out-of-scope findings never auto-dispatch repairs and hold in
+  `WAITING_HUMAN`.
+- **Durable Adaptive Repair Budget (`aipc.controller.repair_budget`)**: single-writer atomic JSON
+  ledger (`state_digest`-verified) shared across both `REVIEW_COORDINATOR` and
+  `MilestoneBRepairAndRecoveryOrchestrator` `VERIFICATION_FAILURE` routes, plus
+  `PersistentTaskQueue.begin_dispatch`. Enforces cumulative per-root-lineage and per-milestone
+  ceilings across restarts, provider switches, and approved child-task splits, with idempotent
+  reservation keys and single-use, scoped, expiring human `BudgetExtensionGrant` records.
