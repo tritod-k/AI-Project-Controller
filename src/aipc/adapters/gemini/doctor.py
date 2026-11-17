@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -9,7 +10,20 @@ from pathlib import Path
 
 from aipc.hardening.env_isolation import build_sanitized_child_env
 
-QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset({"1.5.2", "1.5.3", "1.5.5"})
+# Historical known versions retained for import compatibility, not eligibility.
+QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset(
+    {"1.5.2", "1.5.3", "1.5.5", "1.5.6", "1.5.7", "1.5.8", "1.5.9"}
+)
+AGY_VERSION_RANGE = ">=1.5.2,<2.0.0"
+
+
+def is_compatible_agy_version(version: str) -> bool:
+    """Accept stable SemVer releases in the qualified major-version range."""
+    if re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version) is None:
+        return False
+    return (1, 5, 2) <= tuple(map(int, version.split("."))) < (2, 0, 0)
+
+
 REQUIRED_AGY_FLAGS: tuple[str, ...] = (
     "--sandbox",
     "--mode",
@@ -187,7 +201,7 @@ def qualify_antigravity_runtime(
     cached = _cli_compat_cache.get(cache_key)
 
     if cached is None:
-        # 1. Verify exact version
+        # 1. Verify compatible semantic version; capabilities remain mandatory.
         sanitized_env = build_sanitized_child_env()
         try:
             ver_res = subprocess.run(
@@ -200,14 +214,11 @@ def qualify_antigravity_runtime(
             )
             raw_ver = (ver_res.stdout or ver_res.stderr or "").strip().split()
             version_str = raw_ver[0] if raw_ver else "unknown"
-            if ver_res.returncode != 0 or version_str not in QUALIFIED_AGY_VERSIONS:
+            if ver_res.returncode != 0 or not is_compatible_agy_version(version_str):
                 cached = (
                     False,
                     version_str,
-                    (
-                        f"unqualified agy version '{version_str}', "
-                        f"expected one of {sorted(QUALIFIED_AGY_VERSIONS)}"
-                    ),
+                    (f"unqualified agy version '{version_str}', expected {AGY_VERSION_RANGE}"),
                 )
             else:
                 # 2. Verify required security flags in help output
@@ -221,11 +232,11 @@ def qualify_antigravity_runtime(
                 )
                 help_text = (help_res.stdout or "") + (help_res.stderr or "")
                 missing = [flag for flag in REQUIRED_AGY_FLAGS if flag not in help_text]
-                if missing:
+                if help_res.returncode != 0 or missing:
                     cached = (
                         False,
                         version_str,
-                        f"agy CLI missing required security flags: {missing}",
+                        f"agy CLI missing required security flags or failed help probe: {missing}",
                     )
                 else:
                     cached = (True, version_str, "qualified")

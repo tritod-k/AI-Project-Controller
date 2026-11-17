@@ -23,7 +23,7 @@ from pydantic import StrictBool, model_validator
 from aipc.adapters.codex.transport import RUNTIME_VERSIONS as CODEX_QUALIFIED_RUNTIME_VERSIONS
 from aipc.adapters.codex.transport import SDK_VERSION as CODEX_PINNED_SDK_VERSION
 from aipc.adapters.gemini.doctor import (
-    QUALIFIED_AGY_VERSIONS,
+    AGY_VERSION_RANGE,
     AntigravityQualificationResult,
     find_agy_executable,
     qualify_antigravity_runtime,
@@ -47,9 +47,15 @@ ProviderFamily = Literal["openai_codex", "google_antigravity"]
 OrchestrationRole = Literal["planner", "worker", "reviewer"]
 CapabilityState = Literal["AVAILABLE", "BLOCKED", "UNVERIFIED", "SANDBOXED"]
 
+PRIMARY_ANTIGRAVITY_WORKER_MODEL: str = "gemini-4-hydrogen-medium"
+FALLBACK_ANTIGRAVITY_WORKER_MODEL: str = "gemini-3.8-flash-medium"
 QUALIFIED_ANTIGRAVITY_HEADLESS_MODELS: tuple[str, ...] = (
-    "gemini-3.8-flash-medium",
+    FALLBACK_ANTIGRAVITY_WORKER_MODEL,
     "flash",
+    PRIMARY_ANTIGRAVITY_WORKER_MODEL,
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-xhigh",
 )
 UNVERIFIED_ANTIGRAVITY_MODELS: tuple[str, ...] = (
     "argon",
@@ -481,7 +487,7 @@ def qualify_antigravity_subscription_runtime(
         supported_model_ids=models,
         unverified_or_unavailable_model_ids=UNVERIFIED_ANTIGRAVITY_MODELS,
         account_independent_metadata={
-            "qualified_cli_versions": ",".join(sorted(QUALIFIED_AGY_VERSIONS)),
+            "qualified_cli_versions": AGY_VERSION_RANGE,
             "secret_read_performed": False,
             "sanitized_child_env": True,
         },
@@ -744,8 +750,10 @@ def qualify_all_subscription_runtimes(
 __all__ = [
     "CapabilityState",
     "ChildEnvironmentIsolationError",
+    "FALLBACK_ANTIGRAVITY_WORKER_MODEL",
     "OperatingProfile",
     "OrchestrationRole",
+    "PRIMARY_ANTIGRAVITY_WORKER_MODEL",
     "ProviderFamily",
     "ProviderRuntimeQualificationReport",
     "QUALIFIED_ANTIGRAVITY_HEADLESS_MODELS",

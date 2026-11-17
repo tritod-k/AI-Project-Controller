@@ -128,7 +128,7 @@ class RecoveryManager(AttemptObservations, RecoveryInspection):
         record = self.journal.load(identifier)
         owner = current_owner(self.versions.repository, self.versions.clock)
         record = RecoveryRecord.model_validate(
-            {**record.model_dump(), "status": "RUNNING", "owner": owner}
+            {**record.model_dump(), "status": "PLANNED", "owner": owner}
         )
         self.journal.write(path, record)
         changes = []

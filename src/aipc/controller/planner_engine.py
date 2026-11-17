@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
@@ -22,6 +23,12 @@ from aipc.agents.role_registry import (
     RoleSelectionRequest,
 )
 from aipc.controller.errors import ControllerError
+from aipc.controller.task_queue import (
+    MilestoneAuthorizationEvidence,
+    load_milestone_authorization_evidence,
+    persist_milestone_authorization_evidence,
+    verify_milestone_c_authorization_scope,
+)
 from aipc.domain.enums import RiskLevel
 from aipc.domain.models import (
     AgentResult,
@@ -52,15 +59,42 @@ _UNAUTHORIZED_MILESTONE_TOKENS: tuple[str, ...] = (
     "workstream-c",
     "workstream-d",
 )
+_STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS: tuple[str, ...] = (
+    "milestone-d",
+    "milestone_d",
+    "workstream-d",
+)
+_APPROVED_MILESTONE_C_TOKENS: tuple[str, ...] = (
+    "milestone-c",
+    "milestone_c",
+    "workstream-c",
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _references_unauthorized_milestone(text: str) -> bool:
+def _references_milestone_c(text: str) -> bool:
     lowered = text.strip().lower()
-    return any(tok in lowered for tok in _UNAUTHORIZED_MILESTONE_TOKENS)
+    if any(tok in lowered for tok in _APPROVED_MILESTONE_C_TOKENS):
+        return True
+    return any(
+        lowered == prefix or lowered.startswith(f"{prefix}-") or lowered.endswith(f"-{prefix}")
+        for prefix in ("c01", "c02", "c03")
+    )
+
+
+def _references_unauthorized_milestone(text: str, *, allow_milestone_c: bool = False) -> bool:
+    lowered = text.strip().lower()
+    if any(tok in lowered for tok in _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS):
+        return True
+    tokens = (
+        tuple(t for t in _UNAUTHORIZED_MILESTONE_TOKENS if t not in _APPROVED_MILESTONE_C_TOKENS)
+        if allow_milestone_c
+        else _UNAUTHORIZED_MILESTONE_TOKENS
+    )
+    return any(tok in lowered for tok in tokens)
 
 
 class HumanGoalSpec(CanonicalRecord):
@@ -85,15 +119,46 @@ class HumanGoalSpec(CanonicalRecord):
     expands_approved_scope: StrictBool = False
     approval_granted: StrictBool = False
     approval_id: str | None = None
+    approval_evidence_path: str | None = None
 
     @model_validator(mode="after")
     def validate_goal_spec(self) -> Self:
+        if any(
+            _references_milestone_c(val)
+            for val in (self.milestone_id, self.phase_id, self.phase_name)
+        ):
+            if (
+                self.approval_granted is not True
+                or not (self.approval_id and self.approval_id.strip())
+                or not (self.approval_evidence_path and self.approval_evidence_path.strip())
+            ):
+                raise ValueError(
+                    "milestone_id references unauthorized future milestone scope: "
+                    f"{self.milestone_id!r}"
+                )
+            try:
+                evidence = load_milestone_authorization_evidence(
+                    Path(self.approval_evidence_path.strip())
+                )
+                verify_milestone_c_authorization_scope(
+                    evidence,
+                    project_id=self.project_id,
+                    milestone_id=self.milestone_id,
+                    phase_id=self.phase_id,
+                    in_scope_paths=self.in_scope_paths,
+                    expected_approval_id=self.approval_id.strip(),
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "milestone_id references unauthorized future milestone scope: "
+                    f"{self.milestone_id!r}"
+                ) from exc
         for label, val in (
             ("milestone_id", self.milestone_id),
             ("phase_id", self.phase_id),
             ("phase_name", self.phase_name),
         ):
-            if _references_unauthorized_milestone(val):
+            if _references_unauthorized_milestone(val, allow_milestone_c=self.approval_granted):
                 raise ValueError(f"{label} references unauthorized future milestone scope: '{val}'")
         overlap = set(self.in_scope_paths) & set(self.out_of_scope_paths)
         if overlap:
@@ -734,8 +799,12 @@ __all__ = [
     "ClosedLoopCycleResult",
     "EvidenceCallable",
     "HumanGoalSpec",
+    "MilestoneAuthorizationEvidence",
     "PlannerOrchestrationEngine",
     "PlannerStageProposal",
     "ReviewerCallable",
     "WorkerCallable",
+    "load_milestone_authorization_evidence",
+    "persist_milestone_authorization_evidence",
+    "verify_milestone_c_authorization_scope",
 ]

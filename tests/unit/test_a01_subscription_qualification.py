@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from aipc.adapters.gemini.doctor import AntigravityQualificationResult
+from aipc.adapters.gemini.doctor import QUALIFIED_AGY_VERSIONS, AntigravityQualificationResult
 from aipc.adapters.subscription_qualification import (
     QUALIFIED_ANTIGRAVITY_HEADLESS_MODELS,
     QUALIFIED_CODEX_SUBSCRIPTION_MODELS,
@@ -26,6 +26,60 @@ from aipc.hardening.secrets import SecretExposureError
 
 SYNTHETIC_API_KEY = "sk-" + "A" * 48
 SYNTHETIC_GOOGLE_KEY = "AIza" + "B" * 35
+
+
+@pytest.mark.parametrize(
+    "version,missing,help_exit,expected",
+    [
+        (v, "", 0, ok)
+        for v, ok in (
+            ("1.5.2", True),
+            ("1.5.9", True),
+            ("1.5.10", True),
+            ("1.6.0", True),
+            ("1.5.1", False),
+            ("2.0.0", False),
+            ("invalid", False),
+            ("1.6.0-rc1", False),
+        )
+    ]
+    + [
+        ("1.5.9", flag, 0, False)
+        for flag in (
+            "--sandbox",
+            "--settings",
+            "--mode",
+            "--disable-slash-commands",
+            "--output-format",
+        )
+    ]
+    + [("1.5.9", "", 1, False)],
+)
+def test_agy_semver_and_actual_cli_capabilities(
+    tmp_path: Path,
+    monkeypatch,
+    version: str,
+    missing: str,
+    help_exit: int,
+    expected: bool,
+) -> None:
+    import subprocess
+
+    from aipc.adapters.gemini import doctor
+
+    exe = tmp_path / "agy.exe"
+    exe.write_text("fake CLI", encoding="utf-8")
+    doctor._cli_compat_cache.clear()
+
+    def run(argv, **kwargs):
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, version, "")
+        flags = " ".join(f for f in doctor.REQUIRED_AGY_FLAGS if f != missing)
+        return subprocess.CompletedProcess(argv, help_exit, flags, "")
+
+    monkeypatch.setattr(doctor.subprocess, "run", run)
+    result = doctor.qualify_antigravity_runtime(executable=exe, security_verified=True)
+    assert result.qualified is expected
 
 
 def test_a01_probes_subscription_metadata_without_reading_raw_credentials(
@@ -327,3 +381,28 @@ def test_a01_suite_strips_outer_credentials_and_blocks_secret_leakage(
     with pytest.raises(SecretExposureError):
         tampered = agy_rep.model_copy(update={"reasons": (f"Leaked {SYNTHETIC_API_KEY}",)})
         tampered.validate_report_invariants()
+
+
+def test_antigravity_1_5_8_and_hydrogen_qualification(tmp_path: Path) -> None:
+    """Antigravity 1.5.8 is qualified with Hydrogen supported and argon unverified."""
+    assert "1.5.8" in QUALIFIED_AGY_VERSIONS
+
+    home = tmp_path / "home"
+    (home / ".gemini" / "antigravity").mkdir(parents=True)
+    fake_agy = tmp_path / "agy.exe"
+    fake_agy.write_text("binary", encoding="utf-8")
+
+    report = qualify_antigravity_subscription_runtime(
+        executable=fake_agy,
+        home_dir=home,
+        qualification_override=AntigravityQualificationResult(
+            qualified=True,
+            version="1.5.8",
+            reason="qualified",
+            cli_compatible=True,
+            effective_security_verified=True,
+        ),
+    )
+    assert report.eligibility_state == "QUALIFIED"
+    assert "gemini-4-hydrogen-medium" in report.supported_model_ids
+    assert "argon" in report.unverified_or_unavailable_model_ids

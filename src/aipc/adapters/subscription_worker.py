@@ -12,11 +12,16 @@ and retained verification evidence.
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import errno
 import hashlib
 import json
+import os
 import re
 import shlex
+import signal
 import subprocess
+import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -25,15 +30,18 @@ from typing import Any, Literal, Self
 
 from pydantic import StrictInt, model_validator
 
+from aipc.adapters.gemini.antigravity_transport import ALLOW_RULES, DENY_RULES, find_agy_executable
 from aipc.adapters.operational_integration import classify_subscription_operational_error
 from aipc.adapters.subscription_qualification import (
+    FALLBACK_ANTIGRAVITY_WORKER_MODEL,
+    PRIMARY_ANTIGRAVITY_WORKER_MODEL,
     ProviderRuntimeQualificationReport,
     enforce_subscription_only_profile,
     evaluate_runtime_eligibility,
     qualify_antigravity_subscription_runtime,
     qualify_codex_subscription_runtime,
 )
-from aipc.controller.errors import ProviderInterruption
+from aipc.controller.errors import ControllerError, ProviderInterruption
 from aipc.domain.enums import AgentStatus, ChangeType
 from aipc.domain.errors import AgentError, AgentTimeoutError
 from aipc.domain.models import (
@@ -55,7 +63,10 @@ from aipc.hardening.env_isolation import (
 from aipc.hardening.secrets import assert_no_secrets
 from aipc.normalization.validation import validate_agent_result
 from aipc.recovery.models import ProviderCondition
+from aipc.review.context import context_fingerprint, digest, review_provenance
+from aipc.review.errors import PhaseGateError, ReviewContextError
 from aipc.review.llm.subscription_transports import snapshot_candidate_workspace
+from aipc.review.reviewer import bind_review
 
 _NL = chr(10)
 _BS = chr(92)
@@ -235,6 +246,7 @@ class SubscriptionWorkerConfig(CanonicalRecord):
     provider_id: Literal["gemini-antigravity", "codex"] = "gemini-antigravity"
     auth_mode: str = "antigravity_subscription"
     model_requested: NonBlank = "gemini-3.8-flash-medium"
+    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     agent_name: NonBlank = "aipc-implementation-worker"
     candidate_worktree: NonBlank
     stable_runner_root: str | None = None
@@ -307,10 +319,406 @@ def _run_git(
     )
 
 
+def _parse_linux_proc_stat(raw: str) -> tuple[str, int] | None:
+    rparen = raw.rfind(")")
+    if rparen == -1:
+        return None
+    rest = raw[rparen + 1 :].split()
+    if len(rest) < 3 or not rest[0]:
+        return None
+    try:
+        pgrp = int(rest[2])
+    except ValueError:
+        return None
+    return (rest[0], pgrp)
+
+
+def _posix_pid_state(pid: int) -> str:
+    """Return 'dead', 'live', or 'unknown' for a POSIX PID."""
+    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+        return "unknown"
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except (FileNotFoundError, ProcessLookupError):
+        return "dead"
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ESRCH):
+            return "dead"
+        return "unknown"
+    parsed = _parse_linux_proc_stat(raw)
+    if parsed is None:
+        return "unknown"
+    state, _pgrp = parsed
+    if state in ("Z", "X", "x"):
+        return "dead"
+    return "live"
+
+
+def _pid_exists(pid: int, env: Mapping[str, str] | None = None) -> bool:
+    if os.name == "nt":
+        sanitized = build_sanitized_child_env(env)
+        assert_child_env_isolated(sanitized)
+        try:
+            res = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                env=dict(sanitized),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return True
+        if res.returncode != 0:
+            return True
+        return str(pid) in (res.stdout or "")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if _posix_pid_state(pid) == "dead":
+        return False
+    return True
+
+
+def _posix_pgid_exists(pgid: int) -> bool:
+    if os.name == "nt":
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+        return True
+    saw_zombie_in_group = False
+    try:
+        with os.scandir("/proc") as entries:
+            proc_names = [entry.name for entry in entries if entry.name.isdigit()]
+    except OSError:
+        return True
+    for name in proc_names:
+        proc_pid = int(name)
+        parsed: tuple[str, int] | None = None
+        unreadable_or_malformed = False
+        try:
+            with open(f"/proc/{proc_pid}/stat", encoding="utf-8", errors="replace") as fh:
+                parsed = _parse_linux_proc_stat(fh.read())
+            if parsed is None:
+                unreadable_or_malformed = True
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
+                continue
+            unreadable_or_malformed = True
+        if unreadable_or_malformed or parsed is None:
+            getpgid_fn = getattr(os, "getpgid", None)
+            if getpgid_fn is None:
+                return True
+            try:
+                member_pgid = getpgid_fn(proc_pid)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ESRCH):
+                    continue
+                return True
+            if member_pgid == pgid:
+                return True
+            continue
+        state, stat_pgid = parsed
+        if stat_pgid != pgid:
+            continue
+        if state in ("Z", "X", "x"):
+            saw_zombie_in_group = True
+        else:
+            return True
+    if saw_zombie_in_group:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+_CREATE_SUSPENDED = 0x00000004
+
+
+class _JobObjectBasicAccountingInformation(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", ctypes.c_uint32),
+        ("TotalProcesses", ctypes.c_uint32),
+        ("ActiveProcesses", ctypes.c_uint32),
+        ("TotalTerminatedProcesses", ctypes.c_uint32),
+    ]
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _WindowsKillOnCloseJob:
+    """Windows Job Object that terminates assigned processes on close."""
+
+    def __init__(self, *, strict: bool = False) -> None:
+        self._handle: int | None = None
+        self._strict = strict
+        self.enrolled: bool = False
+        if os.name != "nt":
+            return
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k32.CreateJobObjectW.restype = ctypes.c_void_p
+        k32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        k32.SetInformationJobObject.restype = ctypes.c_int
+        k32.QueryInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        k32.QueryInformationJobObject.restype = ctypes.c_int
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k32.AssignProcessToJobObject.restype = ctypes.c_int
+        k32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.TerminateJobObject.restype = ctypes.c_int
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        k32.CloseHandle.restype = ctypes.c_int
+
+        h_job = k32.CreateJobObjectW(None, None)
+        if not h_job:
+            if self._strict:
+                raise ControllerError("Failed to create/configure Windows Job Object")
+            return
+        try:
+            info = _JobObjectExtendedLimitInformation()
+            info.BasicLimitInformation.LimitFlags = 0x2000
+            if not k32.SetInformationJobObject(h_job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                if self._strict:
+                    raise ControllerError("Failed to create/configure Windows Job Object")
+                k32.CloseHandle(h_job)
+                return
+            self._handle = h_job
+        except Exception:
+            k32.CloseHandle(h_job)
+            raise
+
+    def assign(self, pid: int | None, *, resume_suspended: bool = False) -> None:
+        if os.name != "nt":
+            return
+        if self._handle is None or pid is None:
+            if self._strict:
+                raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
+            return
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        h_proc = k32.OpenProcess(0x1F0FFF, False, pid)
+        if not h_proc:
+            if self._strict:
+                raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
+            return
+        try:
+            if not k32.AssignProcessToJobObject(self._handle, h_proc):
+                if self._strict:
+                    raise ControllerError(f"Failed to assign PID {pid} to Windows Job Object")
+                return
+            self.enrolled = True
+            if resume_suspended:
+                ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
+                ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+                ntdll.NtResumeProcess.restype = ctypes.c_int32
+                status = ntdll.NtResumeProcess(h_proc)
+                if status != 0 and self._strict:
+                    raise ControllerError(f"NtResumeProcess failed (status={status}) for PID {pid}")
+        finally:
+            k32.CloseHandle(h_proc)
+
+    def active_processes(self) -> int:
+        if os.name != "nt" or self._handle is None:
+            return 0
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        acct = _JobObjectBasicAccountingInformation()
+        ok = k32.QueryInformationJobObject(
+            self._handle,
+            1,
+            ctypes.byref(acct),
+            ctypes.sizeof(acct),
+            None,
+        )
+        if not ok:
+            if self._strict:
+                raise ControllerError("Failed to query Windows Job Object active processes")
+            return 0
+        return int(acct.ActiveProcesses)
+
+    def terminate_and_wait(self) -> None:
+        """Terminate the enrolled tree and independently verify job exhaustion."""
+        if os.name != "nt" or self._handle is None:
+            raise ControllerError("Windows Job Object unavailable for termination verification")
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        if not k32.TerminateJobObject(self._handle, 1):
+            raise ControllerError("TerminateJobObject failed")
+        for _ in range(20):
+            if self.active_processes() == 0:
+                return
+            time.sleep(0.05)
+        raise ControllerError(
+            "Windows Job Object still has active processes after TerminateJobObject"
+        )
+
+    def close(self) -> None:
+        if os.name != "nt" or self._handle is None:
+            return
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        h_job = self._handle
+        try:
+            self.terminate_and_wait()
+        finally:
+            self._handle = None
+            k32.CloseHandle(h_job)
+
+
+def _terminate_pid_tree(
+    pid: int | None,
+    env: Mapping[str, str],
+    *,
+    require_tree_kill: bool = False,
+    job_obj: _WindowsKillOnCloseJob | None = None,
+) -> None:
+    if pid is None:
+        return
+    if os.name == "nt":
+        res: subprocess.CompletedProcess[str] | None = None
+        kill_err: OSError | None = None
+        try:
+            res = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                env=dict(env),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            kill_err = exc
+        if require_tree_kill:
+            if kill_err is not None:
+                raise ControllerError(
+                    f"Failed to terminate worker process tree for PID {pid}: {kill_err}"
+                ) from kill_err
+            if res is not None and res.returncode != 0:
+                missing_root = (
+                    res.returncode in (128, 255)
+                    and not _pid_exists(pid, env)
+                    and job_obj is not None
+                    and job_obj.enrolled
+                )
+                if missing_root and job_obj is not None:
+                    # taskkill cannot find descendants once their root has exited.
+                    # The enrolled Job Object remains authoritative for that tree.
+                    job_obj.terminate_and_wait()
+                already_gone = (
+                    missing_root and job_obj is not None and job_obj.active_processes() == 0
+                )
+                if not already_gone:
+                    raise ControllerError(
+                        f"taskkill /F /T failed (rc={res.returncode}) for PID {pid}: "
+                        f"{(res.stderr or '').strip()}"
+                    )
+            elif _pid_exists(pid, env):
+                rc = res.returncode if res is not None else "none"
+                raise ControllerError(f"taskkill /F /T failed (rc={rc}) for PID {pid}")
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except (PermissionError, OSError) as exc:
+        if require_tree_kill and (_pid_exists(pid, env) or _posix_pgid_exists(pid)):
+            raise ControllerError(f"Failed to kill process group {pid}") from exc
+    wnohang = getattr(os, "WNOHANG", None)
+    if hasattr(os, "waitpid") and wnohang is not None:
+        for _ in range(32):
+            try:
+                wpid, _ = os.waitpid(-pid, wnohang)
+            except (ChildProcessError, OSError):
+                break
+            if wpid == 0:
+                break
+    # SIGKILL delivery is asynchronous. Even best-effort cleanup must give owned
+    # descendants time to exit before returning from an enrollment failure.
+    for _ in range(20):
+        if hasattr(os, "waitpid") and wnohang is not None:
+            for _ in range(32):
+                try:
+                    wpid, _ = os.waitpid(-pid, wnohang)
+                except (ChildProcessError, OSError):
+                    break
+                if wpid == 0:
+                    break
+        if not _pid_exists(pid, env) and not _posix_pgid_exists(pid):
+            return
+        time.sleep(0.05)
+    if require_tree_kill and (_pid_exists(pid, env) or _posix_pgid_exists(pid)):
+        raise ControllerError(f"POSIX process group {pid} still has active processes after SIGKILL")
+
+
 def _default_validation_command_runner(
     command: str,
     worktree: Path,
     env: Mapping[str, str],
+    timeout_seconds: float | None = None,
 ) -> WorkerCommandReceipt:
     t0 = time.monotonic()
     argv = shlex.split(command, posix=False)
@@ -320,23 +728,231 @@ def _default_validation_command_runner(
         else token
         for token in argv
     ]
-    res = subprocess.run(
-        cleaned_argv,
-        cwd=str(worktree),
-        env=dict(env),
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
+    job_obj = _WindowsKillOnCloseJob(strict=(os.name == "nt"))
+    try:
+        proc = subprocess.Popen(
+            cleaned_argv,
+            cwd=str(worktree),
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=(os.name != "nt"),
+            creationflags=_CREATE_SUSPENDED if os.name == "nt" else 0,
+        )
+    except Exception:
+        job_obj.close()
+        raise
+    try:
+        job_obj.assign(proc.pid, resume_suspended=(os.name == "nt"))
+    except Exception:
+        try:
+            _terminate_pid_tree(proc.pid, env, require_tree_kill=False, job_obj=job_obj)
+        finally:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                job_obj.close()
+            except ControllerError:
+                pass
+        raise
+    try:
+        stdout_text, stderr_text = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        job_obj.close()
+        _terminate_pid_tree(proc.pid, env)
+        proc.communicate()
+        raise
+    finally:
+        job_obj.close()
+        if os.name != "nt" or proc.poll() is None:
+            _terminate_pid_tree(proc.pid, env, require_tree_kill=True, job_obj=job_obj)
     elapsed_ms = max(0, int((time.monotonic() - t0) * 1000))
     return WorkerCommandReceipt(
         command=command,
-        exit_code=int(res.returncode),
-        stdout=res.stdout or "",
-        stderr=res.stderr or "",
+        exit_code=int(proc.returncode or 0),
+        stdout=stdout_text or "",
+        stderr=stderr_text or "",
         duration_ms=elapsed_ms,
         sanitized_env=True,
+    )
+
+
+def select_preferred_worker_model(
+    report: ProviderRuntimeQualificationReport,
+    *,
+    preferred_model: str = PRIMARY_ANTIGRAVITY_WORKER_MODEL,
+    fallback_model: str = FALLBACK_ANTIGRAVITY_WORKER_MODEL,
+) -> str:
+    for candidate in (preferred_model, fallback_model):
+        dec = evaluate_runtime_eligibility(report, role="worker", requested_model=candidate)
+        if dec.eligible and dec.resolved_model is not None:
+            return dec.resolved_model
+    raise ProviderInterruption(ProviderCondition.UNAVAILABLE, pre_start_clean=True)
+
+
+def _terminate_worker_process_tree(
+    proc: asyncio.subprocess.Process,
+    env: Mapping[str, str],
+    *,
+    job_obj: _WindowsKillOnCloseJob | None = None,
+) -> None:
+    try:
+        _terminate_pid_tree(proc.pid, env, require_tree_kill=True, job_obj=job_obj)
+    finally:
+        if job_obj is not None:
+            job_obj.close()
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+
+async def invoke_antigravity_cli_worker(
+    task: TaskRequest,
+    config: SubscriptionWorkerConfig,
+    env: Mapping[str, str],
+    resolved_model: str,
+) -> WorkerInvocationResponse:
+    exe = find_agy_executable()
+    if exe is None or not exe.is_file():
+        raise ProviderInterruption(ProviderCondition.UNAVAILABLE, pre_start_clean=True)
+    ev_dir = Path(config.evidence_output_dir).resolve() / task.task_id
+    ev_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = ev_dir / "agy_worker_settings.json"
+    rules = {"permissions": {"deny": list(DENY_RULES), "allow": list(ALLOW_RULES)}}
+    settings_path.write_text(json.dumps(rules), encoding="utf-8")
+    effort_args = ["--effort", config.reasoning_effort] if config.reasoning_effort else []
+    argv = [
+        str(exe),
+        "--model",
+        resolved_model,
+        *effort_args,
+        "--mode",
+        "accept-edits",
+        "--sandbox",
+        "--disable-slash-commands",
+        "--output-format",
+        "json",
+        "--print-timeout",
+        f"{max(30, int(task.timeout_seconds))}s",
+        "--settings",
+        str(settings_path),
+        "-p",
+        task.prompt,
+    ]
+    job_obj = _WindowsKillOnCloseJob(strict=(os.name == "nt"))
+    exec_kwargs: dict[str, Any] = {
+        "cwd": str(Path(config.candidate_worktree).resolve()),
+        "env": dict(env),
+        "stdin": asyncio.subprocess.DEVNULL,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+        "start_new_session": (os.name != "nt"),
+    }
+    if os.name == "nt":
+        exec_kwargs["creationflags"] = _CREATE_SUSPENDED
+    try:
+        proc = await asyncio.create_subprocess_exec(*argv, **exec_kwargs)
+    except Exception:
+        job_obj.close()
+        raise
+    try:
+        job_obj.assign(proc.pid, resume_suspended=(os.name == "nt"))
+    except Exception as exc:
+        try:
+            _terminate_pid_tree(
+                proc.pid,
+                env,
+                require_tree_kill=False,
+                job_obj=job_obj,
+            )
+        finally:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+            finally:
+                transport = getattr(proc, "_transport", None)
+                if transport is not None and hasattr(transport, "close"):
+                    transport.close()
+                try:
+                    job_obj.close()
+                except ControllerError:
+                    pass
+        if isinstance(exc, ControllerError):
+            raise
+        raise ControllerError(str(exc)) from exc
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=float(max(1, int(task.timeout_seconds))),
+        )
+    except (asyncio.CancelledError, TimeoutError):
+        try:
+            if os.name == "nt":
+                _terminate_worker_process_tree(proc, env, job_obj=job_obj)
+            else:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+        finally:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+            finally:
+                transport = getattr(proc, "_transport", None)
+                if transport is not None and hasattr(transport, "close"):
+                    transport.close()
+        raise
+    finally:
+        try:
+            if os.name != "nt":
+                _terminate_pid_tree(proc.pid, env, require_tree_kill=True, job_obj=job_obj)
+        finally:
+            job_obj.close()
+    stdout_text = stdout_b.decode("utf-8", errors="replace")
+    stderr_text = stderr_b.decode("utf-8", errors="replace")
+    lines = [ln for ln in stdout_text.splitlines() if ln.strip().startswith("{")]
+    if proc.returncode != 0 or not lines:
+        raise RuntimeError(stderr_text or stdout_text or f"agy worker exited {proc.returncode}")
+    raw_file = ev_dir / "raw_output.json"
+    raw_file.write_text(lines[-1], encoding="utf-8")
+    payload = json.loads(lines[-1])
+    if payload.get("status") != "SUCCESS":
+        raise RuntimeError(str(payload.get("error") or payload.get("response") or "agy failed"))
+    conv_id = str(payload.get("conversation_id") or "").strip()
+    if not conv_id:
+        raise RuntimeError("agy worker output missing conversation_id")
+    observed_model = str(payload.get("model") or "").strip() or resolved_model
+    usage = payload.get("usage") or {}
+    return WorkerInvocationResponse(
+        session_id=conv_id,
+        model_used=observed_model,
+        summary=str(payload.get("response") or "Completed worker invocation.")[:400],
+        raw_output_ref=str(raw_file),
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
+        total_tokens=usage.get("total_tokens"),
     )
 
 
@@ -382,13 +998,13 @@ class AntigravitySubscriptionWorkerAutomation:
             report = (
                 qualify_antigravity_subscription_runtime(
                     operating_profile=self._config.operating_profile,
-                    requested_auth_mode=self._config.auth_mode,
+                    auth_mode=self._config.auth_mode,
                     allow_api_key_fallback=self._config.allow_api_key_fallback,
                 )
                 if self._config.provider_id == "gemini-antigravity"
                 else qualify_codex_subscription_runtime(
                     operating_profile=self._config.operating_profile,
-                    requested_auth_mode=self._config.auth_mode,
+                    auth_mode=self._config.auth_mode,
                     allow_api_key_fallback=self._config.allow_api_key_fallback,
                 )
             )
@@ -568,7 +1184,7 @@ class AntigravitySubscriptionWorkerAutomation:
             explicitly_in_scope = any(
                 _matches_path_pattern(rel_posix, pat) for pat in self._config.in_scope_paths
             )
-            if self._config.in_scope_paths and not explicitly_in_scope:
+            if not self._config.in_scope_paths or not explicitly_in_scope:
                 violations.append(rel_posix)
 
         return sorted(set(violations))
@@ -1129,4 +1745,377 @@ __all__ = [
     "WorkerCommandReceipt",
     "WorkerInvocationResponse",
     "WorkerInvokerCallable",
+    "invoke_antigravity_cli_worker",
+    "run_cli_worker_job",
+    "select_preferred_worker_model",
 ]
+
+
+def _normalize_agent_result_timestamps(res: AgentResult, ref_time: datetime) -> AgentResult:
+    return res.model_copy(update={"started_at": ref_time, "completed_at": ref_time})
+
+
+def _agent_result_matches_worker_output(
+    ctx_res: AgentResult,
+    worker_res: AgentResult,
+) -> bool:
+    norm_ctx = _normalize_agent_result_timestamps(ctx_res, worker_res.started_at)
+    norm_worker = _normalize_agent_result_timestamps(worker_res, worker_res.started_at)
+    return norm_ctx == norm_worker and digest(norm_ctx) == digest(norm_worker)
+
+
+def run_cli_worker_job(
+    job_path: Path,
+    *,
+    qualification_report: ProviderRuntimeQualificationReport | None = None,
+    worker_invoker: WorkerInvokerCallable | None = None,
+) -> int:
+    """Execute a bounded CLI worker job with queue recovery and gate verification."""
+    from aipc.controller.task_queue import PersistentTaskQueue, QueuedTaskStatus
+    from aipc.domain.enums import ReviewVerdict
+    from aipc.domain.errors import StateError
+    from aipc.project.models import ProjectDefinition
+    from aipc.project.state_manager import StateManager
+    from aipc.recovery.errors import RecoveryError
+    from aipc.recovery.manager import RecoveryManager
+    from aipc.recovery.models import RecoveryDecision
+    from aipc.review.context import ReviewContext
+    from aipc.review.gate import PhaseGate
+    from aipc.review.subscription_reviewer_gate import SubscriptionReviewerGateDecision
+    from aipc.version.errors import VersionManagerError
+    from aipc.version.manager import VersionManager
+
+    job = json.loads(Path(job_path).read_text(encoding="utf-8"))
+    rep = qualification_report or qualify_antigravity_subscription_runtime()
+    pref = job.get("preferred_model", PRIMARY_ANTIGRAVITY_WORKER_MODEL)
+    mdl = select_preferred_worker_model(rep, preferred_model=pref)
+    task_req = TaskRequest.model_validate(job["task_request"])
+    w_cfg = SubscriptionWorkerConfig.model_validate(
+        {**job["worker_config"], "model_requested": mdl, "reasoning_effort": "medium"}
+    )
+    auto = AntigravitySubscriptionWorkerAutomation(
+        w_cfg,
+        qualification_report=rep,
+        worker_invoker=worker_invoker or invoke_antigravity_cli_worker,
+    )
+    q = PersistentTaskQueue(Path(job["queue_path"])) if job.get("queue_path") else None
+    tid = task_req.task_id
+    expected_project_id = task_req.project_id
+    expected_phase_id = task_req.phase_id
+    expected_attempt = 1
+    rec = None
+    if q is not None:
+        snap = q.load()
+        rec = next((t for t in snap.tasks if t.contract.task_id == tid), None)
+        if rec is None:
+            raise ControllerError(f"Task '{tid}' not found in queue")
+        if task_req.project_id != snap.project_id:
+            raise ControllerError("task_request.project_id conflicts with queue project_id")
+        if task_req.phase_id != rec.contract.phase_id:
+            raise ControllerError("task_request.phase_id conflicts with approved contract phase_id")
+        worktree = Path(w_cfg.candidate_worktree).resolve()
+        if Path(task_req.workspace).resolve() != worktree:
+            raise ControllerError(
+                "task_request.workspace conflicts with worker_config.candidate_worktree"
+            )
+        if not w_cfg.in_scope_paths:
+            w_cfg = w_cfg.model_copy(update={"in_scope_paths": tuple(rec.contract.in_scope)})
+        else:
+            for p in w_cfg.in_scope_paths:
+                in_ok = any(_matches_path_pattern(p, c_in) for c_in in rec.contract.in_scope)
+                out_bad = any(
+                    _matches_path_pattern(p, c_out) for c_out in rec.contract.out_of_scope
+                )
+                if not in_ok or out_bad:
+                    raise ControllerError(
+                        "worker_config.in_scope_paths conflicts with approved contract scope"
+                    )
+        merged_out = tuple(dict.fromkeys((*rec.contract.out_of_scope, *w_cfg.out_of_scope_paths)))
+        w_cfg = w_cfg.model_copy(update={"out_of_scope_paths": merged_out})
+        if w_cfg.validation_commands and tuple(w_cfg.validation_commands) != tuple(
+            rec.contract.validation_commands
+        ):
+            raise ControllerError(
+                "worker_config.validation_commands conflicts with approved "
+                "contract validation_commands"
+            )
+        auto = AntigravitySubscriptionWorkerAutomation(
+            w_cfg,
+            qualification_report=rep,
+            worker_invoker=worker_invoker or invoke_antigravity_cli_worker,
+        )
+        if rec.status in (QueuedTaskStatus.INTERRUPTED, QueuedTaskStatus.WAITING_PROVIDER):
+            rec_path = job.get("recovery_decision_path")
+            proj_path = job.get("project_definition_path")
+            inline_proj = job.get("project_definition")
+            state_path = job.get("project_state_path")
+            err_msg = (
+                f"Task {tid} is {rec.status} and requires verified "
+                "recovery decision before dispatch"
+            )
+            if not rec_path or (not proj_path and inline_proj is None) or not state_path:
+                raise ControllerError(err_msg)
+            try:
+                dec = RecoveryDecision.model_validate_json(
+                    Path(rec_path).read_text(encoding="utf-8")
+                )
+                project = (
+                    ProjectDefinition.model_validate_json(
+                        Path(proj_path).read_text(encoding="utf-8")
+                    )
+                    if proj_path
+                    else ProjectDefinition.model_validate(inline_proj)
+                )
+                state_mgr = StateManager(Path(state_path))
+                wt_root = Path(job.get("worktree_root", worktree.parent / "worktrees"))
+                versions = VersionManager(
+                    worktree,
+                    project.project.id,
+                    worktree_root=wt_root,
+                )
+                if (
+                    project.project.id != snap.project_id
+                    or project.project.id != task_req.project_id
+                    or Path(project.project.workspace).resolve() != worktree
+                ):
+                    raise ControllerError(err_msg)
+                loaded_state = state_mgr.load(project)
+                if (
+                    loaded_state.project_id != snap.project_id
+                    or loaded_state.current_phase != rec.contract.phase_id
+                    or loaded_state.current_phase != task_req.phase_id
+                    or loaded_state.active_task_id not in (None, tid)
+                ):
+                    raise ControllerError(err_msg)
+                if dec.continuation is not None and (
+                    dec.continuation.phase_id != rec.contract.phase_id
+                    or dec.continuation.task_id not in (None, tid)
+                ):
+                    raise ControllerError(err_msg)
+                recovery_mgr = RecoveryManager(project, state_mgr, versions)
+                existing_rec = recovery_mgr.journal.load(dec.request.recovery_id)
+                if (
+                    existing_rec.decision != dec
+                    or existing_rec.project_id != snap.project_id
+                    or existing_rec.phase_id != rec.contract.phase_id
+                    or existing_rec.task_id not in (None, tid)
+                ):
+                    raise ControllerError(err_msg)
+                inspected = recovery_mgr.inspect(dec.request)
+                if (
+                    dec.safe_to_automate is not True
+                    or inspected.safe_to_automate is not True
+                    or inspected.precondition != dec.precondition
+                    or inspected.action != dec.action
+                ):
+                    raise ControllerError(err_msg)
+                rec_result = recovery_mgr.execute(dec)
+                if rec_result.outcome != "COMPLETED" or rec_result.remaining_blockers:
+                    raise ControllerError(err_msg)
+            except (RecoveryError, VersionManagerError, StateError, ValueError, OSError) as exc:
+                raise ControllerError(err_msg) from exc
+            if not (
+                job.get("review_gate_decision_path")
+                or job.get("defer_review_to_waiting_provider", False)
+            ):
+                raise ControllerError(err_msg)
+            q.resume_after_recovery(tid, dec)
+        q.begin_dispatch(
+            tid,
+            worker_id=job.get("worker_id", "aipc-implementation-worker"),
+            provider="gemini",
+            target_paths=tuple(w_cfg.in_scope_paths),
+        )
+
+    try:
+        if q is not None:
+            expected_attempt = next(
+                t for t in q.load().tasks if t.contract.task_id == tid
+            ).current_attempt
+        out = asyncio.run(auto.execute_worker_task(task_req))
+        if q is not None and rec is not None:
+            changed_paths = [
+                *(fc.path for fc in out.agent_result.files_changed),
+                *(fc.path for fc in out.receipt.files_changed),
+            ]
+            for changed in changed_paths:
+                in_ok = any(_matches_path_pattern(changed, pat) for pat in rec.contract.in_scope)
+                out_bad = any(
+                    _matches_path_pattern(changed, pat) for pat in rec.contract.out_of_scope
+                )
+                if not in_ok or out_bad:
+                    raise ControllerError(
+                        f"Worker modified out-of-scope path '{changed}' for task '{tid}'"
+                    )
+        if out.agent_result.status != AgentStatus.COMPLETED:
+            if q is not None:
+                q.mark_interrupted(
+                    tid,
+                    reason="Worker execution failed",
+                    quota_exhausted=False,
+                )
+            print(json.dumps(out.receipt.model_dump(mode="json")))
+            return 1
+
+        if q is not None:
+            gate_path = job.get("review_gate_decision_path")
+            if gate_path:
+                gate_dec = SubscriptionReviewerGateDecision.model_validate_json(
+                    Path(gate_path).read_text(encoding="utf-8")
+                )
+                gate_dec = SubscriptionReviewerGateDecision.model_validate(
+                    gate_dec.model_dump(mode="json")
+                )
+                ctx_path = job.get("review_context_path")
+                if not ctx_path or not Path(ctx_path).is_file():
+                    raise ControllerError(
+                        "review_context_path is required when review_gate_decision_path is provided"
+                    )
+                raw_ctx = ReviewContext.model_validate_json(
+                    Path(ctx_path).read_text(encoding="utf-8")
+                )
+                gate_ctx = (
+                    raw_ctx
+                    if raw_ctx.state.last_review is None
+                    else raw_ctx.model_copy(
+                        update={"state": raw_ctx.state.model_copy(update={"last_review": None})}
+                    )
+                )
+                sha = out.receipt.candidate_commit_sha
+                bound = gate_dec.bound_review
+                receipt_file = (
+                    Path(out.receipt.receipt_json_path) if out.receipt.receipt_json_path else None
+                )
+                receipt_on_disk_ok = (
+                    receipt_file is not None
+                    and receipt_file.is_file()
+                    and WorkerAutomationReceipt.model_validate_json(
+                        receipt_file.read_text(encoding="utf-8")
+                    )
+                    == out.receipt
+                )
+                expected_diff_path = str(
+                    Path(w_cfg.evidence_output_dir).resolve() / tid / "git.diff"
+                )
+                verified_pass = (
+                    gate_dec.task_id == tid
+                    and gate_dec.candidate_commit_sha == sha
+                    and gate_dec.reviewed_commit_sha == sha
+                    and gate_dec.gate_outcome == "PASS"
+                    and gate_dec.review_result.verdict == ReviewVerdict.PASS
+                    and gate_dec.review_result.task_id == tid
+                    and gate_dec.review_result.next_phase_allowed is True
+                    and bound is not None
+                    and bound.review == gate_dec.review_result
+                    and bound.review_digest == digest(gate_dec.review_result)
+                    and bound.review.review_id == gate_dec.review_result.review_id
+                    and bound.review.task_id == tid
+                    and gate_ctx.task.task_id == tid
+                    and gate_ctx.project.project.id == expected_project_id
+                    and gate_ctx.task.phase_id == expected_phase_id
+                    and gate_ctx.task.attempt == expected_attempt
+                    and gate_ctx.checkpoint.git_commit == sha
+                    and _agent_result_matches_worker_output(gate_ctx.agent_result, out.agent_result)
+                    and receipt_on_disk_ok
+                    and out.receipt.git_diff_path
+                    in (gate_ctx.agent_result.evidence.git_diff_path, expected_diff_path)
+                    and out.receipt.receipt_json_path in gate_ctx.agent_result.artifacts
+                    and gate_ctx.evidence.git.head == sha
+                    and gate_ctx.evidence.git.changes == tuple(out.agent_result.files_changed)
+                    and tuple((c.command, c.exit_code) for c in gate_ctx.evidence.commands)
+                    == tuple((c.command, c.exit_code) for c in out.agent_result.commands)
+                    and gate_ctx.evidence.tests.structured == out.agent_result.tests
+                    and bound.context_digest == context_fingerprint(gate_ctx)
+                    and bound.provenance == review_provenance(gate_ctx)
+                    and bound.provenance.task_id == tid
+                    and bound.provenance.project_id == expected_project_id
+                    and bound.provenance.phase_id == expected_phase_id
+                    and bound.provenance.attempt == expected_attempt
+                    and bound.provenance.git_commit == sha
+                    and bound.provenance.agent_result_digest == digest(gate_ctx.agent_result)
+                    and bound.provenance.evidence_digest == digest(gate_ctx.evidence)
+                    and gate_dec.phase_gate_decision is not None
+                    and gate_dec.phase_gate_decision.verdict == ReviewVerdict.PASS
+                    and gate_dec.phase_gate_decision.next_phase_allowed is True
+                    and gate_dec.phase_gate_decision.task_id == tid
+                    and gate_dec.phase_gate_decision.project_id == expected_project_id
+                    and gate_dec.phase_gate_decision.phase_id == expected_phase_id
+                    and gate_dec.phase_gate_decision.attempt == expected_attempt
+                    and gate_dec.phase_gate_decision.review_id == gate_dec.review_result.review_id
+                    and gate_dec.session_audit.task_id == tid
+                    and gate_dec.session_audit.candidate_commit_sha == sha
+                    and gate_dec.session_audit.read_only_sandbox_enforced
+                    and not gate_dec.session_audit.inherited_chat_history
+                    and gate_dec.session_audit.rejection_code is None
+                    and (
+                        gate_dec.session_audit.independence_level
+                        in ("cross_provider", "reduced_independence")
+                    )
+                    and (
+                        gate_dec.session_audit.independence_level != "cross_provider"
+                        or (
+                            gate_dec.session_audit.reviewer_provider_family
+                            != gate_dec.session_audit.worker_provider_family
+                        )
+                    )
+                    and not gate_dec.session_audit.workspace_mutated
+                    and (
+                        gate_dec.session_audit.workspace_snapshot_before_sha256
+                        == gate_dec.session_audit.workspace_snapshot_after_sha256
+                    )
+                    and gate_dec.session_audit.fresh_isolated_session
+                    and (
+                        gate_dec.session_audit.reviewer_binding_id
+                        != gate_dec.session_audit.worker_agent_id
+                    )
+                    and (
+                        out.receipt.session_id
+                        not in (None, gate_dec.session_audit.reviewer_session_id)
+                    )
+                )
+                if verified_pass and bound is not None:
+                    try:
+                        rebound = bind_review(
+                            gate_ctx,
+                            gate_dec.review_result,
+                            authority=bound.authority,
+                            reviewed=bound.provenance,
+                        )
+                        re_eval = PhaseGate().evaluate(bound, gate_ctx)
+                        verified_pass = rebound == bound and re_eval == gate_dec.phase_gate_decision
+                    except (ReviewContextError, PhaseGateError) as exc:
+                        raise ControllerError(str(exc)) from exc
+                if not verified_pass:
+                    raise ControllerError(
+                        f"Review gate decision for task '{tid}' is not a verified PASS for '{sha}'."
+                    )
+                ev_root = str(Path(out.receipt.receipt_json_path or "").parent)
+                q.record_attempt_outcome(
+                    tid,
+                    candidate_sha=sha,
+                    checkpoint_id=f"ckpt-{tid}-{sha[:8]}",
+                    evidence_root=ev_root,
+                    review_id=gate_dec.review_result.review_id,
+                    review_verdict="PASS",
+                    gate_verdict="PASS",
+                )
+            elif job.get("defer_review_to_waiting_provider", False):
+                q.mark_interrupted(
+                    tid,
+                    reason="Awaiting independent subscription review",
+                    quota_exhausted=True,
+                )
+    except Exception as exc:
+        if q is not None:
+            reason = str(exc).strip()[:200] or type(exc).__name__
+            q.mark_interrupted(tid, reason=reason, quota_exhausted=False)
+        raise
+
+    print(json.dumps(out.receipt.model_dump(mode="json")))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(run_cli_worker_job(Path(sys.argv[1])))

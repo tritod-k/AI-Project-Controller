@@ -419,6 +419,102 @@ class RoleBasedModelRegistry:
         )
 
 
+def build_default_subscription_role_registry(
+    observations: (
+        tuple[ProviderRuntimeObservation, ...]
+        | Callable[[], tuple[ProviderRuntimeObservation, ...]]
+    ),
+) -> RoleBasedModelRegistry:
+    """Construct a RoleBasedModelRegistry with default subscription role bindings."""
+    obs_fn: Callable[[], tuple[ProviderRuntimeObservation, ...]] = (
+        observations if callable(observations) else (lambda: observations)
+    )
+    registry = RoleBasedModelRegistry(observations=obs_fn)
+    default_bindings = (
+        RoleModelBinding(
+            binding_id="worker-agy-hydrogen-medium",
+            role="worker",
+            provider_id="gemini-antigravity",
+            provider_family="google_antigravity",
+            model_id="gemini-4-hydrogen-medium",
+            model_tier="balanced",
+            execution_mode="worker",
+            auth_mode="antigravity_subscription",
+            required_capabilities=("filesystem",),
+            priority=98,
+            fallback_order=0,
+        ),
+        RoleModelBinding(
+            binding_id="worker-agy-fast",
+            role="worker",
+            provider_id="gemini-antigravity",
+            provider_family="google_antigravity",
+            model_id="gemini-3.8-flash-medium",
+            model_tier="fast_worker",
+            execution_mode="worker",
+            auth_mode="antigravity_subscription",
+            required_capabilities=("filesystem",),
+            priority=95,
+            fallback_order=1,
+        ),
+        RoleModelBinding(
+            binding_id="planner-codex-high",
+            role="planner",
+            provider_id="codex",
+            provider_family="openai_codex",
+            model_id="gpt-5.3-codex",
+            model_tier="reasoning_high",
+            execution_mode="plan",
+            auth_mode="codex_subscription",
+            required_capabilities=("read_only_review",),
+            priority=90,
+            fallback_order=0,
+        ),
+        RoleModelBinding(
+            binding_id="planner-agy-balanced",
+            role="planner",
+            provider_id="gemini-antigravity",
+            provider_family="google_antigravity",
+            model_id="gemini-3.8-flash-medium",
+            model_tier="balanced",
+            execution_mode="plan",
+            auth_mode="antigravity_subscription",
+            required_capabilities=("read_only_review",),
+            priority=85,
+            fallback_order=1,
+        ),
+        RoleModelBinding(
+            binding_id="reviewer-codex-strict",
+            role="reviewer",
+            provider_id="codex",
+            provider_family="openai_codex",
+            model_id="gpt-5.3-codex",
+            model_tier="review_strict",
+            execution_mode="reviewer",
+            auth_mode="codex_subscription",
+            required_capabilities=("read_only_review",),
+            priority=90,
+            fallback_order=1,
+        ),
+        RoleModelBinding(
+            binding_id="reviewer-agy-strict",
+            role="reviewer",
+            provider_id="gemini-antigravity",
+            provider_family="google_antigravity",
+            model_id="gemini-3.8-flash-medium",
+            model_tier="review_strict",
+            execution_mode="reviewer",
+            auth_mode="antigravity_subscription",
+            required_capabilities=("read_only_review",),
+            priority=95,
+            fallback_order=0,
+        ),
+    )
+    for binding in default_bindings:
+        registry.register(binding)
+    return registry
+
+
 __all__ = [
     "IndependenceClassification",
     "ModelTier",
@@ -433,4 +529,5 @@ __all__ = [
     "RoleResolutionDecision",
     "RoleSelectionRequest",
     "RuntimeQualificationState",
+    "build_default_subscription_role_registry",
 ]
