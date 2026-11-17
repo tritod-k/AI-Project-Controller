@@ -23,6 +23,7 @@ from aipc.hardening import SecretExposureError
 from aipc.recovery.models import (
     ContinuationContext,
     FailureClassification,
+    ProviderCondition,
     RecoveryAction,
     RecoveryDecision,
     RecoveryRequest,
@@ -658,3 +659,335 @@ def test_task_queue_resume_after_budget_extension_validation(tmp_path: Path) -> 
     assert resumed.current_attempt == 1
     assert resumed.blocker_reason is None
     assert queue.next_eligible_task() is not None
+
+
+def test_task_queue_begin_dispatch_enforces_effective_scope_and_narrows_contract(
+    tmp_path: Path,
+) -> None:
+    """begin_dispatch enforces effective scope on grant-funded dispatch and narrows contract."""
+    fixed_now = datetime(2026, 11, 17, 12, 0, 0, tzinfo=UTC)
+    now_ref = [fixed_now]
+    ext_root = tmp_path / "ext"
+    cand_root = tmp_path / "cand"
+    ext_root.mkdir()
+    cand_root.mkdir()
+
+    policy_path = ext_root / "policy.yaml"
+    policy_bytes = yaml.safe_dump(
+        {
+            "policy_version": "1.0",
+            "policy_id": "aipc-c5-review-governance",
+            "operating_profile": "subscription_only",
+            "owner": "K.TRITOD",
+            "source_authority": "operator_owned_external_policy",
+            "review": {
+                "preserve_raw_review": True,
+                "preserve_canonical_verdict": True,
+                "require_exact_candidate_sha": True,
+                "default_independence": "prefer_cross_provider",
+                "require_objective_evidence_for_blockers": True,
+                "unsupported_or_unverifiable_critical_finding": "NEEDS_TRIAGE_HUMAN",
+                "advisory": {"auto_dispatch": False, "action": "AUDIT_BACKLOG_ONLY"},
+                "release_blocker": {
+                    "allow_release": False,
+                    "auto_dispatch_only_if_authorized_and_within_budget": True,
+                },
+                "needs_triage": {
+                    "allow_release_if_credible_unresolved": False,
+                    "action": "HUMAN_REVIEW_REQUIRED",
+                },
+            },
+            "repair_budget": {
+                "default_auto_code_repairs_per_task": 1,
+                "total_auto_code_repairs_per_milestone": 8,
+                "budget_exhausted_action": "HALT_ON_RETRY_EXHAUSTION",
+                "preserve_unresolved_blockers": True,
+                "counter_scope": "approved_milestone_and_root_task_lineage",
+                "persist_across_restarts": True,
+                "persist_across_provider_fallback": True,
+                "reject_counter_reset_by_task_splitting": True,
+                "extension": {
+                    "human_commander_approval_required": True,
+                    "requires_explicit_task_and_scope": True,
+                    "requires_max_additional_attempts": True,
+                    "auditable_and_expiring": True,
+                },
+            },
+            "change_scope": {
+                "cannot_expand_milestone_from_review": True,
+                "prohibit_speculative_security_hardening": True,
+                "no_second_phase_gate": True,
+                "no_auto_merge": True,
+                "no_auto_deploy": True,
+                "no_milestone_d": True,
+            },
+        },
+        sort_keys=False,
+    ).encode("utf-8")
+    policy_path.write_bytes(policy_bytes)
+
+    approval_path = ext_root / "c5_approval.json"
+    persist_milestone_authorization_evidence(
+        approval_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="c5-appr-tq-eff",
+            project_id="proj-tq",
+            milestone_id="milestone-c5",
+            decision="APPROVED",
+            authorized_by="K.TRITOD",
+            baseline_commit_sha="4b0d19e3fd3ee30d06f9731ae90564581204f2be",
+            authorized_workstreams=("rg03",),
+        ),
+    )
+    trust_ctx = PolicyTrustContext(
+        policy_path=policy_path,
+        expected_sha256=hashlib.sha256(policy_bytes).hexdigest(),
+        trusted_external_root=ext_root,
+        excluded_roots=(cand_root,),
+        approval_path=approval_path,
+        expected_approval_id="c5-appr-tq-eff",
+        expected_owner="K.TRITOD",
+        expected_project_id="proj-tq",
+        expected_milestone_id="milestone-c5",
+    )
+    loaded = load_policy_trust_context(trust_ctx)
+    ledger_path = ext_root / "ledger_eff.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0])
+    ledger.initialize(loaded_policy=loaded, registered_roots=("task-rg03-eff",))
+
+    wide_contract = ApprovedTaskContract(
+        task_id="task-rg03-eff",
+        phase_id="rg03",
+        milestone_id="milestone-c5",
+        title="Execute task-rg03-eff",
+        objective="RG03 effective scope queue test",
+        max_attempts=5,
+        in_scope=("src/aipc/controller/task_queue.py", "src/aipc/controller/repair_budget.py"),
+        validation_commands=("pytest -q",),
+        approval_id="c5-appr-tq-eff",
+        approval_evidence_path=str(approval_path),
+    )
+    queue = PersistentTaskQueue(
+        ext_root / "queue_eff.json",
+        clock=lambda: now_ref[0],
+        repair_budget_path=ledger_path,
+        policy_trust_context=trust_ctx,
+    )
+    queue.initialize(
+        project_id="proj-tq",
+        milestone_id="milestone-c5",
+        contracts=(wide_contract,),
+        approval_id="c5-appr-tq-eff",
+        approval_evidence_path=approval_path,
+    )
+
+    # Attempt 1 -> REVISE -> exhaust base 1/1 -> BLOCKED.
+    queue.begin_dispatch("task-rg03-eff", worker_id="agy-hydrogen", provider="gemini")
+    queue.record_attempt_outcome(
+        "task-rg03-eff",
+        candidate_sha=SHA_1,
+        checkpoint_id="chk-1",
+        evidence_root="ev/1",
+        review_id="rev-1",
+        review_verdict="REVISE",
+        gate_verdict="REVISE",
+    )
+    base_res = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-tq-base-1",
+        task_id="task-rg03-eff",
+        attempt=2,
+        candidate_sha=SHA_1,
+        review_id="rev-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+    )
+    assert base_res.allowed is True
+    assert base_res.reservation is not None
+    queue.begin_dispatch(
+        "task-rg03-eff",
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        repair_reservation_id=base_res.reservation.reservation_id,
+    )
+    queue.record_attempt_outcome(
+        "task-rg03-eff",
+        candidate_sha=SHA_2,
+        checkpoint_id="chk-2",
+        evidence_root="ev/2",
+        review_id="rev-2",
+        review_verdict="REVISE",
+        gate_verdict="REVISE",
+    )
+    queue.halt_on_budget_exhaustion(
+        "task-rg03-eff",
+        reason=(
+            "Root lineage 'task-rg03-eff' repair budget exhausted (1/1); HALT_ON_RETRY_EXHAUSTION."
+        ),
+    )
+
+    # Apply narrow grant scoped ONLY to repair_budget.py.
+    grant_path = ext_root / "grant_narrow.json"
+    grant_raw = json.dumps(
+        {
+            "schema_version": "1.0",
+            "approval_id": "ktritod-tq-narrow-01",
+            "authorized_by": "K.TRITOD",
+            "decision": "APPROVED",
+            "milestone_id": "milestone-c5",
+            "root_task": "task-rg03-eff",
+            "task_id": "task-rg03-eff",
+            "max_additional_repairs": 1,
+            "scope_paths": ["src/aipc/controller/repair_budget.py"],
+            "issued_at": fixed_now.isoformat(),
+            "expires_at": (fixed_now + timedelta(hours=1)).isoformat(),
+            "single_use": True,
+            "counter_reset": False,
+        }
+    ).encode("utf-8")
+    grant_path.write_bytes(grant_raw)
+    grant_sha = hashlib.sha256(grant_raw).hexdigest()
+    Path(f"{grant_path}.sha256").write_text(grant_sha, encoding="utf-8")
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=wide_contract,
+        expected_grant_sha256=grant_sha,
+    )
+
+    queue.resume_after_budget_extension(
+        "task-rg03-eff",
+        grant_approval_id="ktritod-tq-narrow-01",
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    ext_res = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-tq-ext-1",
+        task_id="task-rg03-eff",
+        attempt=3,
+        candidate_sha=SHA_2,
+        review_id="rev-2",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert ext_res.allowed is True
+    assert ext_res.reservation is not None
+    res_id = ext_res.reservation.reservation_id
+
+    # Omitted target_paths on wider contract.in_scope -> REJECTED!
+    with pytest.raises(ControllerError, match="exceeds reserved target_paths|not approved"):
+        queue.begin_dispatch(
+            "task-rg03-eff",
+            worker_id="codex-worker",
+            provider="openai",
+            target_paths=None,
+            repair_reservation_id=res_id,
+        )
+    assert (
+        ledger.load(loaded_policy=loaded, trust_context=trust_ctx).reservations[res_id].status
+        == "RESERVED"
+    )
+
+    # Empty target_paths -> REJECTED!
+    with pytest.raises(ControllerError, match="cannot be empty"):
+        queue.begin_dispatch(
+            "task-rg03-eff",
+            worker_id="codex-worker",
+            provider="openai",
+            target_paths=(),
+            repair_reservation_id=res_id,
+        )
+
+    # Explicit narrow target_paths -> ALLOWED, and dispatched contract is narrowed.
+    dispatched = queue.begin_dispatch(
+        "task-rg03-eff",
+        worker_id="codex-worker",
+        provider="openai",
+        target_paths=("src/aipc/controller/repair_budget.py",),
+        repair_reservation_id=res_id,
+    )
+    assert dispatched.status == QueuedTaskStatus.RUNNING
+    assert dispatched.contract.in_scope == ("src/aipc/controller/repair_budget.py",)
+
+    # Same-attempt recovery (quota pause -> resume -> redispatch) preserves narrow scope.
+    recovery_decision = RecoveryDecision(
+        request=RecoveryRequest(
+            recovery_id="rec-tq-eff-01",
+            classification=FailureClassification.PROVIDER_QUOTA_EXHAUSTED,
+            provider=ProviderCondition.QUOTA_EXHAUSTED,
+        ),
+        classification=FailureClassification.PROVIDER_QUOTA_EXHAUSTED,
+        action=RecoveryAction.RESUME_CURRENT_ATTEMPT,
+        safe_to_automate=True,
+        reasons=("Safe same-attempt recovery",),
+        continuation=ContinuationContext(
+            project_id="proj-tq",
+            run_id="run-tq-eff",
+            phase_id="rg03",
+            attempt=2,
+            task_id="task-rg03-eff",
+            workspace="worktrees/aipc/wt-c5",
+            branch="gemini/c5-remediation",
+            head=SHA_2,
+            checkpoint_id="chk-2",
+            new_session_required=True,
+            session_strategy="NEW_SESSION",
+            known_work=("src/aipc/controller/repair_budget.py",),
+        ),
+        precondition=DIGEST_1,
+    )
+    queue.mark_interrupted(
+        "task-rg03-eff",
+        reason="QUOTA_EXHAUSTED: provider limit reached",
+        quota_exhausted=True,
+    )
+    queue.resume_after_recovery("task-rg03-eff", recovery_decision)
+    recovered = queue.begin_dispatch(
+        "task-rg03-eff",
+        worker_id="codex-worker",
+        provider="openai",
+        target_paths=("src/aipc/controller/repair_budget.py",),
+        repair_reservation_id=res_id,
+    )
+    assert recovered.status == QueuedTaskStatus.RUNNING
+    assert recovered.current_attempt == 3
+    assert recovered.contract.in_scope == ("src/aipc/controller/repair_budget.py",)
+
+    # Omitted target_paths fallback on already-narrowed contract -> ALLOWED.
+    queue.mark_interrupted(
+        "task-rg03-eff",
+        reason="QUOTA_EXHAUSTED: provider limit reached",
+        quota_exhausted=True,
+    )
+    queue.resume_after_recovery("task-rg03-eff", recovery_decision)
+    recovered_omitted = queue.begin_dispatch(
+        "task-rg03-eff",
+        worker_id="codex-worker",
+        provider="openai",
+        target_paths=None,
+        repair_reservation_id=res_id,
+    )
+    assert recovered_omitted.status == QueuedTaskStatus.RUNNING
+    assert recovered_omitted.current_attempt == 3
+    assert recovered_omitted.contract.in_scope == ("src/aipc/controller/repair_budget.py",)
+
+    # Historical-state fixture: already-CONSUMED reservation with un-narrowed wider contract
+    # must reject omitted target_paths on same-attempt recovery replay.
+    queue.mark_interrupted(
+        "task-rg03-eff",
+        reason="QUOTA_EXHAUSTED: provider limit reached",
+        quota_exhausted=True,
+    )
+    queue.resume_after_recovery("task-rg03-eff", recovery_decision)
+    raw_snap = json.loads(queue.path.read_text(encoding="utf-8"))
+    raw_snap["tasks"][0]["contract"]["in_scope"] = list(wide_contract.in_scope)
+    queue.path.write_text(json.dumps(raw_snap, indent=2), encoding="utf-8")
+    with pytest.raises(ControllerError, match="exceeds reserved target_paths|not approved"):
+        queue.begin_dispatch(
+            "task-rg03-eff",
+            worker_id="codex-worker",
+            provider="openai",
+            target_paths=None,
+            repair_reservation_id=res_id,
+        )

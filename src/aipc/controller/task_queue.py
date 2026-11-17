@@ -861,15 +861,22 @@ class PersistentTaskQueue:
             if by_id[dep].status != QueuedTaskStatus.COMPLETED:
                 raise ControllerError(f"task '{task_id}' dependency '{dep}' is not COMPLETED")
 
+        norm_target_paths: tuple[str, ...] | None = None
         if target_paths is not None:
+            if not target_paths:
+                raise ControllerError("target_paths cannot be empty when specified")
             in_scope = set(target.contract.in_scope)
             out_scope = set(target.contract.out_of_scope)
+            normalized_list: list[str] = []
             for rel_path in target_paths:
                 norm = PortableRelativePath(rel_path) if rel_path else ""
                 if norm in out_scope or (in_scope and norm not in in_scope):
                     raise ControllerError(
                         f"out-of-scope target path '{rel_path}' rejected for task '{task_id}'"
                     )
+                if norm not in normalized_list:
+                    normalized_list.append(norm)
+            norm_target_paths = tuple(normalized_list)
 
         next_attempt_num = target.current_attempt + 1
         if next_attempt_num > target.contract.max_attempts:
@@ -945,7 +952,7 @@ class PersistentTaskQueue:
                     trust_context=effective_trust_ctx,
                     expected_project_id=snap.project_id,
                     expected_milestone_id=snap.milestone_id,
-                    target_paths=target_paths,
+                    target_paths=norm_target_paths,
                     contract_in_scope=target.contract.in_scope,
                 )
             except RepairBudgetError as exc:
@@ -961,8 +968,14 @@ class PersistentTaskQueue:
             dispatch_stage="DISPATCHED",
             started_at=self._clock(),
         )
+        effective_contract = (
+            target.contract.model_copy(update={"in_scope": norm_target_paths})
+            if norm_target_paths is not None
+            else target.contract
+        )
         updated_target = target.model_copy(
             update={
+                "contract": effective_contract,
                 "status": QueuedTaskStatus.RUNNING,
                 "current_attempt": next_attempt_num,
                 "active_attempt_id": attempt_id,

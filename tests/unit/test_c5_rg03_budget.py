@@ -1875,6 +1875,263 @@ def test_rg03_strict_grant_target_paths_replay_and_recovery_validation(
     assert after_exp_recovery.applied_grants[0].remaining_repairs == 1
 
 
+def test_rg03_consume_dispatch_enforces_effective_paths_from_contract_and_recovery(
+    tmp_path: Path,
+) -> None:
+    trust_ctx, ext_root, _cand, _pol, approval_path = _create_trust_env(
+        tmp_path, per_task=1, per_milestone=8
+    )
+    loaded = load_policy_trust_context(trust_ctx)
+    now_ref = [_FIXED_NOW]
+    ledger_path = ext_root / "budget_rg03_effective.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0])
+    ledger.initialize(
+        loaded_policy=loaded,
+        registered_roots=("rg03",),
+        child_to_root={"task-rg03-eff": "rg03", "task-rg03-narrow": "rg03"},
+        trust_context=trust_ctx,
+    )
+
+    # Unscoped BASE reservation remains compatible when both target_paths and contract_in_scope
+    # are omitted or when contract_in_scope is provided.
+    d_base = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-eff-base-1",
+        task_id="task-rg03-eff",
+        attempt=2,
+        candidate_sha="1" * 40,
+        review_id="rev-eff-base-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+    )
+    assert d_base.allowed is True
+    assert d_base.reservation is not None
+    consumed_base = ledger.consume_dispatch_reservation(
+        reservation_id=d_base.reservation.reservation_id,
+        task_id="task-rg03-eff",
+        attempt=2,
+        attempt_id="att-02-task-rg03-eff",
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        candidate_sha="1" * 40,
+        loaded_policy=loaded,
+        trust_context=trust_ctx,
+        target_paths=None,
+        contract_in_scope=None,
+    )
+    assert consumed_base.status == "CONSUMED"
+
+    # Apply narrow grant scoped ONLY to repair_budget.py while task contract has wider in_scope.
+    wide_contract = ApprovedTaskContract(
+        task_id="task-rg03-eff",
+        phase_id="rg03",
+        milestone_id="milestone-c5",
+        title="RG03 effective scope",
+        objective="Enforce effective dispatch paths",
+        max_attempts=6,
+        in_scope=(
+            "src/aipc/controller/repair_budget.py",
+            "src/aipc/controller/task_queue.py",
+        ),
+        validation_commands=("pytest -q",),
+        approval_id="c5-approval-001",
+        approval_evidence_path=str(approval_path),
+    )
+    grant_path, grant_sha = _write_extension_json(
+        ext_root / "ext_eff.json",
+        approval_id="ktritod-ext-eff-01",
+        root_task="rg03",
+        task_id=None,
+        max_additional_repairs=2,
+        scope_paths=("src/aipc/controller/repair_budget.py",),
+        issued_at=_FIXED_NOW,
+        expires_at=_FIXED_NOW + timedelta(hours=2),
+    )
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=wide_contract,
+        expected_grant_sha256=grant_sha,
+    )
+
+    d_grant = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-eff-grant-1",
+        task_id="task-rg03-eff",
+        attempt=3,
+        candidate_sha="2" * 40,
+        review_id="rev-eff-grant-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_grant.allowed is True
+    assert d_grant.reservation is not None
+
+    # 1. Omitted target_paths + wider contract_in_scope -> REJECTED on initial dispatch.
+    with pytest.raises(RepairBudgetError, match="exceeds reserved target_paths|not approved"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_grant.reservation.reservation_id,
+            task_id="task-rg03-eff",
+            attempt=3,
+            attempt_id="att-03-task-rg03-eff",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="2" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=None,
+            contract_in_scope=wide_contract.in_scope,
+        )
+
+    # 2. Omitted target_paths + omitted/empty contract_in_scope -> REJECTED.
+    with pytest.raises(RepairBudgetError, match="requires target_paths or contract_in_scope"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_grant.reservation.reservation_id,
+            task_id="task-rg03-eff",
+            attempt=3,
+            attempt_id="att-03-task-rg03-eff",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="2" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=None,
+            contract_in_scope=None,
+        )
+    with pytest.raises(RepairBudgetError, match="cannot be empty"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_grant.reservation.reservation_id,
+            task_id="task-rg03-eff",
+            attempt=3,
+            attempt_id="att-03-task-rg03-eff",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="2" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=None,
+            contract_in_scope=(),
+        )
+
+    # 3. Explicit target_paths outside contract_in_scope -> REJECTED.
+    with pytest.raises(RepairBudgetError, match="outside contract_in_scope"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_grant.reservation.reservation_id,
+            task_id="task-rg03-eff",
+            attempt=3,
+            attempt_id="att-03-task-rg03-eff",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="2" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=("src/aipc/controller/repair_budget.py",),
+            contract_in_scope=("src/aipc/controller/task_queue.py",),
+        )
+
+    # Reservation is still RESERVED after rejected attempts.
+    mid_state = ledger.load(loaded_policy=loaded, trust_context=trust_ctx)
+    assert mid_state.reservations[d_grant.reservation.reservation_id].status == "RESERVED"
+
+    # 4. Explicit narrow target_paths within both contract_in_scope and grant -> ALLOWED.
+    consumed_g = ledger.consume_dispatch_reservation(
+        reservation_id=d_grant.reservation.reservation_id,
+        task_id="task-rg03-eff",
+        attempt=3,
+        attempt_id="att-03-task-rg03-eff",
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        candidate_sha="2" * 40,
+        loaded_policy=loaded,
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+        contract_in_scope=wide_contract.in_scope,
+    )
+    assert consumed_g.status == "CONSUMED"
+
+    # 5. Same-attempt replay with omitted target_paths + wider contract_in_scope -> REJECTED.
+    with pytest.raises(RepairBudgetError, match="exceeds reserved target_paths|not approved"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_grant.reservation.reservation_id,
+            task_id="task-rg03-eff",
+            attempt=3,
+            attempt_id="att-03-task-rg03-eff",
+            worker_id="codex-worker",
+            provider="openai",
+            candidate_sha="2" * 40,
+            allow_recovery_redispatch=True,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=None,
+            contract_in_scope=wide_contract.in_scope,
+        )
+
+    # 6. Same-attempt replay with omitted target_paths + omitted contract_in_scope -> REJECTED.
+    with pytest.raises(RepairBudgetError, match="requires target_paths or contract_in_scope"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_grant.reservation.reservation_id,
+            task_id="task-rg03-eff",
+            attempt=3,
+            attempt_id="att-03-task-rg03-eff",
+            worker_id="codex-worker",
+            provider="openai",
+            candidate_sha="2" * 40,
+            allow_recovery_redispatch=True,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=None,
+            contract_in_scope=None,
+        )
+
+    # 7. Omitted target_paths where contract_in_scope is strictly within grant -> ALLOWED
+    #    on both initial consumption and same-attempt recovery replay.
+    d_narrow = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-eff-grant-2",
+        task_id="task-rg03-narrow",
+        attempt=2,
+        candidate_sha="3" * 40,
+        review_id="rev-eff-grant-2",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_narrow.allowed is True
+    assert d_narrow.reservation is not None
+
+    consumed_narrow = ledger.consume_dispatch_reservation(
+        reservation_id=d_narrow.reservation.reservation_id,
+        task_id="task-rg03-narrow",
+        attempt=2,
+        attempt_id="att-02-task-rg03-narrow",
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        candidate_sha="3" * 40,
+        loaded_policy=loaded,
+        trust_context=trust_ctx,
+        target_paths=None,
+        contract_in_scope=("src/aipc/controller/repair_budget.py",),
+    )
+    assert consumed_narrow.status == "CONSUMED"
+
+    recovered_narrow = ledger.consume_dispatch_reservation(
+        reservation_id=d_narrow.reservation.reservation_id,
+        task_id="task-rg03-narrow",
+        attempt=2,
+        attempt_id="att-02-task-rg03-narrow",
+        worker_id="codex-worker",
+        provider="openai",
+        candidate_sha="3" * 40,
+        allow_recovery_redispatch=True,
+        loaded_policy=loaded,
+        trust_context=trust_ctx,
+        target_paths=None,
+        contract_in_scope=("src/aipc/controller/repair_budget.py",),
+    )
+    assert recovered_narrow.status == "CONSUMED"
+
+
 @pytest.mark.parametrize(
     "import_sequence",
     [

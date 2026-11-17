@@ -981,6 +981,10 @@ class DurableRepairBudgetLedger:
                     f"Bound reservation path '{bound_path}' is not approved by grant "
                     f"'{grant_rec.approval_id}'"
                 )
+        if for_consumption and norm_req_paths is None:
+            raise RepairBudgetError(
+                f"Grant-funded reservation '{res_id}' requires effective dispatch paths"
+            )
         if norm_req_paths is not None:
             for req_path in norm_req_paths:
                 if not _is_path_allowed_in_scope(req_path, allowed_paths=grant_rec.scope_paths):
@@ -1302,6 +1306,14 @@ class DurableRepairBudgetLedger:
                 "Consuming a repair reservation requires controller loaded_policy and trust_context"
             )
         norm_req_paths = _normalize_target_paths(target_paths)
+        norm_contract_paths = _normalize_target_paths(contract_in_scope)
+        if norm_req_paths is not None and norm_contract_paths is not None:
+            for req_path in norm_req_paths:
+                if not _is_path_allowed_in_scope(req_path, allowed_paths=norm_contract_paths):
+                    raise RepairBudgetError(
+                        f"Requested dispatch path '{req_path}' is outside contract_in_scope"
+                    )
+        effective_paths = norm_req_paths if norm_req_paths is not None else norm_contract_paths
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
             if expected_project_id is not None and state.project_id != expected_project_id:
@@ -1332,15 +1344,25 @@ class DurableRepairBudgetLedger:
                 raise RepairBudgetError(
                     f"Repair reservation '{reservation_id}' candidate SHA mismatch"
                 )
-            if norm_req_paths is not None and res.target_paths is not None:
+            if res.target_paths is not None:
+                if effective_paths is None:
+                    raise RepairBudgetError(
+                        f"Path-scoped reservation '{reservation_id}' requires target_paths "
+                        "or contract_in_scope at dispatch"
+                    )
                 allowed_res_paths = set(res.target_paths)
-                for req_path in norm_req_paths:
-                    if req_path not in allowed_res_paths:
+                for eff_path in effective_paths:
+                    if eff_path not in allowed_res_paths:
                         raise RepairBudgetError(
-                            f"Requested dispatch path '{req_path}' exceeds reserved target_paths"
+                            f"Requested dispatch path '{eff_path}' exceeds reserved target_paths"
                         )
             now = self._clock()
             if res.funding_source == "GRANT" or res.grant_approval_id is not None:
+                if effective_paths is None:
+                    raise RepairBudgetError(
+                        f"Grant-funded reservation '{reservation_id}' requires target_paths "
+                        "or contract_in_scope at dispatch"
+                    )
                 self._validate_bound_grant(
                     state,
                     reservation=res,
@@ -1348,7 +1370,7 @@ class DurableRepairBudgetLedger:
                     expected_root=expected_root,
                     loaded_policy=loaded_policy,
                     now=now,
-                    norm_req_paths=norm_req_paths,
+                    norm_req_paths=effective_paths,
                     for_consumption=True,
                 )
 

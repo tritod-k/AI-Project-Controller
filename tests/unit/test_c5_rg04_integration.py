@@ -39,7 +39,9 @@ from aipc.domain.enums import ReviewVerdict
 from aipc.domain.models import CriterionResult, ReviewResult
 from aipc.hardening.env_isolation import build_sanitized_child_env
 from aipc.recovery.models import (
+    ContinuationContext,
     FailureClassification,
+    ProviderCondition,
     RecoveryAction,
     RecoveryDecision,
     RecoveryRequest,
@@ -1341,6 +1343,257 @@ def test_rg04_e2e_exhaustion_blocked_grant_resume_redispatch_and_negatives(
     assert ledger.load().milestone_consumed == 2
     assert ledger.load().applied_grants[0].consumed_repairs == 1
     assert ledger.load().applied_grants[0].remaining_repairs == 0
+
+
+def test_rg04_e2e_narrow_grant_omitted_target_paths_rejected_on_dispatch_and_recovery(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    trust_ctx, ext_root, _cand, _pol, approval_path = _create_trust_env(
+        tmp_path, per_task=1, per_milestone=8
+    )
+    loaded = load_policy_trust_context(trust_ctx)
+    now_ref = [_FIXED_NOW]
+    ledger_path = ext_root / "budget_e2e_narrow.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0])
+    ledger.initialize(
+        loaded_policy=loaded,
+        registered_roots=("task-rg04-narrow-e2e",),
+        trust_context=trust_ctx,
+    )
+    wide_contract = _c5_contract(
+        approval_path, task_id="task-rg04-narrow-e2e", max_attempts=6
+    ).model_copy(
+        update={
+            "in_scope": (
+                _IN_SCOPE_TEST_PATH,
+                "src/aipc/controller/repair_budget.py",
+            )
+        }
+    )
+    queue = PersistentTaskQueue(
+        ext_root / "queue_e2e_narrow.json",
+        clock=lambda: now_ref[0],
+        repair_budget_path=ledger_path,
+        policy_trust_context=trust_ctx,
+    )
+    queue.initialize(
+        project_id="example",
+        milestone_id="milestone-c5",
+        contracts=(wide_contract,),
+        approval_id="c5-approval-001",
+        approval_evidence_path=approval_path,
+    )
+    coordinator = BoundedRepairCoordinator(
+        queue=queue,
+        policy_trust_context=trust_ctx,
+        budget_ledger_path=ledger_path,
+        clock=lambda: now_ref[0],
+    )
+
+    # Attempt 1 -> REVISE -> base 1/1 -> Attempt 2 -> REVISE -> BLOCKED.
+    queue.begin_dispatch(wide_contract.task_id, worker_id="agy-hydrogen", provider="gemini")
+    ctx1 = _make_context_for_sha(
+        review_case, tmp_path, sha="1" * 40, attempt=1, task_id=wide_contract.task_id
+    )
+    rev1 = _make_review(ctx1, review_id="rev-narrow-1", verdict=ReviewVerdict.REVISE)
+    desc1 = UntrustedFindingDescriptor(
+        finding_id="f-narrow-1",
+        review_id="rev-narrow-1",
+        criterion_id=ctx1.project.phases[0].acceptance_criteria[0].id,
+        reviewed_sha="1" * 40,
+        evidence_refs=("test_log",),
+        original_text="Objective failure 1.",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+        confidence=0.95,
+    )
+    eval1 = coordinator.evaluate_attempt_and_coordinate(
+        task_id=wide_contract.task_id,
+        project=ctx1.project,
+        phase=ctx1.project.phases[0],
+        state=ctx1.state,
+        context=ctx1,
+        review=rev1,
+        finding_descriptors=(desc1,),
+    )
+    assert eval1.action == "SCHEDULE_BOUNDED_REPAIR"
+    assert eval1.repair_plan is not None
+    assert eval1.repair_plan.repair_reservation_id is not None
+
+    queue.begin_dispatch(
+        wide_contract.task_id,
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        repair_reservation_id=eval1.repair_plan.repair_reservation_id,
+    )
+    ctx2 = _make_context_for_sha(
+        review_case, tmp_path, sha="2" * 40, attempt=2, task_id=wide_contract.task_id
+    )
+    rev2 = _make_review(ctx2, review_id="rev-narrow-2", verdict=ReviewVerdict.REVISE)
+    desc2 = desc1.model_copy(
+        update={"finding_id": "f-narrow-2", "review_id": "rev-narrow-2", "reviewed_sha": "2" * 40}
+    )
+    eval2 = coordinator.evaluate_attempt_and_coordinate(
+        task_id=wide_contract.task_id,
+        project=ctx2.project,
+        phase=ctx2.project.phases[0],
+        state=ctx2.state,
+        context=ctx2,
+        review=rev2,
+        finding_descriptors=(desc2,),
+    )
+    assert eval2.action == "HALT_ON_RETRY_EXHAUSTION"
+    assert eval2.queue_status == QueuedTaskStatus.BLOCKED
+
+    # Grant scoped ONLY to _IN_SCOPE_TEST_PATH (narrower than wide_contract.in_scope).
+    grant_path = _write_extension_json(
+        ext_root / "approvals" / "e2e_narrow_grant.json",
+        approval_id="ext-e2e-narrow-01",
+        root_task="task-rg04-narrow-e2e",
+        task_id="task-rg04-narrow-e2e",
+        scope_paths=(_IN_SCOPE_TEST_PATH,),
+    )
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=wide_contract,
+    )
+    queue.resume_after_budget_extension(
+        wide_contract.task_id,
+        grant_approval_id="ext-e2e-narrow-01",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+    )
+    ext_dec = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-e2e-narrow-ext-1",
+        task_id=wide_contract.task_id,
+        attempt=3,
+        candidate_sha="2" * 40,
+        review_id="rev-narrow-2",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+    )
+    assert ext_dec.allowed is True
+    assert ext_dec.reservation is not None
+    res_id = ext_dec.reservation.reservation_id
+
+    # Omitted target_paths on wider contract.in_scope -> REJECTED before consumption.
+    with pytest.raises(ControllerError, match="exceeds reserved target_paths|not approved"):
+        queue.begin_dispatch(
+            wide_contract.task_id,
+            worker_id="codex-worker",
+            provider="openai",
+            target_paths=None,
+            repair_reservation_id=res_id,
+        )
+    assert (
+        ledger.load(loaded_policy=loaded, trust_context=trust_ctx).reservations[res_id].status
+        == "RESERVED"
+    )
+
+    # Explicit narrow target_paths -> ALLOWED and contract narrowed on dispatched task.
+    dispatched = queue.begin_dispatch(
+        wide_contract.task_id,
+        worker_id="codex-worker",
+        provider="openai",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+        repair_reservation_id=res_id,
+    )
+    assert dispatched.status == QueuedTaskStatus.RUNNING
+    assert dispatched.contract.in_scope == (_IN_SCOPE_TEST_PATH,)
+
+    # Same-attempt recovery (quota pause -> resume -> redispatch) succeeds within grant
+    # and rejects after grant expiry.
+    recovery_decision = RecoveryDecision(
+        request=RecoveryRequest(
+            recovery_id="rec-rg04-narrow-01",
+            classification=FailureClassification.PROVIDER_QUOTA_EXHAUSTED,
+            provider=ProviderCondition.QUOTA_EXHAUSTED,
+        ),
+        classification=FailureClassification.PROVIDER_QUOTA_EXHAUSTED,
+        action=RecoveryAction.RESUME_CURRENT_ATTEMPT,
+        safe_to_automate=True,
+        reasons=("Safe same-attempt recovery",),
+        continuation=ContinuationContext(
+            project_id="example",
+            run_id="run-rg04-narrow",
+            phase_id="rg04",
+            attempt=2,
+            task_id=wide_contract.task_id,
+            workspace="worktrees/aipc/wt-c5",
+            branch="gemini/c5-remediation",
+            head="2" * 40,
+            checkpoint_id="chk-2",
+            new_session_required=True,
+            session_strategy="NEW_SESSION",
+            known_work=(_IN_SCOPE_TEST_PATH,),
+        ),
+        precondition="a" * 64,
+    )
+    queue.mark_interrupted(
+        wide_contract.task_id,
+        reason="QUOTA_EXHAUSTED: provider limit reached",
+        quota_exhausted=True,
+    )
+    queue.resume_after_recovery(wide_contract.task_id, recovery_decision)
+    recovered = queue.begin_dispatch(
+        wide_contract.task_id,
+        worker_id="codex-worker",
+        provider="openai",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+        repair_reservation_id=res_id,
+    )
+    assert recovered.status == QueuedTaskStatus.RUNNING
+    assert recovered.current_attempt == 3
+
+    # Omitted target_paths fallback on already-narrowed contract -> ALLOWED.
+    queue.mark_interrupted(
+        wide_contract.task_id,
+        reason="QUOTA_EXHAUSTED: provider limit reached",
+        quota_exhausted=True,
+    )
+    queue.resume_after_recovery(wide_contract.task_id, recovery_decision)
+    recovered_omitted = queue.begin_dispatch(
+        wide_contract.task_id,
+        worker_id="codex-worker",
+        provider="openai",
+        target_paths=None,
+        repair_reservation_id=res_id,
+    )
+    assert recovered_omitted.status == QueuedTaskStatus.RUNNING
+    assert recovered_omitted.current_attempt == 3
+    assert recovered_omitted.contract.in_scope == (_IN_SCOPE_TEST_PATH,)
+
+    # Historical-state fixture: already-CONSUMED reservation with un-narrowed wider contract
+    # must reject omitted target_paths on same-attempt recovery replay.
+    queue.mark_interrupted(
+        wide_contract.task_id,
+        reason="QUOTA_EXHAUSTED: provider limit reached",
+        quota_exhausted=True,
+    )
+    queue.resume_after_recovery(wide_contract.task_id, recovery_decision)
+    raw_snap = json.loads(queue.path.read_text(encoding="utf-8"))
+    raw_snap["tasks"][0]["contract"]["in_scope"] = list(wide_contract.in_scope)
+    queue.path.write_text(json.dumps(raw_snap, indent=2), encoding="utf-8")
+    with pytest.raises(ControllerError, match="exceeds reserved target_paths|not approved"):
+        queue.begin_dispatch(
+            wide_contract.task_id,
+            worker_id="codex-worker",
+            provider="openai",
+            target_paths=None,
+            repair_reservation_id=res_id,
+        )
+
+    now_ref[0] = _FIXED_NOW + timedelta(hours=25)
+    with pytest.raises(ControllerError, match="expired"):
+        queue.begin_dispatch(
+            wide_contract.task_id,
+            worker_id="codex-worker",
+            provider="openai",
+            target_paths=(_IN_SCOPE_TEST_PATH,),
+            repair_reservation_id=res_id,
+        )
 
 
 @pytest.mark.parametrize(
