@@ -1,5 +1,16 @@
 # Current Project State
 
+## C5 RG02 verified continuation - 2026-11-17 (current)
+
+- Current phase: Milestone C.5 RG01-RG04, attempt01; Status IN_PROGRESS; Phase Gate PENDING. RG01 source unchanged at f1c576a5d04c80365d678d815f422e300c15451f. RG02 local implementation verified, final independent acceptance pending. This supersedes prior exhausted-budget narratives under the current Commander two-tier handshake.
+- Candidate branch gemini/aipc-2.0-milestone-c5, H:/000ProjectCode/AI_Project_Controller; prior HEAD cbe351f105a6c9f0bba52edc376f5ba431b7b301. Last Stable clean/pinned4b0d19e3fd3ee30d06f9731ae90564581204f2be at H:/AIPC_Workspace/stable_c. No Stable modifications or Candidate import into Stable.
+- Genuine RecoveryManager NO_RECOVERY_NEEDED / COMPLETED preserved original queue and same RG02 authoring attempt1. Stable AIPC subscription Hydrogen repair3 session2bba3c66-b271-438d-9b78-d84f67ef5d4f fixed triage-first circular imports through local hardening imports. Repair4 session21e5a397-cf1a-4f70-8789-057b9081a268 normalized remaining coordinator CRLF; no semantic change. Valid receipts, sanitized environments, zero forbidden paths. No source implementation authored by supervisor.
+- Fresh targeted verification:54 passed (RG01/RG02/queue/coordinator/B03), exit0; all3fresh import orders with Candidate origins pass. Actual external operator-policy preflight passes, configured product milestone ceiling10. Ruff check/format pass; all4RG02files LF; git diff --check exit0. Logs runtime_c/audit/c5_rg02_final_tests.log and c5_rg02_final_static.json; immutable prior failure evidence retained.
+- Supervisor usage9/20, RG01=5, RG02=4/6, RG03=0, RG04=0; zero reset. Tier2 max2 only proven RELEASE_BLOCKER, advisory dispatch0. Two-strike no-progress assessed: repair3 fixed imports and repair4 fixed LF. Product policy caps and grants remain separate and unchanged.
+- Remaining/next action: commit RG02 checkpoint then genuine Stable AIPC RG03 dispatch for durable cumulative budget across BOTH repair routes and queue; RG04 integration/regression/docs, final frozen exactSHA CI Python3.12/3.13, onefresh independent read-only review, PR to master without merge. All independent review/CI/PR still NOT_RUN/NONE. CISL assessment only after PR. MilestoneD unauthorized.
+- Review status NOT_RUN; required fixes RG03/RG04 implementation and final independent release evidence. Known issues: no RG02 known local test failures; broad final regressions remain unverified. Existing Stable/Candidate queue bootstrap compatibility exception remains disclosed in external EXECUTION_PLAN.md. Classification EXPERIMENTAL/SUPERVISED, unattended production NO-GO.
+- Timestamp: 2026-11-17 Asia/Bangkok; exact commit recorded externally after commit. No phase PASS or stable tag created.
+
 ## RG02 bounded repair exhaustion — 2026-11-17 (authoritative)
 
 - Current phase Milestone C.5 RG01-RG04. Status BLOCKED / HALT_ON_RETRY_EXHAUSTION, HUMAN_REVIEW_REQUIRED. PhaseGate PENDING. Candidate branch gemini/aipc-2.0-milestone-c5, actual checkout H:/000ProjectCode/AI_Project_Controller. Last verified source checkpoint f1c576a5d04c80365d678d815f422e300c15451f (RG01); Section3A da1c2f78a270e589a810d89a832cf16abcbae322. This section supersedes all prior in-progress/scheduled narratives below.

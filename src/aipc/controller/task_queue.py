@@ -995,6 +995,33 @@ class PersistentTaskQueue:
             failure_reason=reason,
         )
 
+    def hold_for_human_triage(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+    ) -> QueuedTaskRecord:
+        """Hold a REPAIR_REQUIRED task in WAITING_HUMAN while preserving ledger verdicts."""
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ControllerError("human triage hold requires a non-blank reason")
+        snap = self.load()
+        target = self._get_task(snap, task_id)
+        if target.status != QueuedTaskStatus.REPAIR_REQUIRED:
+            raise ControllerError(
+                f"task '{task_id}' must be REPAIR_REQUIRED to hold for human triage "
+                f"(got {target.status})"
+            )
+        updated_target = target.model_copy(
+            update={
+                "status": QueuedTaskStatus.WAITING_HUMAN,
+                "active_attempt_id": None,
+                "blocker_reason": clean_reason,
+            }
+        )
+        self._replace_task(snap, updated_target)
+        return updated_target
+
     def record_attempt_outcome(
         self,
         task_id: str,

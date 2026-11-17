@@ -8,17 +8,19 @@ quota-exhaustion non-failure preservation, and ambiguous side-effect halts.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import StrictBool, StrictInt, model_validator
 
 from aipc.controller.errors import ControllerError, ProviderInterruption
 from aipc.controller.task_queue import (
+    ApprovedTaskContract,
     PersistentTaskQueue,
     QueuedTaskRecord,
     QueuedTaskStatus,
+    _is_milestone_c5_scope,
 )
 from aipc.domain.models import CanonicalRecord, NonBlank, ReviewResult
 from aipc.hardening.secrets import assert_no_secrets
@@ -30,19 +32,53 @@ from aipc.recovery.models import ProviderCondition
 from aipc.review import PhaseGate, ReviewContext, bind_review
 from aipc.review.context import review_provenance
 from aipc.review.errors import PhaseGateError
+from aipc.review.governance_triage import (
+    GovernanceTriageError,
+    ReviewTriageDecision,
+    UntrustedFindingDescriptor,
+    evaluate_review_triage,
+)
 from aipc.review.llm.subscription_transports import LIVE_REVIEW_UNVERIFIED
 from aipc.review.models import BoundReview, PhaseGateDecision
 from aipc.version.models import Commit, Identifier
 
+if TYPE_CHECKING:
+    from aipc.review.governance_policy import (
+        LoadedReviewGovernancePolicy,
+        PolicyTrustContext,
+    )
+
 RepairAction = Literal[
     "MARK_COMPLETED",
     "SCHEDULE_BOUNDED_REPAIR",
+    "HOLD_FOR_HUMAN_TRIAGE",
     "DEFER_ON_REVIEWER_QUOTA_OR_UNAVAILABLE",
     "WAIT_FOR_PROVIDER",
     "HALT_FOR_RECONCILIATION",
     "HALT_ON_RETRY_EXHAUSTION",
     "HALT_ON_BLOCKER",
 ]
+
+
+def _is_c5_contract(contract: ApprovedTaskContract) -> bool:
+    return any(
+        _is_milestone_c5_scope(val)
+        for val in (contract.milestone_id, contract.phase_id, contract.task_id)
+    )
+
+
+def _load_governance_policy_for_dispatch(
+    trust_context: PolicyTrustContext,
+) -> LoadedReviewGovernancePolicy:
+    from aipc.review.governance_policy import (
+        ReviewGovernancePolicyError,
+        load_review_governance_policy,
+    )
+
+    try:
+        return load_review_governance_policy(trust_context)
+    except ReviewGovernancePolicyError as exc:
+        raise ControllerError(f"Governance policy check failed: {exc}") from exc
 
 
 class RepairDispatchPlan(CanonicalRecord):
@@ -82,6 +118,7 @@ class RepairCycleEvaluation(CanonicalRecord):
     queue_status: QueuedTaskStatus
     gate_decision: PhaseGateDecision | None = None
     repair_plan: RepairDispatchPlan | None = None
+    triage_decision: ReviewTriageDecision | None = None
     live_review_status: NonBlank = "VERIFIED"
     reason: NonBlank
 
@@ -97,12 +134,14 @@ class BoundedRepairCoordinator:
         gate: PhaseGate | None = None,
         review_authority: str = "phase-24-independent-reviewer",
         clock: Callable[[], datetime] | None = None,
+        policy_trust_context: PolicyTrustContext | None = None,
     ) -> None:
         self.queue = queue
         self.prompts = prompts or PromptEngine()
         self.gate = gate or PhaseGate()
         self.review_authority = review_authority
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.policy_trust_context = policy_trust_context
 
     def verify_review_bound_to_exact_sha(
         self,
@@ -153,6 +192,8 @@ class BoundedRepairCoordinator:
         context: ReviewContext,
         review: ReviewResult,
         bound_review: BoundReview | None = None,
+        finding_descriptors: Sequence[UntrustedFindingDescriptor] | None = None,
+        policy_trust_context: PolicyTrustContext | None = None,
     ) -> RepairCycleEvaluation:
         """Evaluate review outcome, enforce SHA/evidence freshness, and coordinate next step."""
         snap = self.queue.load()
@@ -163,6 +204,17 @@ class BoundedRepairCoordinator:
             raise ControllerError(
                 f"task '{task_id}' must be RUNNING to evaluate attempt (got {task_rec.status})"
             )
+
+        active_trust_ctx = (
+            policy_trust_context if policy_trust_context is not None else self.policy_trust_context
+        )
+        is_c5 = _is_c5_contract(task_rec.contract)
+        if is_c5 or active_trust_ctx is not None:
+            if active_trust_ctx is None:
+                raise ControllerError(
+                    "Milestone C.5 requires controller-supplied PolicyTrustContext"
+                )
+            _load_governance_policy_for_dispatch(active_trust_ctx)
 
         current_sha = context.checkpoint.git_commit
         prior_shas = tuple(
@@ -267,6 +319,40 @@ class BoundedRepairCoordinator:
                 ),
             )
 
+        triage_decision: ReviewTriageDecision | None = None
+        if is_c5 or active_trust_ctx is not None:
+            assert active_trust_ctx is not None
+            try:
+                triage_decision = evaluate_review_triage(
+                    trust_context=active_trust_ctx,
+                    contract=updated_rec.contract,
+                    context=context,
+                    review=review,
+                    bound_review=submission,
+                    finding_descriptors=finding_descriptors,
+                )
+            except GovernanceTriageError as exc:
+                raise ControllerError(f"Governance triage failed: {exc}") from exc
+
+            if not triage_decision.authorize_repair:
+                held_rec = self.queue.hold_for_human_triage(
+                    task_id,
+                    reason=triage_decision.reason,
+                )
+                return RepairCycleEvaluation(
+                    task_id=task_id,
+                    attempt=held_rec.current_attempt,
+                    candidate_sha=current_sha,
+                    checkpoint_id=context.checkpoint.checkpoint_id,
+                    action="HOLD_FOR_HUMAN_TRIAGE",
+                    queue_status=held_rec.status,
+                    gate_decision=gate_decision,
+                    repair_plan=None,
+                    triage_decision=triage_decision,
+                    live_review_status=live_status,
+                    reason=triage_decision.reason,
+                )
+
         repair_plan = self._build_repair_plan(
             task_rec=updated_rec,
             project=project,
@@ -275,6 +361,11 @@ class BoundedRepairCoordinator:
             review=review,
             previous_task_id=context.task.task_id,
             candidate_sha=current_sha,
+            triage_decision=triage_decision,
+            policy_trust_context=active_trust_ctx,
+            context=context,
+            bound_review=submission,
+            finding_descriptors=finding_descriptors,
         )
         return RepairCycleEvaluation(
             task_id=task_id,
@@ -285,6 +376,7 @@ class BoundedRepairCoordinator:
             queue_status=updated_rec.status,
             gate_decision=gate_decision,
             repair_plan=repair_plan,
+            triage_decision=triage_decision,
             live_review_status=live_status,
             reason=f"Scheduled bounded repair attempt {repair_plan.next_attempt}.",
         )
@@ -345,7 +437,73 @@ class BoundedRepairCoordinator:
         review: ReviewResult,
         previous_task_id: str,
         candidate_sha: str,
+        triage_decision: ReviewTriageDecision | None = None,
+        policy_trust_context: PolicyTrustContext | None = None,
+        context: ReviewContext | None = None,
+        bound_review: BoundReview | None = None,
+        finding_descriptors: Sequence[UntrustedFindingDescriptor] | None = None,
     ) -> RepairDispatchPlan:
+        active_trust_ctx = (
+            policy_trust_context if policy_trust_context is not None else self.policy_trust_context
+        )
+        if _is_c5_contract(task_rec.contract) or active_trust_ctx is not None:
+            if active_trust_ctx is None:
+                raise ControllerError(
+                    "Milestone C.5 repair plan requires controller-supplied PolicyTrustContext"
+                )
+            loaded_policy = _load_governance_policy_for_dispatch(active_trust_ctx)
+            if context is None or bound_review is None:
+                raise ControllerError(
+                    "Milestone C.5 repair plan requires current ReviewContext, BoundReview, "
+                    "and verified ReviewTriageDecision"
+                )
+            if context.checkpoint.git_commit != candidate_sha:
+                raise ControllerError(
+                    f"Candidate SHA '{candidate_sha}' does not match ReviewContext "
+                    f"'{context.checkpoint.git_commit}'"
+                )
+            prior_shas = tuple(
+                a.candidate_sha for a in task_rec.attempts[:-1] if a.candidate_sha is not None
+            )
+            gate_decision = self.verify_review_bound_to_exact_sha(
+                bound_review=bound_review,
+                context=context,
+                previous_attempt_shas=prior_shas,
+            )
+            if gate_decision.verdict != "REVISE":
+                raise ControllerError(
+                    f"Cannot schedule repair plan for PhaseGate verdict '{gate_decision.verdict}'"
+                )
+            try:
+                recomputed_triage = evaluate_review_triage(
+                    trust_context=active_trust_ctx,
+                    contract=task_rec.contract,
+                    context=context,
+                    review=review,
+                    bound_review=bound_review,
+                    finding_descriptors=finding_descriptors,
+                )
+            except GovernanceTriageError as exc:
+                raise ControllerError(f"Governance triage failed: {exc}") from exc
+            if (
+                not recomputed_triage.authorize_repair
+                or recomputed_triage.outcome != "AUTHORIZE_BOUNDED_REPAIR"
+            ):
+                raise ControllerError(
+                    "Milestone C.5 repair plan requires an authorizing ReviewTriageDecision"
+                )
+            if triage_decision is not None and (
+                not isinstance(triage_decision, ReviewTriageDecision)
+                or triage_decision.task_id != task_rec.contract.task_id
+                or triage_decision.review_id != review.review_id
+                or triage_decision.candidate_sha != candidate_sha
+                or triage_decision.policy_sha256 != loaded_policy.policy_sha256
+                or triage_decision != recomputed_triage
+            ):
+                raise ControllerError(
+                    "Milestone C.5 repair plan rejected mismatched or forged ReviewTriageDecision"
+                )
+
         next_attempt = task_rec.current_attempt + 1
         repair_retries = state.retries.model_copy(update={"phase_revision": next_attempt - 1})
         repair_state = state.model_copy(
