@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import StrictBool, StrictInt, model_validator
@@ -43,6 +44,7 @@ from aipc.review.models import BoundReview, PhaseGateDecision
 from aipc.version.models import Commit, Identifier
 
 if TYPE_CHECKING:
+    from aipc.controller.repair_budget import BudgetReservationDecision
     from aipc.review.governance_policy import (
         LoadedReviewGovernancePolicy,
         PolicyTrustContext,
@@ -96,6 +98,7 @@ class RepairDispatchPlan(CanonicalRecord):
     repair_prompt: NonBlank
     requires_fresh_verification: StrictBool = True
     requires_new_candidate_sha: StrictBool = True
+    repair_reservation_id: NonBlank | None = None
 
     @model_validator(mode="after")
     def validate_plan(self) -> RepairDispatchPlan:
@@ -135,13 +138,93 @@ class BoundedRepairCoordinator:
         review_authority: str = "phase-24-independent-reviewer",
         clock: Callable[[], datetime] | None = None,
         policy_trust_context: PolicyTrustContext | None = None,
+        budget_ledger_path: Path | None = None,
+        root_task_lineage: str | None = None,
+        enforce_repair_budget: bool = False,
     ) -> None:
         self.queue = queue
         self.prompts = prompts or PromptEngine()
         self.gate = gate or PhaseGate()
         self.review_authority = review_authority
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.policy_trust_context = policy_trust_context
+        self.policy_trust_context = (
+            policy_trust_context if policy_trust_context is not None else queue.policy_trust_context
+        )
+        self.budget_ledger_path = (
+            Path(budget_ledger_path).resolve()
+            if budget_ledger_path is not None
+            else queue.repair_budget_path
+        )
+        self.root_task_lineage = root_task_lineage
+        self.enforce_repair_budget = enforce_repair_budget
+
+    def reserve_repair_budget_if_configured(
+        self,
+        *,
+        task_rec: QueuedTaskRecord,
+        candidate_sha: str,
+        review_id: str,
+        route: Literal["REVIEW_COORDINATOR", "VERIFICATION_FAILURE"],
+        policy_trust_context: PolicyTrustContext | None = None,
+        budget_ledger_path: Path | None = None,
+        root_task_lineage: str | None = None,
+        enforce_repair_budget: bool = False,
+    ) -> BudgetReservationDecision | None:
+        """Reserve one durable repair slot when budget enforcement is configured."""
+        if (
+            self.budget_ledger_path is not None
+            and budget_ledger_path is not None
+            and Path(budget_ledger_path).resolve() != self.budget_ledger_path
+        ):
+            raise ControllerError(
+                "Alternate budget_ledger_path rejected; coordinator is bound to controller ledger"
+            )
+        active_budget_path = (
+            Path(budget_ledger_path).resolve()
+            if budget_ledger_path is not None
+            else self.budget_ledger_path
+        )
+        should_enforce = (
+            enforce_repair_budget or self.enforce_repair_budget or active_budget_path is not None
+        )
+        if not should_enforce:
+            return None
+
+        active_trust_ctx = (
+            policy_trust_context if policy_trust_context is not None else self.policy_trust_context
+        )
+        if active_trust_ctx is None:
+            raise ControllerError(
+                "Repair budget enforcement requires controller PolicyTrustContext"
+            )
+        if active_budget_path is None:
+            raise ControllerError("Repair budget enforcement requires a bound budget_ledger_path")
+
+        loaded_policy = _load_governance_policy_for_dispatch(active_trust_ctx)
+        from aipc.controller.repair_budget import DurableRepairBudgetLedger, RepairBudgetError
+
+        next_attempt = task_rec.current_attempt + 1
+        event_id = (
+            f"{route}:{task_rec.contract.task_id}:att-{next_attempt:02d}:"
+            f"{candidate_sha}:{review_id}"
+        )
+        ledger = DurableRepairBudgetLedger(active_budget_path, clock=self.clock)
+        try:
+            return ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id=event_id,
+                task_id=task_rec.contract.task_id,
+                attempt=next_attempt,
+                candidate_sha=candidate_sha,
+                review_id=review_id,
+                route=route,
+                explicit_root_task=(
+                    root_task_lineage if root_task_lineage is not None else self.root_task_lineage
+                ),
+                trust_context=active_trust_ctx,
+            )
+        except RepairBudgetError as exc:
+            raise ControllerError(f"Repair budget check failed: {exc}") from exc
 
     def verify_review_bound_to_exact_sha(
         self,
@@ -194,6 +277,9 @@ class BoundedRepairCoordinator:
         bound_review: BoundReview | None = None,
         finding_descriptors: Sequence[UntrustedFindingDescriptor] | None = None,
         policy_trust_context: PolicyTrustContext | None = None,
+        budget_ledger_path: Path | None = None,
+        root_task_lineage: str | None = None,
+        enforce_repair_budget: bool = False,
     ) -> RepairCycleEvaluation:
         """Evaluate review outcome, enforce SHA/evidence freshness, and coordinate next step."""
         snap = self.queue.load()
@@ -353,6 +439,40 @@ class BoundedRepairCoordinator:
                     reason=triage_decision.reason,
                 )
 
+        budget_decision = self.reserve_repair_budget_if_configured(
+            task_rec=updated_rec,
+            candidate_sha=current_sha,
+            review_id=review.review_id,
+            route="REVIEW_COORDINATOR",
+            policy_trust_context=active_trust_ctx,
+            budget_ledger_path=budget_ledger_path,
+            root_task_lineage=root_task_lineage,
+            enforce_repair_budget=enforce_repair_budget,
+        )
+        if budget_decision is not None and not budget_decision.allowed:
+            halted_rec = self.queue.halt_on_budget_exhaustion(
+                task_id,
+                reason=budget_decision.reason,
+            )
+            return RepairCycleEvaluation(
+                task_id=task_id,
+                attempt=halted_rec.current_attempt,
+                candidate_sha=current_sha,
+                checkpoint_id=context.checkpoint.checkpoint_id,
+                action="HALT_ON_RETRY_EXHAUSTION",
+                queue_status=halted_rec.status,
+                gate_decision=gate_decision,
+                repair_plan=None,
+                triage_decision=triage_decision,
+                live_review_status=live_status,
+                reason=budget_decision.reason,
+            )
+
+        reservation_id = (
+            budget_decision.reservation.reservation_id
+            if budget_decision is not None and budget_decision.reservation is not None
+            else None
+        )
         repair_plan = self._build_repair_plan(
             task_rec=updated_rec,
             project=project,
@@ -366,6 +486,7 @@ class BoundedRepairCoordinator:
             context=context,
             bound_review=submission,
             finding_descriptors=finding_descriptors,
+            repair_reservation_id=reservation_id,
         )
         return RepairCycleEvaluation(
             task_id=task_id,
@@ -442,6 +563,7 @@ class BoundedRepairCoordinator:
         context: ReviewContext | None = None,
         bound_review: BoundReview | None = None,
         finding_descriptors: Sequence[UntrustedFindingDescriptor] | None = None,
+        repair_reservation_id: str | None = None,
     ) -> RepairDispatchPlan:
         active_trust_ctx = (
             policy_trust_context if policy_trust_context is not None else self.policy_trust_context
@@ -543,6 +665,7 @@ class BoundedRepairCoordinator:
             repair_prompt=prompt_text,
             requires_fresh_verification=True,
             requires_new_candidate_sha=True,
+            repair_reservation_id=repair_reservation_id,
         )
 
 

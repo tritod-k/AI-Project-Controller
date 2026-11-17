@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
@@ -24,6 +24,9 @@ from aipc.hardening.secrets import assert_no_secrets
 from aipc.recovery.models import RecoveryAction, RecoveryDecision
 from aipc.storage.json_store import load_json, write_json_atomic
 from aipc.version.models import Commit, Identifier
+
+if TYPE_CHECKING:
+    from aipc.review.governance_policy import PolicyTrustContext
 
 NonEmptyStr = NonBlank
 PortableRelativePath = NonBlank
@@ -616,13 +619,32 @@ class TaskQueueSnapshot(CanonicalRecord):
 class PersistentTaskQueue:
     """Deterministic persistent task queue integrated with Controller and Recovery rules."""
 
-    def __init__(self, queue_path: Path, *, clock=_utc_now) -> None:
+    def __init__(
+        self,
+        queue_path: Path,
+        *,
+        clock=_utc_now,
+        repair_budget_path: Path | None = None,
+        policy_trust_context: PolicyTrustContext | None = None,
+    ) -> None:
         self._path = Path(queue_path).resolve()
         self._clock = clock
+        self._repair_budget_path = (
+            Path(repair_budget_path).resolve() if repair_budget_path is not None else None
+        )
+        self._policy_trust_context = policy_trust_context
 
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def repair_budget_path(self) -> Path | None:
+        return self._repair_budget_path
+
+    @property
+    def policy_trust_context(self) -> PolicyTrustContext | None:
+        return self._policy_trust_context
 
     def _verify_milestone_c_authorization(
         self,
@@ -802,6 +824,9 @@ class PersistentTaskQueue:
         worker_id: str,
         provider: str,
         target_paths: tuple[str, ...] | None = None,
+        repair_reservation_id: str | None = None,
+        budget_ledger_path: Path | None = None,
+        policy_trust_context: PolicyTrustContext | None = None,
     ) -> QueuedTaskRecord:
         """Record dispatch intent for an eligible task and return the updated record."""
         snap = self._refresh_eligibility(self.load())
@@ -853,6 +878,79 @@ class PersistentTaskQueue:
             )
 
         attempt_id = f"att-{next_attempt_num:02d}-{task_id}"
+        is_c5 = any(
+            _is_milestone_c5_scope(val)
+            for val in (
+                snap.milestone_id,
+                target.contract.milestone_id,
+                target.contract.phase_id,
+                target.contract.task_id,
+            )
+        )
+        if target.status == QueuedTaskStatus.REPAIR_REQUIRED and is_c5:
+            if self._repair_budget_path is None:
+                raise ControllerError(
+                    "Milestone C.5 repair dispatch requires a controller-bound budget ledger"
+                )
+            if (
+                budget_ledger_path is not None
+                and Path(budget_ledger_path).resolve() != self._repair_budget_path
+            ):
+                raise ControllerError(
+                    "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
+                )
+            if (
+                self._policy_trust_context is not None
+                and policy_trust_context is not None
+                and policy_trust_context != self._policy_trust_context
+            ):
+                raise ControllerError("Mismatched PolicyTrustContext rejected at queue dispatch")
+            effective_trust_ctx = (
+                policy_trust_context
+                if policy_trust_context is not None
+                else self._policy_trust_context
+            )
+            if effective_trust_ctx is None:
+                raise ControllerError(
+                    "Milestone C.5 repair dispatch requires controller PolicyTrustContext"
+                )
+            if repair_reservation_id is None or not repair_reservation_id.strip():
+                raise ControllerError(
+                    "Milestone C.5 repair dispatch requires a valid repair_reservation_id "
+                    "and controller-bound budget ledger"
+                )
+            from aipc.controller.repair_budget import (
+                DurableRepairBudgetLedger,
+                RepairBudgetError,
+                load_policy_trust_context,
+            )
+
+            try:
+                loaded_policy = load_policy_trust_context(effective_trust_ctx)
+                budget_ledger = DurableRepairBudgetLedger(
+                    self._repair_budget_path, clock=self._clock
+                )
+                budget_ledger.consume_dispatch_reservation(
+                    reservation_id=repair_reservation_id.strip(),
+                    task_id=task_id,
+                    attempt=next_attempt_num,
+                    attempt_id=attempt_id,
+                    worker_id=worker_id,
+                    provider=provider,
+                    candidate_sha=target.last_candidate_sha,
+                    allow_recovery_redispatch=(
+                        target.recovery_cleared_for_attempt == next_attempt_num
+                    ),
+                    loaded_policy=loaded_policy,
+                    trust_context=effective_trust_ctx,
+                    expected_project_id=snap.project_id,
+                    expected_milestone_id=snap.milestone_id,
+                )
+            except RepairBudgetError as exc:
+                raise ControllerError(
+                    f"Milestone C.5 repair budget enforcement rejected dispatch: {exc}"
+                ) from exc
+
         ledger = TaskAttemptLedger(
             attempt=next_attempt_num,
             attempt_id=attempt_id,
@@ -1015,6 +1113,33 @@ class PersistentTaskQueue:
         updated_target = target.model_copy(
             update={
                 "status": QueuedTaskStatus.WAITING_HUMAN,
+                "active_attempt_id": None,
+                "blocker_reason": clean_reason,
+            }
+        )
+        self._replace_task(snap, updated_target)
+        return updated_target
+
+    def halt_on_budget_exhaustion(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+    ) -> QueuedTaskRecord:
+        """Halt a REPAIR_REQUIRED task in BLOCKED on repair budget exhaustion."""
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ControllerError("budget exhaustion halt requires a non-blank reason")
+        snap = self.load()
+        target = self._get_task(snap, task_id)
+        if target.status != QueuedTaskStatus.REPAIR_REQUIRED:
+            raise ControllerError(
+                f"task '{task_id}' must be REPAIR_REQUIRED to halt on budget exhaustion "
+                f"(got {target.status})"
+            )
+        updated_target = target.model_copy(
+            update={
+                "status": QueuedTaskStatus.BLOCKED,
                 "active_attempt_id": None,
                 "blocker_reason": clean_reason,
             }
