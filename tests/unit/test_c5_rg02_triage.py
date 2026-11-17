@@ -26,8 +26,9 @@ from aipc.domain.enums import ReviewVerdict
 from aipc.domain.models import CriterionResult, ReviewResult
 from aipc.hardening.env_isolation import build_sanitized_child_env
 from aipc.hardening.errors import SecretExposureError
-from aipc.review import bind_review
-from aipc.review.context import review_provenance
+from aipc.project.models import ProjectDefinition
+from aipc.review import CriterionRule, bind_review
+from aipc.review.context import digest, review_provenance
 from aipc.review.governance_policy import PolicyTrustContext, load_review_governance_policy
 from aipc.review.governance_triage import ReviewTriageDecision, UntrustedFindingDescriptor
 
@@ -766,3 +767,283 @@ def test_fresh_process_import_orders_avoid_circular_import_and_bind_candidate_sr
         assert resolved.is_relative_to(expected_aipc_root), (
             f"Module {mod_name} resolved outside candidate src/aipc: {resolved}"
         )
+
+
+def test_unrelated_collected_artifact_citation_holds_for_triage_without_autorepair(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    _queue, coordinator, ctx, _trust_ctx, _policy_path = _setup_running_c5_task(
+        review_case, tmp_path
+    )
+    # git_diff is collected globally in ctx.evidence.items, but AC-tests is linked to test_log.
+    review = _make_review(
+        ctx,
+        required_status="FAIL",
+        required_evidence=["git_diff"],
+        required_fixes=["Fix failing test assertion."],
+    )
+    eval_res = coordinator.evaluate_attempt_and_coordinate(
+        task_id="task-rg02-triage",
+        project=ctx.project,
+        phase=ctx.project.phases[0],
+        state=ctx.state,
+        context=ctx,
+        review=review,
+    )
+
+    assert eval_res.action == "HOLD_FOR_HUMAN_TRIAGE"
+    assert eval_res.queue_status == QueuedTaskStatus.WAITING_HUMAN
+    assert eval_res.repair_plan is None
+    assert eval_res.triage_decision is not None
+    assert eval_res.triage_decision.authorize_repair is False
+    assert eval_res.triage_decision.needs_triage_findings[0].disposition == "NEEDS_TRIAGE"
+    assert eval_res.triage_decision.needs_triage_findings[0].collected_evidence_refs == ()
+
+
+def test_positively_linked_artifact_and_file_changed_rules_authorize_bounded_repair(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    _queue, coordinator, _base_ctx, _trust_ctx, _policy_path = _setup_running_c5_task(
+        review_case, tmp_path
+    )
+    case = dict(review_case)
+    proj_data = case["project"].model_dump(mode="json")
+    proj_data["phases"][0]["acceptance_criteria"].extend(
+        [
+            {"id": "AC-artifact", "statement": "Design artifact exists", "required": True},
+            {"id": "AC-changed", "statement": "Source file changed", "required": True},
+        ]
+    )
+    case["project"] = ProjectDefinition.model_validate(proj_data)
+    base_ctx = context(case, artifacts=(("design", b"spec bytes"),))
+    linked_ctx = base_ctx.model_copy(
+        update={
+            "rules": (
+                *base_ctx.rules,
+                CriterionRule(criterion_id="AC-artifact", kind="artifact", target="design"),
+                CriterionRule(
+                    criterion_id="AC-changed", kind="file_changed", target="src/example.py"
+                ),
+            )
+        }
+    )
+    review = ReviewResult(
+        schema_version="1.0",
+        review_id="rev-rg02-linked-01",
+        task_id=linked_ctx.task.task_id,
+        verdict=ReviewVerdict.REVISE,
+        confidence=0.92,
+        criteria=[
+            CriterionResult(
+                criterion_id="AC-tests",
+                status="PASS",
+                evidence=["test_log"],
+                notes="Tests passed.",
+            ),
+            CriterionResult(
+                criterion_id="AC-optional",
+                status="PASS",
+                evidence=["git_diff"],
+                notes="Optional passed.",
+            ),
+            CriterionResult(
+                criterion_id="AC-artifact",
+                status="FAIL",
+                evidence=["design"],
+                notes="Design spec incomplete.",
+            ),
+            CriterionResult(
+                criterion_id="AC-changed",
+                status="FAIL",
+                evidence=["git_diff"],
+                notes="Missing guard in src/example.py.",
+            ),
+        ],
+        failed_criteria=["AC-artifact", "AC-changed"],
+        required_fixes=["Complete design spec.", "Add guard in src/example.py."],
+        risks=["Pending fixes."],
+        next_phase_allowed=False,
+        metadata={"candidate_commit_sha": _CANDIDATE_SHA},
+    )
+
+    eval_res = coordinator.evaluate_attempt_and_coordinate(
+        task_id="task-rg02-triage",
+        project=linked_ctx.project,
+        phase=linked_ctx.project.phases[0],
+        state=linked_ctx.state,
+        context=linked_ctx,
+        review=review,
+    )
+
+    assert eval_res.action == "SCHEDULE_BOUNDED_REPAIR"
+    assert eval_res.triage_decision is not None
+    assert len(eval_res.triage_decision.release_blockers) == 2
+    assert eval_res.triage_decision.release_blockers[0].collected_evidence_refs == ("design",)
+    assert eval_res.triage_decision.release_blockers[1].collected_evidence_refs == ("git_diff",)
+
+
+def test_mixed_review_excludes_advisories_from_repair_plan_and_prompt_preserving_raw_review(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    _queue, coordinator, ctx, _trust_ctx, _policy_path = _setup_running_c5_task(
+        review_case, tmp_path
+    )
+    advisory_marker = "DO_NOT_IMPLEMENT_ADVISORY_CLEANUP"
+    review = ReviewResult(
+        schema_version="1.0",
+        review_id="rev-rg02-mixed-01",
+        task_id=ctx.task.task_id,
+        verdict=ReviewVerdict.REVISE,
+        confidence=0.95,
+        criteria=[
+            CriterionResult(
+                criterion_id="AC-tests",
+                status="FAIL",
+                evidence=["test_log"],
+                notes=f"Required test failed. Duplicated advisory: {advisory_marker}",
+            ),
+            CriterionResult(
+                criterion_id="AC-optional",
+                status="FAIL",
+                evidence=["git_diff"],
+                notes=f"Optional style item: {advisory_marker}",
+            ),
+        ],
+        failed_criteria=["AC-tests", "AC-optional"],
+        required_fixes=[
+            "Fix failing assertion in src/aipc/review/governance_triage.py.",
+            advisory_marker,
+        ],
+        risks=[f"Risk note duplicating {advisory_marker}"],
+        next_phase_allowed=False,
+        metadata={"candidate_commit_sha": _CANDIDATE_SHA},
+    )
+    bound = bind_review(
+        ctx,
+        review,
+        authority="phase-24-independent-reviewer",
+        reviewed=review_provenance(ctx),
+    )
+    raw_snapshot = review.model_copy(deep=True)
+    bound_digest_before = bound.review_digest
+
+    descriptors = (
+        UntrustedFindingDescriptor(
+            finding_id="f-blocker-01",
+            review_id=review.review_id,
+            criterion_id="AC-tests",
+            reviewed_sha=_CANDIDATE_SHA,
+            evidence_refs=("test_log",),
+            original_text="Fix failing assertion in src/aipc/review/governance_triage.py.",
+            source_ref="review.criteria[AC-tests]",
+            target_paths=("src/aipc/review/governance_triage.py",),
+        ),
+        UntrustedFindingDescriptor(
+            finding_id="f-advisory-01",
+            review_id=review.review_id,
+            criterion_id="AC-optional",
+            reviewed_sha=_CANDIDATE_SHA,
+            evidence_refs=("git_diff",),
+            original_text=advisory_marker,
+            source_ref="review.criteria[AC-optional]",
+            advisory_only=True,
+        ),
+    )
+
+    eval_res = coordinator.evaluate_attempt_and_coordinate(
+        task_id="task-rg02-triage",
+        project=ctx.project,
+        phase=ctx.project.phases[0],
+        state=ctx.state,
+        context=ctx,
+        review=review,
+        bound_review=bound,
+        finding_descriptors=descriptors,
+    )
+
+    assert eval_res.action == "SCHEDULE_BOUNDED_REPAIR"
+    assert eval_res.repair_plan is not None
+    assert eval_res.triage_decision is not None
+    assert len(eval_res.triage_decision.release_blockers) == 1
+    assert len(eval_res.triage_decision.advisory_backlog) == 1
+    assert eval_res.repair_plan.failed_criteria == ("AC-tests",)
+    assert eval_res.repair_plan.required_fixes == (
+        "[f-blocker-01] Fix failing assertion in src/aipc/review/governance_triage.py.",
+    )
+    assert "Fix failing assertion in src/aipc/review/governance_triage.py." in (
+        eval_res.repair_plan.repair_prompt
+    )
+    assert advisory_marker not in eval_res.repair_plan.repair_prompt
+    assert all(advisory_marker not in fix for fix in eval_res.repair_plan.required_fixes)
+    assert review == raw_snapshot
+    assert bound.review_digest == bound_digest_before
+    assert digest(review) == bound_digest_before
+
+
+def test_mixed_review_with_triage_finding_holds_and_excludes_autorepair(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    _queue, coordinator, ctx, _trust_ctx, _policy_path = _setup_running_c5_task(
+        review_case, tmp_path
+    )
+    review = _make_review(
+        ctx,
+        required_status="FAIL",
+        required_evidence=["test_log"],
+        optional_status="FAIL",
+        optional_evidence=["git_diff"],
+        required_fixes=["Fix blocker.", "Triage item.", "Advisory item."],
+    )
+    descriptors = (
+        UntrustedFindingDescriptor(
+            finding_id="f-blocker-01",
+            review_id=review.review_id,
+            criterion_id="AC-tests",
+            reviewed_sha=_CANDIDATE_SHA,
+            evidence_refs=("test_log",),
+            original_text="Fix blocker.",
+            source_ref="review.criteria[AC-tests]",
+            target_paths=("src/aipc/review/governance_triage.py",),
+        ),
+        UntrustedFindingDescriptor(
+            finding_id="f-triage-01",
+            review_id=review.review_id,
+            criterion_id="AC-tests",
+            reviewed_sha=_CANDIDATE_SHA,
+            evidence_refs=("git_diff",),
+            original_text="Triage item backed only by unrelated git_diff.",
+            source_ref="review.criteria[AC-tests]",
+        ),
+        UntrustedFindingDescriptor(
+            finding_id="f-advisory-01",
+            review_id=review.review_id,
+            criterion_id="AC-optional",
+            reviewed_sha=_CANDIDATE_SHA,
+            evidence_refs=("git_diff",),
+            original_text="Advisory item.",
+            source_ref="review.criteria[AC-optional]",
+            advisory_only=True,
+        ),
+    )
+
+    eval_res = coordinator.evaluate_attempt_and_coordinate(
+        task_id="task-rg02-triage",
+        project=ctx.project,
+        phase=ctx.project.phases[0],
+        state=ctx.state,
+        context=ctx,
+        review=review,
+        finding_descriptors=descriptors,
+    )
+
+    assert eval_res.action == "HOLD_FOR_HUMAN_TRIAGE"
+    assert eval_res.queue_status == QueuedTaskStatus.WAITING_HUMAN
+    assert eval_res.repair_plan is None
+    assert eval_res.triage_decision is not None
+    assert eval_res.triage_decision.authorize_repair is False
+    assert len(eval_res.triage_decision.needs_triage_findings) == 1
+    assert eval_res.triage_decision.needs_triage_findings[0].finding_id == "f-triage-01"

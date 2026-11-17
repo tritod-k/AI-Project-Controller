@@ -568,6 +568,8 @@ class BoundedRepairCoordinator:
         active_trust_ctx = (
             policy_trust_context if policy_trust_context is not None else self.policy_trust_context
         )
+        approved_failed_criteria: tuple[str, ...] | None = None
+        approved_required_fixes: tuple[str, ...] | None = None
         if _is_c5_contract(task_rec.contract) or active_trust_ctx is not None:
             if active_trust_ctx is None:
                 raise ControllerError(
@@ -625,6 +627,19 @@ class BoundedRepairCoordinator:
                 raise ControllerError(
                     "Milestone C.5 repair plan rejected mismatched or forged ReviewTriageDecision"
                 )
+            approved_failed_criteria = tuple(
+                dict.fromkeys(
+                    blocker.criterion_id
+                    for blocker in recomputed_triage.release_blockers
+                    if blocker.criterion_id is not None
+                )
+            )
+            approved_required_fixes = tuple(
+                dict.fromkeys(
+                    f"[{blocker.finding_id}] {blocker.original_text}"
+                    for blocker in recomputed_triage.release_blockers
+                )
+            )
 
         next_attempt = task_rec.current_attempt + 1
         repair_retries = state.retries.model_copy(update={"phase_revision": next_attempt - 1})
@@ -651,6 +666,18 @@ class BoundedRepairCoordinator:
             repair_state,
             review,
             context=prompt_ctx,
+            approved_failed_criteria=approved_failed_criteria,
+            approved_required_fixes=approved_required_fixes,
+        )
+        plan_failed_criteria = (
+            approved_failed_criteria
+            if approved_failed_criteria is not None
+            else tuple(review.failed_criteria)
+        )
+        plan_required_fixes = (
+            approved_required_fixes
+            if approved_required_fixes is not None
+            else tuple(review.required_fixes)
         )
         return RepairDispatchPlan(
             task_id=task_rec.contract.task_id,
@@ -660,8 +687,8 @@ class BoundedRepairCoordinator:
             next_attempt_id=f"att-{next_attempt:02d}-{task_rec.contract.task_id}",
             previous_candidate_sha=candidate_sha,
             previous_review_id=review.review_id,
-            failed_criteria=tuple(review.failed_criteria),
-            required_fixes=tuple(review.required_fixes),
+            failed_criteria=plan_failed_criteria,
+            required_fixes=plan_required_fixes,
             repair_prompt=prompt_text,
             requires_fresh_verification=True,
             requires_new_candidate_sha=True,

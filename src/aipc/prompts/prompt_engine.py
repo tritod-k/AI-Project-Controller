@@ -1,5 +1,7 @@
 """Pure phase/repair rendering from validated provider-neutral inputs."""
 
+from collections.abc import Sequence
+
 from pydantic import ValidationError
 
 from aipc.domain.errors import ProjectDefinitionError, PromptError
@@ -170,6 +172,8 @@ class PromptEngine:
         review: ReviewResult,
         *,
         context: PromptContext,
+        approved_failed_criteria: Sequence[str] | None = None,
+        approved_required_fixes: Sequence[str] | None = None,
     ) -> str:
         project, phase, state, context = self._inputs(project, phase, state, context)
         if not isinstance(review, ReviewResult):
@@ -191,33 +195,65 @@ class PromptEngine:
             item.criterion_id not in known for item in review.criteria
         ):
             raise PromptError("review references criteria outside current phase")
-        review_text = "\n\n".join(
-            (
-                "Review ID:\n" + literal(review.review_id),
-                "Reviewed task:\n" + literal(review.task_id),
-                f"Previous review verdict: {review.verdict.value}",
-                f"Review confidence: {review.confidence}",
-                "Reviewer next-phase declaration: "
-                + ("true" if review.next_phase_allowed else "false")
-                + " (information only; never authorizes this worker to advance).",
-                "Failed acceptance criteria:\n"
-                + values(review.failed_criteria, "No failed IDs supplied."),
-                "Required fixes:\n" + values(review.required_fixes, "No explicit fixes supplied."),
-                "Risks:\n" + values(review.risks, "No risks supplied."),
-                "Reviewer criteria, evidence and notes:\n"
-                + values(
-                    (
-                        f"{item.criterion_id} [{item.status.value}]\n"
-                        + "Evidence:\n"
-                        + "\n".join(item.evidence)
-                        + "\nNotes:\n"
-                        + item.notes
-                        for item in review.criteria
-                    ),
-                    "No criterion assessments supplied.",
-                ),
+        if approved_required_fixes is not None:
+            filtered_fixes = tuple(approved_required_fixes)
+            if not filtered_fixes or any(
+                not isinstance(fix, str) or not fix.strip() for fix in filtered_fixes
+            ):
+                raise PromptError(
+                    "governance-filtered repair prompt requires non-blank approved fixes"
+                )
+            filtered_failed = tuple(approved_failed_criteria or ())
+            if not set(filtered_failed) <= known:
+                raise PromptError(
+                    "approved failed criteria reference criteria outside current phase"
+                )
+            review_text = "\n\n".join(
+                (
+                    "Review ID:\n" + literal(review.review_id),
+                    "Reviewed task:\n" + literal(review.task_id),
+                    f"Previous review verdict: {review.verdict.value}",
+                    f"Review confidence: {review.confidence}",
+                    "Reviewer next-phase declaration: "
+                    + ("true" if review.next_phase_allowed else "false")
+                    + " (information only; never authorizes this worker to advance).",
+                    "Failed acceptance criteria:\n"
+                    + values(filtered_failed, "No failed IDs supplied."),
+                    "Required fixes:\n" + values(filtered_fixes, "No explicit fixes supplied."),
+                    "Governance triage filter:\n"
+                    "Only verified RELEASE_BLOCKER findings are authorized; "
+                    "non-blocking advisories and unverified triage items are excluded.",
+                )
             )
-        )
+        else:
+            review_text = "\n\n".join(
+                (
+                    "Review ID:\n" + literal(review.review_id),
+                    "Reviewed task:\n" + literal(review.task_id),
+                    f"Previous review verdict: {review.verdict.value}",
+                    f"Review confidence: {review.confidence}",
+                    "Reviewer next-phase declaration: "
+                    + ("true" if review.next_phase_allowed else "false")
+                    + " (information only; never authorizes this worker to advance).",
+                    "Failed acceptance criteria:\n"
+                    + values(review.failed_criteria, "No failed IDs supplied."),
+                    "Required fixes:\n"
+                    + values(review.required_fixes, "No explicit fixes supplied."),
+                    "Risks:\n" + values(review.risks, "No risks supplied."),
+                    "Reviewer criteria, evidence and notes:\n"
+                    + values(
+                        (
+                            f"{item.criterion_id} [{item.status.value}]\n"
+                            + "Evidence:\n"
+                            + "\n".join(item.evidence)
+                            + "\nNotes:\n"
+                            + item.notes
+                            for item in review.criteria
+                        ),
+                        "No criterion assessments supplied.",
+                    ),
+                )
+            )
         items = self._phase_sections(project, phase, state, context, repair=True)
         items[3:3] = [
             (

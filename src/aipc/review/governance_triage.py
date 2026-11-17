@@ -10,7 +10,7 @@ from pydantic import Field, StrictBool, ValidationError
 from aipc.domain.models import CanonicalRecord, NonBlank, ReviewResult
 from aipc.review.context import context_fingerprint, digest, review_provenance
 from aipc.review.errors import ReviewContextError
-from aipc.review.models import BoundReview, ReviewContext
+from aipc.review.models import BoundReview, CriterionRule, ReviewContext
 from aipc.version.models import Commit
 
 if TYPE_CHECKING:
@@ -174,13 +174,10 @@ def _extract_descriptors(
 
     synthesized: list[UntrustedFindingDescriptor] = []
     crit_map = {c.criterion_id: c for c in review.criteria}
-    fixes_text = "; ".join(review.required_fixes)
     for idx, cid in enumerate(review.failed_criteria, start=1):
         crit = crit_map.get(cid)
         ev_refs = tuple(crit.evidence) if crit is not None else ()
         note_parts = [crit.notes] if crit is not None and crit.notes.strip() else []
-        if fixes_text:
-            note_parts.append(fixes_text)
         text = " | ".join(note_parts) or f"Failed criterion {cid}"
         synthesized.append(
             UntrustedFindingDescriptor(
@@ -209,6 +206,58 @@ def _extract_descriptors(
     return synthesized, []
 
 
+def _trusted_criterion_evidence_refs(
+    context: ReviewContext,
+    rules_by_criterion: dict[str, CriterionRule],
+    criterion_id: str | None,
+) -> set[str]:
+    if criterion_id is None:
+        return set()
+    rule = rules_by_criterion.get(criterion_id)
+    if rule is None:
+        return set()
+
+    collected_by_id = {
+        item.evidence_id: item for item in context.evidence.items if item.status == "collected"
+    }
+    collected_by_path = {
+        item.path: item
+        for item in context.evidence.items
+        if item.status == "collected" and item.path is not None
+    }
+    trusted: set[str] = set()
+
+    if rule.kind == "tests":
+        if context.evidence.tests.parse_status == "collected":
+            test_item = collected_by_id.get("test_log")
+            if test_item is not None:
+                trusted.add(test_item.evidence_id)
+                if test_item.path is not None:
+                    trusted.add(test_item.path)
+            log_ref = context.evidence.tests.log_ref
+            if log_ref is not None and log_ref in collected_by_path:
+                ref_item = collected_by_path[log_ref]
+                trusted.add(ref_item.evidence_id)
+                if ref_item.path is not None:
+                    trusted.add(ref_item.path)
+    elif rule.kind == "artifact":
+        if rule.target is not None:
+            for item in (collected_by_id.get(rule.target), collected_by_path.get(rule.target)):
+                if item is not None:
+                    trusted.add(item.evidence_id)
+                    if item.path is not None:
+                        trusted.add(item.path)
+    elif rule.kind == "file_changed" and context.evidence.git.status == "collected":
+        for eid in ("git_diff", "git_status"):
+            item = collected_by_id.get(eid)
+            if item is not None:
+                trusted.add(item.evidence_id)
+                if item.path is not None:
+                    trusted.add(item.path)
+
+    return trusted
+
+
 def _triage_single_descriptor(
     desc: UntrustedFindingDescriptor,
     *,
@@ -220,6 +269,7 @@ def _triage_single_descriptor(
     collected_refs: set[str],
     criteria_by_id: dict[str, Any],
     review_criteria_by_id: dict[str, Any],
+    rules_by_criterion: dict[str, CriterionRule],
 ) -> TriagedFinding:
     finding_id = desc.finding_id or f"finding-{idx:02d}"
     source_ref = desc.source_ref or f"descriptor[{idx - 1}]"
@@ -231,20 +281,27 @@ def _triage_single_descriptor(
     if desc.criterion_id and desc.criterion_id in review_criteria_by_id:
         crit_ev = tuple(review_criteria_by_id[desc.criterion_id].evidence)
     raw_refs = tuple(desc.evidence_refs) or crit_ev
-    verified_refs = tuple(sorted({ref for ref in raw_refs if ref in collected_refs}))
+    globally_verified_refs = tuple(sorted({ref for ref in raw_refs if ref in collected_refs}))
+    trusted_criterion_refs = _trusted_criterion_evidence_refs(
+        context, rules_by_criterion, desc.criterion_id
+    )
+    linked_verified_refs = tuple(sorted({ref for ref in raw_refs if ref in trusted_criterion_refs}))
 
     def _result(
         disposition: FindingDisposition,
         reason: str,
         *,
         advisory_only: bool = False,
+        evidence_refs: tuple[NonBlank, ...] | None = None,
     ) -> TriagedFinding:
         return TriagedFinding(
             finding_id=finding_id,
             review_id=review.review_id,
             criterion_id=desc.criterion_id,
             reviewed_sha=reviewed_sha,
-            collected_evidence_refs=verified_refs,
+            collected_evidence_refs=(
+                linked_verified_refs if evidence_refs is None else evidence_refs
+            ),
             confidence=confidence,
             confidence_limits=tuple(limits),
             original_text=desc.original_text,
@@ -309,6 +366,7 @@ def _triage_single_descriptor(
             "NON_BLOCKING_ADVISORY",
             "Optional/advisory-only finding recorded for audit backlog without auto-dispatch.",
             advisory_only=True,
+            evidence_refs=globally_verified_refs,
         )
 
     if desc.uncertain or confidence < 0.5 or _has_marker(desc.original_text, _UNCERTAINTY_MARKERS):
@@ -325,15 +383,16 @@ def _triage_single_descriptor(
         )
 
     if (
-        not verified_refs
+        not linked_verified_refs
         or context.evidence.tests.parse_status != "collected"
         or context.evidence.git.status != "collected"
         or context.evidence.git.head != candidate_sha
     ):
-        limits.append("missing_collected_evidence_proof")
+        limits.append("missing_trusted_criterion_evidence_linkage")
         return _result(
             "NEEDS_TRIAGE",
-            "Mandatory finding lacks objective collected evidence bound to exact candidate SHA.",
+            "Mandatory finding lacks trusted criterion-linked collected evidence "
+            "bound to exact candidate SHA.",
         )
 
     return _result(
@@ -404,6 +463,7 @@ def evaluate_review_triage(
     }
     criteria_by_id = {c.id: c for c in phase.acceptance_criteria}
     review_criteria_by_id = {c.criterion_id: c for c in review.criteria}
+    rules_by_criterion = {r.criterion_id: r for r in context.rules}
 
     descriptors, malformed_errors = _extract_descriptors(review, finding_descriptors)
     triaged: list[TriagedFinding] = []
@@ -436,6 +496,7 @@ def evaluate_review_triage(
                 collected_refs=collected_refs,
                 criteria_by_id=criteria_by_id,
                 review_criteria_by_id=review_criteria_by_id,
+                rules_by_criterion=rules_by_criterion,
             )
         )
 

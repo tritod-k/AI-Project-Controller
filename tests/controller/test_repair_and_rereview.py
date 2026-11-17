@@ -21,6 +21,8 @@ from aipc.controller import (
     QueuedTaskStatus,
 )
 from aipc.project.models import ProjectDefinition
+from aipc.prompts.context import PromptContext
+from aipc.prompts.prompt_engine import PromptEngine
 from aipc.recovery.models import ProviderCondition
 from aipc.review import bind_review
 from aipc.review.context import review_provenance
@@ -369,3 +371,79 @@ def test_quota_exhaustion_and_ambiguous_side_effects_and_retry_exhaustion(
     assert eval_exhausted.action == "HALT_ON_RETRY_EXHAUSTION"
     assert eval_exhausted.queue_status == QueuedTaskStatus.BLOCKED
     assert eval_exhausted.repair_plan is None
+
+
+def test_prompt_engine_governance_filter_and_legacy_coordinator_compatibility(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    ctx = _make_context_for_sha(review_case, tmp_path, sha=SHA_ATTEMPT_1, attempt=1)
+    rev = _review_with_subscription_reviewer(
+        ctx,
+        tmp_path,
+        expected_sha=SHA_ATTEMPT_1,
+        status="FAIL",
+    )
+    advisory_marker = "ADVISORY_ONLY_DO_NOT_IMPLEMENT"
+    mixed_rev = rev.model_copy(
+        update={
+            "required_fixes": [*rev.required_fixes, advisory_marker],
+            "risks": [f"Risk duplicating {advisory_marker}"],
+            "criteria": [
+                c.model_copy(update={"notes": f"{c.notes} | {advisory_marker}"})
+                for c in rev.criteria
+            ],
+        }
+    )
+    raw_snapshot = mixed_rev.model_copy(deep=True)
+
+    # 1. Legacy non-governance coordinator keeps raw required_fixes and risks in prompt
+    queue = PersistentTaskQueue(tmp_path / "legacy_queue.json")
+    queue.initialize(
+        project_id="example",
+        milestone_id="phase-24",
+        contracts=(_contract("task-24-legacy-compat", max_attempts=2),),
+    )
+    coordinator = BoundedRepairCoordinator(queue=queue)
+    queue.begin_dispatch("task-24-legacy-compat", worker_id="agy-flash", provider="gemini")
+    eval_legacy = coordinator.evaluate_attempt_and_coordinate(
+        task_id="task-24-legacy-compat",
+        project=ctx.project,
+        phase=ctx.project.phases[0],
+        state=ctx.state,
+        context=ctx,
+        review=mixed_rev,
+    )
+    assert eval_legacy.action == "SCHEDULE_BOUNDED_REPAIR"
+    assert eval_legacy.repair_plan is not None
+    assert advisory_marker in eval_legacy.repair_plan.required_fixes
+    assert advisory_marker in eval_legacy.repair_plan.repair_prompt
+
+    # 2. Governance-filtered PromptEngine excludes advisory/triage duplicates from prompt
+    engine = PromptEngine()
+    repair_state = ctx.state.model_copy(
+        update={
+            "current_attempt": 2,
+            "retries": ctx.state.retries.model_copy(update={"phase_revision": 1}),
+            "active_task_id": None,
+            "last_review": mixed_rev,
+        }
+    )
+    prompt_ctx = PromptContext(
+        in_scope=("src/aipc/controller/repair_coordinator.py",),
+        out_of_scope=("src/aipc/domain/models.py",),
+        previous_attempt=1,
+        previous_task_id=ctx.task.task_id,
+    )
+    filtered_prompt = engine.build_repair_prompt(
+        ctx.project,
+        ctx.project.phases[0],
+        repair_state,
+        mixed_rev,
+        context=prompt_ctx,
+        approved_failed_criteria=mixed_rev.failed_criteria[:1],
+        approved_required_fixes=("[f-blocker-01] Fix verified mandatory blocker only.",),
+    )
+    assert "[f-blocker-01] Fix verified mandatory blocker only." in filtered_prompt
+    assert advisory_marker not in filtered_prompt
+    assert mixed_rev == raw_snapshot
