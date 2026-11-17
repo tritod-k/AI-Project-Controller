@@ -264,6 +264,28 @@ def _contract_scope_digest(contract: ApprovedTaskContract) -> Digest:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _criterion_verification_evidence_refs(
+    context: ReviewContext,
+    criterion_id: str,
+) -> list[str]:
+    """Select collected evidence IDs linked to a criterion via trusted context rules."""
+    from aipc.review.governance_triage import _trusted_criterion_evidence_refs
+
+    rules_by_criterion = {rule.criterion_id: rule for rule in context.rules}
+    trusted_refs = _trusted_criterion_evidence_refs(context, rules_by_criterion, criterion_id)
+    if not trusted_refs:
+        return []
+    return [
+        item.evidence_id
+        for item in context.evidence.items
+        if item.status == "collected"
+        and (
+            item.evidence_id in trusted_refs
+            or (item.path is not None and item.path in trusted_refs)
+        )
+    ]
+
+
 class MilestoneBRepairAndRecoveryOrchestrator:
     """Integrates B01/B02 with BoundedRepairCoordinator, RoleRegistry, and Handoff Recovery."""
 
@@ -944,11 +966,6 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                     (p for p in eff_project.phases if p.id == phase.id),
                     eff_project.phases[0],
                 )
-                collected_refs = [
-                    item.evidence_id
-                    for item in worker_outcome.review_context.evidence.items
-                    if item.status == "collected"
-                ]
                 ver_fixes = worker_outcome.verification_failure_fixes or (
                     "Fix failing isolated verification tests before independent review.",
                 )
@@ -962,7 +979,10 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         CriterionResult(
                             criterion_id=c.id,
                             status="FAIL",
-                            evidence=collected_refs[:1],
+                            evidence=_criterion_verification_evidence_refs(
+                                worker_outcome.review_context,
+                                c.id,
+                            ),
                             notes="Isolated verification failed prior to reviewer gate.",
                         )
                         for c in eff_phase.acceptance_criteria
