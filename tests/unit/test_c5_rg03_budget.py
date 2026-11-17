@@ -1411,6 +1411,245 @@ def test_historical_import_policy10_unused_metadata_and_consumed_secret_fail_clo
         )
 
 
+def test_rg03_per_grant_isolation_expiry_depletion_and_legacy_fail_closed(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    trust_ctx, ext_root, _cand, _pol, approval_path = _create_trust_env(
+        tmp_path, per_task=1, per_milestone=8
+    )
+    loaded = load_policy_trust_context(trust_ctx)
+    now_ref = [_FIXED_NOW]
+    ledger_path = ext_root / "budget_rg03_01.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0])
+    ledger.initialize(
+        loaded_policy=loaded,
+        registered_roots=("rg03",),
+        child_to_root={"task-rg03-a": "rg03", "task-rg03-b": "rg03"},
+        trust_context=trust_ctx,
+    )
+
+    # Consume base 1/1 on rg03 via task-rg03-a.
+    d_base = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-base-1",
+        task_id="task-rg03-a",
+        attempt=2,
+        candidate_sha="1" * 40,
+        review_id="rev-base-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+    )
+    assert d_base.allowed is True
+    assert d_base.reservation is not None
+    assert d_base.reservation.funding_source == "BASE"
+
+    # Apply grant scoped ONLY to task-rg03-a and repair_budget.py with capacity 2.
+    contract_a = ApprovedTaskContract(
+        task_id="task-rg03-a",
+        phase_id="rg03",
+        milestone_id="milestone-c5",
+        title="RG03 task A",
+        objective="Task A repair",
+        max_attempts=6,
+        in_scope=(
+            "src/aipc/controller/repair_budget.py",
+            "src/aipc/controller/task_queue.py",
+        ),
+        validation_commands=("pytest -q",),
+        approval_id="c5-approval-001",
+        approval_evidence_path=str(approval_path),
+    )
+    grant_path, grant_sha = _write_extension_json(
+        ext_root / "ext_task_a.json",
+        approval_id="ktritod-ext-task-a-01",
+        root_task="rg03",
+        task_id="task-rg03-a",
+        max_additional_repairs=2,
+        scope_paths=("src/aipc/controller/repair_budget.py",),
+        issued_at=_FIXED_NOW,
+        expires_at=_FIXED_NOW + timedelta(hours=2),
+    )
+    after_apply = ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=contract_a,
+        expected_grant_sha256=grant_sha,
+    )
+    assert after_apply.applied_grants[0].consumed_repairs == 0
+    assert after_apply.applied_grants[0].remaining_repairs == 2
+
+    # Sibling task-rg03-b CANNOT use task-rg03-a's grant (not folded into root capacity).
+    d_sib = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-sib-1",
+        task_id="task-rg03-b",
+        attempt=2,
+        candidate_sha="2" * 40,
+        review_id="rev-sib-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_sib.allowed is False
+    assert d_sib.action == "HALT_ON_RETRY_EXHAUSTION"
+
+    # Unapproved path on task-rg03-a CANNOT use the grant.
+    d_bad_path = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-bad-path-1",
+        task_id="task-rg03-a",
+        attempt=3,
+        candidate_sha="3" * 40,
+        review_id="rev-bad-path-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/task_queue.py",),
+    )
+    assert d_bad_path.allowed is False
+    assert d_bad_path.action == "HALT_ON_RETRY_EXHAUSTION"
+
+    # Valid reservation 1 on task-rg03-a consumes 1 of 2 grant capacity.
+    d_g1 = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-grant-1",
+        task_id="task-rg03-a",
+        attempt=3,
+        candidate_sha="4" * 40,
+        review_id="rev-grant-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_g1.allowed is True
+    assert d_g1.reservation is not None
+    assert d_g1.reservation.funding_source == "GRANT"
+    assert d_g1.reservation.grant_approval_id == "ktritod-ext-task-a-01"
+    assert d_g1.reservation.target_paths == ("src/aipc/controller/repair_budget.py",)
+
+    # Restart reload preserves per-grant remaining_repairs=1.
+    reloaded = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0]).load(
+        loaded_policy=loaded, trust_context=trust_ctx
+    )
+    assert reloaded.applied_grants[0].consumed_repairs == 1
+    assert reloaded.applied_grants[0].remaining_repairs == 1
+
+    # Consumption with unapproved path or wrong task fails closed.
+    with pytest.raises(RepairBudgetError, match="exceeds reserved target_paths"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_g1.reservation.reservation_id,
+            task_id="task-rg03-a",
+            attempt=3,
+            attempt_id="att-03-task-rg03-a",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="4" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=("src/aipc/controller/task_queue.py",),
+        )
+    with pytest.raises(RepairBudgetError, match="does not match task"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_g1.reservation.reservation_id,
+            task_id="task-rg03-b",
+            attempt=3,
+            attempt_id="att-03-task-rg03-b",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="4" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=("src/aipc/controller/repair_budget.py",),
+        )
+
+    # Valid consumption succeeds and cannot be replayed.
+    consumed_g1 = ledger.consume_dispatch_reservation(
+        reservation_id=d_g1.reservation.reservation_id,
+        task_id="task-rg03-a",
+        attempt=3,
+        attempt_id="att-03-task-rg03-a",
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        candidate_sha="4" * 40,
+        loaded_policy=loaded,
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert consumed_g1.status == "CONSUMED"
+    with pytest.raises(RepairBudgetError, match="already consumed"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_g1.reservation.reservation_id,
+            task_id="task-rg03-a",
+            attempt=3,
+            attempt_id="att-03-task-rg03-a-replay",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="4" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=("src/aipc/controller/repair_budget.py",),
+        )
+
+    # Valid reservation 2 before expiry, then clock advances past expires_at before consumption.
+    d_g2 = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-grant-2",
+        task_id="task-rg03-a",
+        attempt=4,
+        candidate_sha="5" * 40,
+        review_id="rev-grant-2",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_g2.allowed is True
+    assert d_g2.reservation is not None
+    assert ledger.load().applied_grants[0].remaining_repairs == 0
+
+    # Grant is now depleted; a 3rd reservation is rejected.
+    d_g3 = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-grant-3",
+        task_id="task-rg03-a",
+        attempt=5,
+        candidate_sha="6" * 40,
+        review_id="rev-grant-3",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_g3.allowed is False
+    assert d_g3.action == "HALT_ON_RETRY_EXHAUSTION"
+
+    # Advance clock past grant expiry: consuming d_g2 fails closed!
+    now_ref[0] = _FIXED_NOW + timedelta(hours=3)
+    with pytest.raises(RepairBudgetError, match="expired before dispatch consumption"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_g2.reservation.reservation_id,
+            task_id="task-rg03-a",
+            attempt=4,
+            attempt_id="att-04-task-rg03-a",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+            candidate_sha="5" * 40,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=("src/aipc/controller/repair_budget.py",),
+        )
+
+    # Legacy ledger missing per-grant remaining/consumed fields fails closed on load.
+    legacy_path = ext_root / "legacy_ledger.json"
+    raw_ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    del raw_ledger["applied_grants"][0]["consumed_repairs"]
+    del raw_ledger["applied_grants"][0]["remaining_repairs"]
+    raw_ledger.pop("state_digest", None)
+    payload = json.dumps(raw_ledger, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    raw_ledger["state_digest"] = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    legacy_path.write_text(json.dumps(raw_ledger), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="Legacy applied_grants record"):
+        DurableRepairBudgetLedger(legacy_path).load()
+
+
 @pytest.mark.parametrize(
     "import_sequence",
     [

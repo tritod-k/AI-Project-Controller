@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aipc.controller import (
     ApprovedTaskContract,
@@ -14,6 +18,7 @@ from aipc.controller import (
     QueuedTaskStatus,
     persist_milestone_authorization_evidence,
 )
+from aipc.controller.repair_budget import DurableRepairBudgetLedger, load_policy_trust_context
 from aipc.hardening import SecretExposureError
 from aipc.recovery.models import (
     ContinuationContext,
@@ -22,6 +27,7 @@ from aipc.recovery.models import (
     RecoveryDecision,
     RecoveryRequest,
 )
+from aipc.review.governance_policy import PolicyTrustContext
 
 SHA_1 = "1" * 40
 SHA_2 = "2" * 40
@@ -427,3 +433,228 @@ def test_task_queue_milestone_c_requires_persisted_authorization_and_c01_c03_sco
             provider="gemini",
             target_paths=("outside/file.py",),
         )
+
+
+def test_task_queue_resume_after_budget_extension_validation(tmp_path: Path) -> None:
+    """Queue resume_after_budget_extension enforces budget-BLOCKED + valid grant only."""
+    fixed_now = datetime(2026, 11, 17, 12, 0, 0, tzinfo=UTC)
+    now_ref = [fixed_now]
+    ext_root = tmp_path / "ext"
+    cand_root = tmp_path / "cand"
+    ext_root.mkdir()
+    cand_root.mkdir()
+
+    policy_path = ext_root / "policy.yaml"
+    policy_bytes = yaml.safe_dump(
+        {
+            "policy_version": "1.0",
+            "policy_id": "aipc-c5-review-governance",
+            "operating_profile": "subscription_only",
+            "owner": "K.TRITOD",
+            "source_authority": "operator_owned_external_policy",
+            "review": {
+                "preserve_raw_review": True,
+                "preserve_canonical_verdict": True,
+                "require_exact_candidate_sha": True,
+                "default_independence": "prefer_cross_provider",
+                "require_objective_evidence_for_blockers": True,
+                "unsupported_or_unverifiable_critical_finding": "NEEDS_TRIAGE_HUMAN",
+                "advisory": {"auto_dispatch": False, "action": "AUDIT_BACKLOG_ONLY"},
+                "release_blocker": {
+                    "allow_release": False,
+                    "auto_dispatch_only_if_authorized_and_within_budget": True,
+                },
+                "needs_triage": {
+                    "allow_release_if_credible_unresolved": False,
+                    "action": "HUMAN_REVIEW_REQUIRED",
+                },
+            },
+            "repair_budget": {
+                "default_auto_code_repairs_per_task": 1,
+                "total_auto_code_repairs_per_milestone": 8,
+                "budget_exhausted_action": "HALT_ON_RETRY_EXHAUSTION",
+                "preserve_unresolved_blockers": True,
+                "counter_scope": "approved_milestone_and_root_task_lineage",
+                "persist_across_restarts": True,
+                "persist_across_provider_fallback": True,
+                "reject_counter_reset_by_task_splitting": True,
+                "extension": {
+                    "human_commander_approval_required": True,
+                    "requires_explicit_task_and_scope": True,
+                    "requires_max_additional_attempts": True,
+                    "auditable_and_expiring": True,
+                },
+            },
+            "change_scope": {
+                "cannot_expand_milestone_from_review": True,
+                "prohibit_speculative_security_hardening": True,
+                "no_second_phase_gate": True,
+                "no_auto_merge": True,
+                "no_auto_deploy": True,
+                "no_milestone_d": True,
+            },
+        },
+        sort_keys=False,
+    ).encode("utf-8")
+    policy_path.write_bytes(policy_bytes)
+
+    approval_path = ext_root / "c5_approval.json"
+    persist_milestone_authorization_evidence(
+        approval_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="c5-appr-tq",
+            project_id="proj-tq",
+            milestone_id="milestone-c5",
+            decision="APPROVED",
+            authorized_by="K.TRITOD",
+            baseline_commit_sha="4b0d19e3fd3ee30d06f9731ae90564581204f2be",
+            authorized_workstreams=("rg03",),
+        ),
+    )
+    trust_ctx = PolicyTrustContext(
+        policy_path=policy_path,
+        expected_sha256=hashlib.sha256(policy_bytes).hexdigest(),
+        trusted_external_root=ext_root,
+        excluded_roots=(cand_root,),
+        approval_path=approval_path,
+        expected_approval_id="c5-appr-tq",
+        expected_owner="K.TRITOD",
+        expected_project_id="proj-tq",
+        expected_milestone_id="milestone-c5",
+    )
+    loaded = load_policy_trust_context(trust_ctx)
+    ledger_path = ext_root / "ledger.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0])
+    ledger.initialize(loaded_policy=loaded, registered_roots=("task-rg03-1", "task-rg03-2"))
+
+    def _c5_task(tid: str) -> ApprovedTaskContract:
+        return ApprovedTaskContract(
+            task_id=tid,
+            phase_id="rg03",
+            milestone_id="milestone-c5",
+            title=f"Execute {tid}",
+            objective="RG03 queue resume test",
+            max_attempts=5,
+            in_scope=("src/aipc/controller/task_queue.py", "src/aipc/controller/repair_budget.py"),
+            validation_commands=("pytest -q",),
+            approval_id="c5-appr-tq",
+            approval_evidence_path=str(approval_path),
+        )
+
+    c1 = _c5_task("task-rg03-1")
+    c2 = _c5_task("task-rg03-2")
+    queue = PersistentTaskQueue(
+        ext_root / "queue.json",
+        clock=lambda: now_ref[0],
+        repair_budget_path=ledger_path,
+        policy_trust_context=trust_ctx,
+    )
+    queue.initialize(
+        project_id="proj-tq",
+        milestone_id="milestone-c5",
+        contracts=(c1, c2),
+        approval_id="c5-appr-tq",
+        approval_evidence_path=approval_path,
+    )
+
+    # Non-BLOCKED task cannot resume.
+    with pytest.raises(ControllerError, match="must be BLOCKED"):
+        queue.resume_after_budget_extension("task-rg03-1", grant_approval_id="any-grant")
+
+    # Non-budget BLOCKED task (Gate=BLOCKED) cannot resume.
+    queue.begin_dispatch("task-rg03-2", worker_id="agy-hydrogen", provider="gemini")
+    queue.record_attempt_outcome(
+        "task-rg03-2",
+        candidate_sha=SHA_1,
+        checkpoint_id="chk-2",
+        evidence_root="ev/2",
+        review_id="rev-2",
+        review_verdict="BLOCKED",
+        gate_verdict="BLOCKED",
+        failure_reason="Security gate failure",
+    )
+    with pytest.raises(ControllerError, match="non-budget reason"):
+        queue.resume_after_budget_extension("task-rg03-2", grant_approval_id="any-grant")
+
+    # Exhaust task-rg03-1 into budget-exhausted BLOCKED.
+    queue.begin_dispatch("task-rg03-1", worker_id="agy-hydrogen", provider="gemini")
+    queue.record_attempt_outcome(
+        "task-rg03-1",
+        candidate_sha=SHA_1,
+        checkpoint_id="chk-1",
+        evidence_root="ev/1",
+        review_id="rev-1",
+        review_verdict="REVISE",
+        gate_verdict="REVISE",
+    )
+    queue.halt_on_budget_exhaustion(
+        "task-rg03-1",
+        reason=(
+            "Root lineage 'task-rg03-1' repair budget exhausted (1/1); HALT_ON_RETRY_EXHAUSTION."
+        ),
+    )
+    assert queue.load().tasks[0].status == QueuedTaskStatus.BLOCKED
+
+    # Empty or forged grant_approval_id fails closed.
+    with pytest.raises(ControllerError, match="non-empty grant_approval_id"):
+        queue.resume_after_budget_extension("task-rg03-1", grant_approval_id="   ")
+    with pytest.raises(ControllerError, match="Unknown or unapplied"):
+        queue.resume_after_budget_extension("task-rg03-1", grant_approval_id="forged-grant")
+
+    # Apply valid grant scoped to task-rg03-1 and task_queue.py.
+    grant_path = ext_root / "grant_valid.json"
+    grant_raw = json.dumps(
+        {
+            "schema_version": "1.0",
+            "approval_id": "ktritod-tq-ext-01",
+            "authorized_by": "K.TRITOD",
+            "decision": "APPROVED",
+            "milestone_id": "milestone-c5",
+            "root_task": "task-rg03-1",
+            "task_id": "task-rg03-1",
+            "max_additional_repairs": 1,
+            "scope_paths": ["src/aipc/controller/task_queue.py"],
+            "issued_at": fixed_now.isoformat(),
+            "expires_at": (fixed_now + timedelta(hours=1)).isoformat(),
+            "single_use": True,
+            "counter_reset": False,
+        }
+    ).encode("utf-8")
+    grant_path.write_bytes(grant_raw)
+    grant_sha = hashlib.sha256(grant_raw).hexdigest()
+    Path(f"{grant_path}.sha256").write_text(grant_sha, encoding="utf-8")
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=c1,
+        expected_grant_sha256=grant_sha,
+    )
+
+    # Unapproved path fails closed.
+    with pytest.raises(ControllerError, match="not approved by grant"):
+        queue.resume_after_budget_extension(
+            "task-rg03-1",
+            grant_approval_id="ktritod-tq-ext-01",
+            target_paths=("src/aipc/controller/repair_budget.py",),
+        )
+
+    # Expired grant fails closed.
+    now_ref[0] = fixed_now + timedelta(hours=2)
+    with pytest.raises(ControllerError, match="expired"):
+        queue.resume_after_budget_extension(
+            "task-rg03-1",
+            grant_approval_id="ktritod-tq-ext-01",
+            target_paths=("src/aipc/controller/task_queue.py",),
+        )
+
+    # Valid non-expired grant resumes BLOCKED -> REPAIR_REQUIRED without resetting attempts.
+    now_ref[0] = fixed_now + timedelta(minutes=10)
+    resumed = queue.resume_after_budget_extension(
+        "task-rg03-1",
+        grant_approval_id="ktritod-tq-ext-01",
+        target_paths=("src/aipc/controller/task_queue.py",),
+    )
+    assert resumed.status == QueuedTaskStatus.REPAIR_REQUIRED
+    assert resumed.current_attempt == 1
+    assert resumed.blocker_reason is None
+    assert queue.next_eligible_task() is not None

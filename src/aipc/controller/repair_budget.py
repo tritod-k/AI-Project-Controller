@@ -139,6 +139,24 @@ def _resolve_trusted_path(
     return resolved
 
 
+def _normalize_target_paths(target_paths: Sequence[str] | None) -> tuple[str, ...] | None:
+    if target_paths is None:
+        return None
+    normalized: list[str] = []
+    for raw in target_paths:
+        if not isinstance(raw, str):
+            raise RepairBudgetError("target_paths entries must be strings")
+        norm = raw.replace("\\", "/").strip()
+        is_drive_abs = len(norm) >= 2 and norm[1] == ":" and norm[0].isalpha()
+        if not norm or norm.startswith("/") or is_drive_abs or ".." in norm.split("/"):
+            raise RepairBudgetError(f"Invalid or unsafe target path: '{raw}'")
+        if norm not in normalized:
+            normalized.append(norm)
+    if not normalized:
+        raise RepairBudgetError("target_paths cannot be empty when specified")
+    return tuple(normalized)
+
+
 def _is_path_allowed_in_scope(
     path: str,
     *,
@@ -166,6 +184,7 @@ class RootBudgetCounter(CanonicalRecord):
     root_task: Identifier
     consumed: NonNegativeInt = 0
     base_limit: NonNegativeInt = 2
+    base_consumed: NonNegativeInt | None = None
     extension_allowance: NonNegativeInt = 0
     effective_limit: NonNegativeInt = 2
     extension_approval_ids: tuple[NonBlank, ...] = ()
@@ -177,6 +196,11 @@ class RootBudgetCounter(CanonicalRecord):
             raise ValueError("effective_limit must equal base_limit + extension_allowance")
         if self.consumed < self.imported_consumed:
             raise ValueError("consumed cannot be less than imported_consumed")
+        if self.base_consumed is not None:
+            if self.base_consumed > self.base_limit:
+                raise ValueError("base_consumed cannot exceed base_limit")
+            if self.base_consumed > self.consumed:
+                raise ValueError("base_consumed cannot exceed consumed")
         _assert_no_secrets_local(self.model_dump(mode="json"))
         return self
 
@@ -194,6 +218,10 @@ class BudgetReservationRecord(CanonicalRecord):
     review_id: NonBlank
     route: Literal["REVIEW_COORDINATOR", "VERIFICATION_FAILURE"]
     status: Literal["RESERVED", "CONSUMED"] = "RESERVED"
+    funding_source: Literal["BASE", "GRANT"] | None = None
+    grant_approval_id: NonBlank | None = None
+    grant_sha256: Sha256Hex | None = None
+    target_paths: tuple[NonBlank, ...] | None = None
     consumed_attempt_id: Identifier | None = None
     consumed_worker_id: Identifier | None = None
     consumed_provider: Identifier | None = None
@@ -206,6 +234,10 @@ class BudgetReservationRecord(CanonicalRecord):
     def validate_reservation(self) -> Self:
         if self.status == "CONSUMED" and self.consumed_attempt_id is None:
             raise ValueError("CONSUMED reservation requires consumed_attempt_id")
+        if self.funding_source == "GRANT" and self.grant_approval_id is None:
+            raise ValueError("GRANT-funded reservation requires grant_approval_id")
+        if self.funding_source == "BASE" and self.grant_approval_id is not None:
+            raise ValueError("BASE-funded reservation cannot reference grant_approval_id")
         _assert_no_secrets_local(self.model_dump(mode="json"))
         return self
 
@@ -219,6 +251,8 @@ class AppliedExtensionRecord(CanonicalRecord):
     root_task: Identifier
     task_id: Identifier | None = None
     additional_repairs: PositiveInt
+    consumed_repairs: NonNegativeInt | None = None
+    remaining_repairs: NonNegativeInt | None = None
     previous_root_limit: NonNegativeInt
     new_root_limit: PositiveInt
     previous_milestone_limit: NonNegativeInt
@@ -228,6 +262,21 @@ class AppliedExtensionRecord(CanonicalRecord):
     expires_at: datetime
     applied_at: datetime
     counter_reset: StrictFalse = False
+
+    @model_validator(mode="after")
+    def validate_grant_record(self) -> Self:
+        if (self.consumed_repairs is None) != (self.remaining_repairs is None):
+            raise ValueError(
+                "consumed_repairs and remaining_repairs must both be set or both be None"
+            )
+        if (
+            self.consumed_repairs is not None
+            and self.remaining_repairs is not None
+            and self.consumed_repairs + self.remaining_repairs != self.additional_repairs
+        ):
+            raise ValueError("consumed_repairs + remaining_repairs must equal additional_repairs")
+        _assert_no_secrets_local(self.model_dump(mode="json"))
+        return self
 
 
 class BudgetExtensionGrant(CanonicalRecord):
@@ -290,9 +339,33 @@ class RepairBudgetLedgerState(CanonicalRecord):
         root_sum = sum(counter.consumed for counter in self.registered_roots.values())
         if root_sum > self.milestone_consumed:
             raise ValueError("sum of root consumed counts cannot exceed milestone_consumed")
+        for grant_rec in self.applied_grants:
+            if grant_rec.consumed_repairs is None or grant_rec.remaining_repairs is None:
+                raise ValueError(
+                    "Legacy applied_grants record missing per-grant consumed/remaining counts"
+                )
         for root_key, counter in self.registered_roots.items():
             if counter.root_task != root_key:
                 raise ValueError(f"root key '{root_key}' mismatches counter '{counter.root_task}'")
+            grant_total = sum(
+                g.additional_repairs for g in self.applied_grants if g.root_task == root_key
+            )
+            if counter.extension_allowance != grant_total:
+                raise ValueError(
+                    f"root '{root_key}' extension_allowance {counter.extension_allowance} "
+                    f"mismatches applied grants total {grant_total}"
+                )
+            if counter.base_consumed is None and (
+                grant_total > 0 or counter.extension_allowance > 0
+            ):
+                raise ValueError(
+                    f"Legacy root '{root_key}' missing base_consumed with applied extensions"
+                )
+        for res in self.reservations.values():
+            if res.status == "RESERVED" and res.funding_source is None and self.applied_grants:
+                raise ValueError(
+                    f"Legacy reservation '{res.reservation_id}' missing funding_source"
+                )
         for child, root in self.child_to_root.items():
             if root not in self.registered_roots:
                 raise ValueError(f"child '{child}' maps to unregistered root '{root}'")
@@ -649,6 +722,7 @@ class DurableRepairBudgetLedger:
                     root_task=root_name,
                     consumed=used,
                     base_limit=base_root,
+                    base_consumed=min(used, base_root),
                     extension_allowance=0,
                     effective_limit=base_root,
                     imported_consumed=used,
@@ -801,6 +875,111 @@ class DurableRepairBudgetLedger:
             f"Unknown, split, or unregistered task '{task_id}' has no trusted root lineage"
         )
 
+    def _find_eligible_grant(
+        self,
+        state: RepairBudgetLedgerState,
+        *,
+        root_task: str,
+        task_id: str,
+        now: datetime,
+        target_paths: tuple[str, ...] | None,
+        grant_approval_id: str | None = None,
+    ) -> tuple[int, AppliedExtensionRecord] | None:
+        clean_id = grant_approval_id.strip() if grant_approval_id is not None else None
+        for idx, grant_rec in enumerate(state.applied_grants):
+            if clean_id is not None and grant_rec.approval_id != clean_id:
+                continue
+            if grant_rec.root_task != root_task:
+                continue
+            if grant_rec.task_id is not None and grant_rec.task_id != task_id:
+                continue
+            if now >= grant_rec.expires_at:
+                continue
+            if grant_rec.remaining_repairs is None or grant_rec.remaining_repairs <= 0:
+                continue
+            if target_paths is not None and not all(
+                _is_path_allowed_in_scope(p, allowed_paths=grant_rec.scope_paths)
+                for p in target_paths
+            ):
+                continue
+            return idx, grant_rec
+        return None
+
+    def verify_resumable_grant(
+        self,
+        *,
+        task_id: str,
+        grant_approval_id: str,
+        target_paths: Sequence[str] | None = None,
+        contract_in_scope: Sequence[str] | None = None,
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
+        trust_context: PolicyTrustContext | None = None,
+        expected_project_id: str | None = None,
+        expected_milestone_id: str | None = None,
+    ) -> AppliedExtensionRecord:
+        """Verify an unspent, non-expired, matching Commander grant for queue resume."""
+        if loaded_policy is None or trust_context is None:
+            raise RepairBudgetError(
+                "Resuming after budget exhaustion requires loaded_policy and trust_context"
+            )
+        clean_approval_id = grant_approval_id.strip()
+        if not clean_approval_id:
+            raise RepairBudgetError("Resuming requires a non-empty grant_approval_id")
+        norm_target = _normalize_target_paths(target_paths)
+        norm_contract = _normalize_target_paths(contract_in_scope)
+        paths_to_check = norm_target if norm_target is not None else norm_contract
+        if paths_to_check is None:
+            raise RepairBudgetError("Resuming requires target_paths or contract_in_scope")
+
+        with _acquire_ledger_lock(self._path):
+            state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
+            if expected_project_id is not None and state.project_id != expected_project_id:
+                raise RepairBudgetError("Ledger project_id mismatches queue project_id")
+            if expected_milestone_id is not None and _normalize_milestone(
+                state.milestone_id
+            ) != _normalize_milestone(expected_milestone_id):
+                raise RepairBudgetError("Ledger milestone_id mismatches queue milestone_id")
+            if state.milestone_consumed >= state.milestone_limit:
+                raise RepairBudgetError(
+                    f"Milestone '{state.milestone_id}' aggregate repair budget exhausted "
+                    f"({state.milestone_consumed}/{state.milestone_limit})"
+                )
+            root_task = self.resolve_root_task(state, task_id=task_id)
+            matched = next(
+                (g for g in state.applied_grants if g.approval_id == clean_approval_id),
+                None,
+            )
+            if matched is None:
+                raise RepairBudgetError(
+                    f"Unknown or unapplied Commander grant '{clean_approval_id}'"
+                )
+            if matched.authorized_by != loaded_policy.authorized_by:
+                raise RepairBudgetError(f"Commander grant '{clean_approval_id}' owner mismatch")
+            if matched.root_task != root_task:
+                raise RepairBudgetError(
+                    f"Commander grant '{clean_approval_id}' root_task '{matched.root_task}' "
+                    f"does not match '{root_task}'"
+                )
+            if matched.task_id is not None and matched.task_id != task_id:
+                raise RepairBudgetError(
+                    f"Commander grant '{clean_approval_id}' is bound to task "
+                    f"'{matched.task_id}', not '{task_id}'"
+                )
+            now = self._clock()
+            if now >= matched.expires_at:
+                raise RepairBudgetError(f"Commander grant '{clean_approval_id}' is expired")
+            if matched.remaining_repairs is None or matched.remaining_repairs <= 0:
+                raise RepairBudgetError(
+                    f"Commander grant '{clean_approval_id}' has no remaining capacity"
+                )
+            for req_path in paths_to_check:
+                if not _is_path_allowed_in_scope(req_path, allowed_paths=matched.scope_paths):
+                    raise RepairBudgetError(
+                        f"Requested path '{req_path}' is not approved by grant "
+                        f"'{clean_approval_id}'"
+                    )
+            return matched
+
     def reserve_repair(
         self,
         *,
@@ -813,8 +992,11 @@ class DurableRepairBudgetLedger:
         route: Literal["REVIEW_COORDINATOR", "VERIFICATION_FAILURE"],
         explicit_root_task: str | None = None,
         trust_context: PolicyTrustContext | None = None,
+        target_paths: Sequence[str] | None = None,
+        grant_approval_id: str | None = None,
     ) -> BudgetReservationDecision:
         """Atomically check and reserve one code-repair slot, idempotent on exact replay."""
+        norm_paths = _normalize_target_paths(target_paths)
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
             root_task = self.resolve_root_task(
@@ -834,6 +1016,7 @@ class DurableRepairBudgetLedger:
                     or existing.candidate_sha != candidate_sha
                     or existing.review_id != review_id
                     or existing.route != route
+                    or existing.target_paths != norm_paths
                 ):
                     raise RepairBudgetError(
                         f"Conflicting replay for repair event_id '{event_id}' rejected"
@@ -852,24 +1035,6 @@ class DurableRepairBudgetLedger:
                     reason=(
                         "Idempotent replay of bound repair reservation "
                         f"'{existing.reservation_id}'."
-                    ),
-                )
-
-            if counter.consumed >= counter.effective_limit:
-                return BudgetReservationDecision(
-                    allowed=False,
-                    action="HALT_ON_RETRY_EXHAUSTION",
-                    root_task=root_task,
-                    task_id=task_id,
-                    reservation=None,
-                    root_consumed=counter.consumed,
-                    root_limit=counter.effective_limit,
-                    milestone_consumed=state.milestone_consumed,
-                    milestone_limit=state.milestone_limit,
-                    reason=(
-                        f"Root lineage '{root_task}' repair budget exhausted "
-                        f"({counter.consumed}/{counter.effective_limit}); "
-                        "HALT_ON_RETRY_EXHAUSTION / HUMAN_REVIEW_REQUIRED."
                     ),
                 )
 
@@ -892,6 +1057,47 @@ class DurableRepairBudgetLedger:
                 )
 
             now = self._clock()
+            base_used = (
+                counter.base_consumed if counter.base_consumed is not None else counter.consumed
+            )
+            funding_source: Literal["BASE", "GRANT"] = "BASE"
+            selected_idx: int | None = None
+            selected_grant: AppliedExtensionRecord | None = None
+
+            if grant_approval_id is None and base_used < counter.base_limit:
+                funding_source = "BASE"
+                new_base_consumed = base_used + 1
+            else:
+                match = self._find_eligible_grant(
+                    state,
+                    root_task=root_task,
+                    task_id=task_id,
+                    now=now,
+                    target_paths=norm_paths,
+                    grant_approval_id=grant_approval_id,
+                )
+                if match is None:
+                    return BudgetReservationDecision(
+                        allowed=False,
+                        action="HALT_ON_RETRY_EXHAUSTION",
+                        root_task=root_task,
+                        task_id=task_id,
+                        reservation=None,
+                        root_consumed=counter.consumed,
+                        root_limit=counter.effective_limit,
+                        milestone_consumed=state.milestone_consumed,
+                        milestone_limit=state.milestone_limit,
+                        reason=(
+                            f"Root lineage '{root_task}' repair budget exhausted "
+                            f"({counter.consumed}/{counter.effective_limit}; "
+                            f"base {base_used}/{counter.base_limit}); "
+                            "HALT_ON_RETRY_EXHAUSTION / HUMAN_REVIEW_REQUIRED."
+                        ),
+                    )
+                selected_idx, selected_grant = match
+                funding_source = "GRANT"
+                new_base_consumed = base_used
+
             ev_digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:12]
             res_id = f"res-{root_task}-att-{attempt:02d}-{ev_digest}"
             record = BudgetReservationRecord(
@@ -905,17 +1111,38 @@ class DurableRepairBudgetLedger:
                 review_id=review_id,
                 route=route,
                 status="RESERVED",
+                funding_source=funding_source,
+                grant_approval_id=(
+                    selected_grant.approval_id if selected_grant is not None else None
+                ),
+                grant_sha256=(selected_grant.grant_sha256 if selected_grant is not None else None),
+                target_paths=norm_paths,
                 approval_id=loaded_policy.approval_id,
                 policy_sha256=loaded_policy.policy_sha256,
                 created_at=now,
             )
-            new_counter = counter.model_copy(update={"consumed": counter.consumed + 1})
+            new_counter = counter.model_copy(
+                update={
+                    "consumed": counter.consumed + 1,
+                    "base_consumed": new_base_consumed,
+                }
+            )
             new_roots = dict(state.registered_roots)
             new_roots[root_task] = new_counter
             new_reservations = dict(state.reservations)
             new_reservations[res_id] = record
             new_events = dict(state.event_to_reservation)
             new_events[event_id] = res_id
+            new_grants = list(state.applied_grants)
+            if selected_idx is not None and selected_grant is not None:
+                assert selected_grant.consumed_repairs is not None
+                assert selected_grant.remaining_repairs is not None
+                new_grants[selected_idx] = selected_grant.model_copy(
+                    update={
+                        "consumed_repairs": selected_grant.consumed_repairs + 1,
+                        "remaining_repairs": selected_grant.remaining_repairs - 1,
+                    }
+                )
 
             updated = _with_digest(
                 state.model_copy(
@@ -924,6 +1151,7 @@ class DurableRepairBudgetLedger:
                         "registered_roots": new_roots,
                         "reservations": new_reservations,
                         "event_to_reservation": new_events,
+                        "applied_grants": tuple(new_grants),
                         "updated_at": now,
                     }
                 )
@@ -958,12 +1186,16 @@ class DurableRepairBudgetLedger:
         trust_context: PolicyTrustContext | None = None,
         expected_project_id: str | None = None,
         expected_milestone_id: str | None = None,
+        target_paths: Sequence[str] | None = None,
+        contract_in_scope: Sequence[str] | None = None,
     ) -> BudgetReservationRecord:
         """Verify and consume a repair reservation at PersistentTaskQueue.begin_dispatch."""
         if loaded_policy is None or trust_context is None:
             raise RepairBudgetError(
                 "Consuming a repair reservation requires controller loaded_policy and trust_context"
             )
+        norm_req_paths = _normalize_target_paths(target_paths)
+        norm_contract_paths = _normalize_target_paths(contract_in_scope)
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
             if expected_project_id is not None and state.project_id != expected_project_id:
@@ -994,6 +1226,13 @@ class DurableRepairBudgetLedger:
                 raise RepairBudgetError(
                     f"Repair reservation '{reservation_id}' candidate SHA mismatch"
                 )
+            if norm_req_paths is not None and res.target_paths is not None:
+                allowed_res_paths = set(res.target_paths)
+                for req_path in norm_req_paths:
+                    if req_path not in allowed_res_paths:
+                        raise RepairBudgetError(
+                            f"Requested dispatch path '{req_path}' exceeds reserved target_paths"
+                        )
             if res.status == "CONSUMED":
                 if allow_recovery_redispatch and res.consumed_attempt_id == attempt_id:
                     return res
@@ -1003,6 +1242,69 @@ class DurableRepairBudgetLedger:
                 )
 
             now = self._clock()
+            if res.funding_source == "GRANT" or res.grant_approval_id is not None:
+                if res.grant_approval_id is None:
+                    raise RepairBudgetError(
+                        f"Grant-funded reservation '{reservation_id}' missing grant_approval_id"
+                    )
+                grant_rec = next(
+                    (g for g in state.applied_grants if g.approval_id == res.grant_approval_id),
+                    None,
+                )
+                if grant_rec is None:
+                    raise RepairBudgetError(
+                        f"Reservation '{reservation_id}' references missing grant "
+                        f"'{res.grant_approval_id}'"
+                    )
+                if res.grant_sha256 is not None and not hmac.compare_digest(
+                    grant_rec.grant_sha256, res.grant_sha256
+                ):
+                    raise RepairBudgetError(f"Reservation '{reservation_id}' grant digest mismatch")
+                if grant_rec.authorized_by != loaded_policy.authorized_by:
+                    raise RepairBudgetError(
+                        f"Grant '{grant_rec.approval_id}' owner mismatch at consumption"
+                    )
+                if grant_rec.root_task != expected_root:
+                    raise RepairBudgetError(
+                        f"Grant '{grant_rec.approval_id}' root_task mismatch at consumption"
+                    )
+                if grant_rec.task_id is not None and grant_rec.task_id != task_id:
+                    raise RepairBudgetError(
+                        f"Grant '{grant_rec.approval_id}' is bound to task "
+                        f"'{grant_rec.task_id}', not '{task_id}'"
+                    )
+                if now >= grant_rec.expires_at:
+                    raise RepairBudgetError(
+                        f"Grant '{grant_rec.approval_id}' expired before dispatch consumption"
+                    )
+                if (
+                    grant_rec.consumed_repairs is None
+                    or grant_rec.remaining_repairs is None
+                    or grant_rec.consumed_repairs < 1
+                    or grant_rec.consumed_repairs + grant_rec.remaining_repairs
+                    != grant_rec.additional_repairs
+                ):
+                    raise RepairBudgetError(
+                        f"Grant '{grant_rec.approval_id}' capacity invariant invalid at consumption"
+                    )
+                paths_to_check = (
+                    norm_req_paths
+                    if norm_req_paths is not None
+                    else res.target_paths
+                    if res.target_paths is not None
+                    else norm_contract_paths
+                )
+                if paths_to_check is None:
+                    raise RepairBudgetError(
+                        "Grant-funded dispatch consumption requires bound target_paths"
+                    )
+                for req_path in paths_to_check:
+                    if not _is_path_allowed_in_scope(req_path, allowed_paths=grant_rec.scope_paths):
+                        raise RepairBudgetError(
+                            f"Requested dispatch path '{req_path}' is not approved by grant "
+                            f"'{grant_rec.approval_id}'"
+                        )
+
             consumed = res.model_copy(
                 update={
                     "status": "CONSUMED",
@@ -1199,6 +1501,21 @@ class DurableRepairBudgetLedger:
         )
         new_roots = dict(state.registered_roots)
         new_roots[grant.root_task] = new_counter
+        grant_consumed = 0
+        if is_history_import:
+            base_used = (
+                counter.base_consumed
+                if counter.base_consumed is not None
+                else min(counter.consumed, counter.base_limit)
+            )
+            already_attributed = sum(
+                g.consumed_repairs or 0
+                for g in state.applied_grants
+                if g.root_task == grant.root_task
+            )
+            unattributed = max(0, counter.consumed - base_used - already_attributed)
+            grant_consumed = min(unattributed, grant.max_additional_repairs)
+        grant_remaining = grant.max_additional_repairs - grant_consumed
         audit_rec = AppliedExtensionRecord(
             approval_id=grant.approval_id,
             grant_sha256=grant_sha,
@@ -1206,6 +1523,8 @@ class DurableRepairBudgetLedger:
             root_task=grant.root_task,
             task_id=grant.task_id,
             additional_repairs=grant.max_additional_repairs,
+            consumed_repairs=grant_consumed,
+            remaining_repairs=grant_remaining,
             previous_root_limit=prev_root_limit,
             new_root_limit=new_root_limit,
             previous_milestone_limit=prev_ms_limit,

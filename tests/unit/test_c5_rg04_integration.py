@@ -1144,6 +1144,203 @@ def test_rg04_valid_scoped_expiring_extension_vs_invalid_grants(
     assert d2.root_consumed == 2
 
 
+def test_rg04_e2e_exhaustion_blocked_grant_resume_redispatch_and_negatives(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    trust_ctx, ext_root, _cand, _pol, approval_path = _create_trust_env(
+        tmp_path, per_task=1, per_milestone=8
+    )
+    loaded = load_policy_trust_context(trust_ctx)
+    now_ref = [_FIXED_NOW]
+    ledger_path = ext_root / "budget_e2e_resume.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0])
+    ledger.initialize(
+        loaded_policy=loaded,
+        registered_roots=("task-rg04-integration", "task-rg04-sibling"),
+        trust_context=trust_ctx,
+    )
+    contract = _c5_contract(approval_path, max_attempts=6)
+    sibling = _c5_contract(approval_path, task_id="task-rg04-sibling", max_attempts=6)
+    queue = PersistentTaskQueue(
+        ext_root / "queue_e2e_resume.json",
+        clock=lambda: now_ref[0],
+        repair_budget_path=ledger_path,
+        policy_trust_context=trust_ctx,
+    )
+    queue.initialize(
+        project_id="example",
+        milestone_id="milestone-c5",
+        contracts=(contract, sibling),
+        approval_id="c5-approval-001",
+        approval_evidence_path=approval_path,
+    )
+    coordinator = BoundedRepairCoordinator(
+        queue=queue,
+        policy_trust_context=trust_ctx,
+        budget_ledger_path=ledger_path,
+        clock=lambda: now_ref[0],
+    )
+
+    # Attempt 1: initial dispatch -> REVISE -> reserves base repair 1/1.
+    queue.begin_dispatch(contract.task_id, worker_id="agy-hydrogen", provider="gemini")
+    ctx1 = _make_context_for_sha(review_case, tmp_path, sha="1" * 40, attempt=1)
+    rev1 = _make_review(ctx1, review_id="rev-e2e-1", verdict=ReviewVerdict.REVISE)
+    desc1 = UntrustedFindingDescriptor(
+        finding_id="f-e2e-1",
+        review_id="rev-e2e-1",
+        criterion_id=ctx1.project.phases[0].acceptance_criteria[0].id,
+        reviewed_sha="1" * 40,
+        evidence_refs=("test_log",),
+        original_text="Objective failure 1.",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+        confidence=0.95,
+    )
+    eval1 = coordinator.evaluate_attempt_and_coordinate(
+        task_id=contract.task_id,
+        project=ctx1.project,
+        phase=ctx1.project.phases[0],
+        state=ctx1.state,
+        context=ctx1,
+        review=rev1,
+        finding_descriptors=(desc1,),
+    )
+    assert eval1.action == "SCHEDULE_BOUNDED_REPAIR"
+    assert eval1.repair_plan is not None
+    assert eval1.repair_plan.repair_reservation_id is not None
+
+    # Attempt 2: repair dispatch -> REVISE -> base 1/1 exhausted -> BLOCKED.
+    queue.begin_dispatch(
+        contract.task_id,
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        repair_reservation_id=eval1.repair_plan.repair_reservation_id,
+    )
+    ctx2 = _make_context_for_sha(review_case, tmp_path, sha="2" * 40, attempt=2)
+    rev2 = _make_review(ctx2, review_id="rev-e2e-2", verdict=ReviewVerdict.REVISE)
+    desc2 = UntrustedFindingDescriptor(
+        finding_id="f-e2e-2",
+        review_id="rev-e2e-2",
+        criterion_id=ctx2.project.phases[0].acceptance_criteria[0].id,
+        reviewed_sha="2" * 40,
+        evidence_refs=("test_log",),
+        original_text="Objective failure 2.",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+        confidence=0.95,
+    )
+    eval2 = coordinator.evaluate_attempt_and_coordinate(
+        task_id=contract.task_id,
+        project=ctx2.project,
+        phase=ctx2.project.phases[0],
+        state=ctx2.state,
+        context=ctx2,
+        review=rev2,
+        finding_descriptors=(desc2,),
+    )
+    assert eval2.action == "HALT_ON_RETRY_EXHAUSTION"
+    assert eval2.queue_status == QueuedTaskStatus.BLOCKED
+    with pytest.raises(ControllerError, match="not eligible"):
+        queue.begin_dispatch(contract.task_id, worker_id="agy-hydrogen", provider="gemini")
+
+    # Apply valid scoped expiring Commander grant for task-rg04-integration.
+    grant_path = _write_extension_json(
+        ext_root / "approvals" / "e2e_grant.json",
+        approval_id="ext-e2e-01",
+        scope_paths=(_IN_SCOPE_TEST_PATH,),
+    )
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=contract,
+    )
+
+    # Negative resume checks: different task, unapproved path, expired grant.
+    with pytest.raises(ControllerError, match="must be BLOCKED"):
+        queue.resume_after_budget_extension(
+            "task-rg04-sibling",
+            grant_approval_id="ext-e2e-01",
+            target_paths=(_IN_SCOPE_TEST_PATH,),
+        )
+    with pytest.raises(ControllerError, match="out-of-scope|not approved"):
+        queue.resume_after_budget_extension(
+            contract.task_id,
+            grant_approval_id="ext-e2e-01",
+            target_paths=("src/aipc/controller/task_queue.py",),
+        )
+    now_ref[0] = _FIXED_NOW + timedelta(hours=25)
+    with pytest.raises(ControllerError, match="expired"):
+        queue.resume_after_budget_extension(
+            contract.task_id,
+            grant_approval_id="ext-e2e-01",
+            target_paths=(_IN_SCOPE_TEST_PATH,),
+        )
+    now_ref[0] = _FIXED_NOW
+
+    # Valid resume -> REPAIR_REQUIRED -> reserve -> redispatch -> PASS -> COMPLETED.
+    resumed = queue.resume_after_budget_extension(
+        contract.task_id,
+        grant_approval_id="ext-e2e-01",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+    )
+    assert resumed.status == QueuedTaskStatus.REPAIR_REQUIRED
+    next_task = queue.next_eligible_task()
+    assert next_task is not None
+    assert next_task.contract.task_id == contract.task_id
+
+    ext_dec = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-e2e-ext-res-1",
+        task_id=contract.task_id,
+        attempt=3,
+        candidate_sha="2" * 40,
+        review_id="rev-e2e-2",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+    )
+    assert ext_dec.allowed is True
+    assert ext_dec.reservation is not None
+    assert ledger.load().applied_grants[0].remaining_repairs == 0
+
+    # Unapproved path at begin_dispatch fails closed before consumption.
+    with pytest.raises(ControllerError, match="out-of-scope|exceeds reserved"):
+        queue.begin_dispatch(
+            contract.task_id,
+            worker_id="codex-worker",
+            provider="openai",
+            target_paths=("src/aipc/controller/task_queue.py",),
+            repair_reservation_id=ext_dec.reservation.reservation_id,
+        )
+
+    dispatched = queue.begin_dispatch(
+        contract.task_id,
+        worker_id="codex-worker",
+        provider="openai",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
+        repair_reservation_id=ext_dec.reservation.reservation_id,
+    )
+    assert dispatched.status == QueuedTaskStatus.RUNNING
+    assert dispatched.current_attempt == 3
+
+    ctx3 = _make_context_for_sha(review_case, tmp_path, sha="3" * 40, attempt=3)
+    rev3 = _make_review(
+        ctx3, review_id="rev-e2e-3", verdict=ReviewVerdict.PASS, required_status="PASS"
+    )
+    eval3 = coordinator.evaluate_attempt_and_coordinate(
+        task_id=contract.task_id,
+        project=ctx3.project,
+        phase=ctx3.project.phases[0],
+        state=ctx3.state,
+        context=ctx3,
+        review=rev3,
+    )
+    assert eval3.action == "MARK_COMPLETED"
+    assert eval3.queue_status == QueuedTaskStatus.COMPLETED
+    assert ledger.load().milestone_consumed == 2
+    assert ledger.load().applied_grants[0].consumed_repairs == 1
+    assert ledger.load().applied_grants[0].remaining_repairs == 0
+
+
 @pytest.mark.parametrize(
     "module_name",
     [

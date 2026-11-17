@@ -945,6 +945,8 @@ class PersistentTaskQueue:
                     trust_context=effective_trust_ctx,
                     expected_project_id=snap.project_id,
                     expected_milestone_id=snap.milestone_id,
+                    target_paths=target_paths,
+                    contract_in_scope=target.contract.in_scope,
                 )
             except RepairBudgetError as exc:
                 raise ControllerError(
@@ -1142,6 +1144,115 @@ class PersistentTaskQueue:
                 "status": QueuedTaskStatus.BLOCKED,
                 "active_attempt_id": None,
                 "blocker_reason": clean_reason,
+            }
+        )
+        self._replace_task(snap, updated_target)
+        return updated_target
+
+    def resume_after_budget_extension(
+        self,
+        task_id: str,
+        *,
+        grant_approval_id: str,
+        target_paths: tuple[str, ...] | None = None,
+        budget_ledger_path: Path | None = None,
+        policy_trust_context: PolicyTrustContext | None = None,
+    ) -> QueuedTaskRecord:
+        """Resume a budget-exhausted BLOCKED task with a verified Commander extension grant."""
+        if not isinstance(grant_approval_id, str) or not grant_approval_id.strip():
+            raise ControllerError(
+                "Resuming after budget exhaustion requires a non-empty grant_approval_id"
+            )
+        snap = self.load()
+        target = self._get_task(snap, task_id)
+        if target.status != QueuedTaskStatus.BLOCKED:
+            raise ControllerError(
+                f"task '{task_id}' must be BLOCKED to resume after budget exhaustion "
+                f"(got {target.status})"
+            )
+        blocker = target.blocker_reason or ""
+        if "HALT_ON_RETRY_EXHAUSTION" not in blocker or "budget" not in blocker.lower():
+            raise ControllerError(
+                f"task '{task_id}' is BLOCKED for non-budget reason '{blocker}'; "
+                "budget-extension resume rejected"
+            )
+        if target.current_attempt >= target.contract.max_attempts:
+            raise ControllerError(
+                f"task '{task_id}' already reached max_attempts ({target.contract.max_attempts})"
+            )
+        if target_paths is not None:
+            if not target_paths:
+                raise ControllerError("target_paths cannot be empty when specified")
+            in_scope = set(target.contract.in_scope)
+            out_scope = set(target.contract.out_of_scope)
+            for rel_path in target_paths:
+                norm = PortableRelativePath(rel_path) if rel_path else ""
+                if norm in out_scope or (in_scope and norm not in in_scope):
+                    raise ControllerError(
+                        f"out-of-scope target path '{rel_path}' rejected for task '{task_id}'"
+                    )
+        self._verify_milestone_c_authorization(
+            project_id=snap.project_id,
+            milestone_id=snap.milestone_id,
+            contract=target.contract,
+            snapshot_evidence_path=snap.approval_evidence_path,
+            extra_paths=target_paths or (),
+        )
+        if self._repair_budget_path is None:
+            raise ControllerError(
+                "Budget-extension resume requires a controller-bound budget ledger"
+            )
+        if (
+            budget_ledger_path is not None
+            and Path(budget_ledger_path).resolve() != self._repair_budget_path
+        ):
+            raise ControllerError(
+                "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
+            )
+        if (
+            self._policy_trust_context is not None
+            and policy_trust_context is not None
+            and policy_trust_context != self._policy_trust_context
+        ):
+            raise ControllerError(
+                "Mismatched PolicyTrustContext rejected at budget-extension resume"
+            )
+        effective_trust_ctx = (
+            policy_trust_context if policy_trust_context is not None else self._policy_trust_context
+        )
+        if effective_trust_ctx is None:
+            raise ControllerError("Budget-extension resume requires controller PolicyTrustContext")
+
+        from aipc.controller.repair_budget import (
+            DurableRepairBudgetLedger,
+            RepairBudgetError,
+            load_policy_trust_context,
+        )
+
+        try:
+            loaded_policy = load_policy_trust_context(effective_trust_ctx)
+            budget_ledger = DurableRepairBudgetLedger(self._repair_budget_path, clock=self._clock)
+            budget_ledger.verify_resumable_grant(
+                task_id=task_id,
+                grant_approval_id=grant_approval_id.strip(),
+                target_paths=target_paths,
+                contract_in_scope=target.contract.in_scope,
+                loaded_policy=loaded_policy,
+                trust_context=effective_trust_ctx,
+                expected_project_id=snap.project_id,
+                expected_milestone_id=snap.milestone_id,
+            )
+        except RepairBudgetError as exc:
+            raise ControllerError(
+                f"Budget-extension resume rejected by repair budget ledger: {exc}"
+            ) from exc
+
+        updated_target = target.model_copy(
+            update={
+                "status": QueuedTaskStatus.REPAIR_REQUIRED,
+                "active_attempt_id": None,
+                "blocker_reason": None,
+                "interruption_reason": None,
             }
         )
         self._replace_task(snap, updated_target)
