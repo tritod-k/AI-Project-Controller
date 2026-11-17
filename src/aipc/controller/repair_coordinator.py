@@ -222,6 +222,7 @@ class BoundedRepairCoordinator:
                     root_task_lineage if root_task_lineage is not None else self.root_task_lineage
                 ),
                 trust_context=active_trust_ctx,
+                target_paths=task_rec.contract.in_scope,
             )
         except RepairBudgetError as exc:
             raise ControllerError(f"Repair budget check failed: {exc}") from exc
