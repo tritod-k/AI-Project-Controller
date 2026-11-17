@@ -1,5 +1,15 @@
 # Current Project State
 
+## RG01 verified implementation checkpoint — 2026-11-17
+
+- Milestone C.5 IN_PROGRESS, PhaseGate PENDING. RG01 local implementation verified; final independent acceptance pending. Candidate gemini/aipc-2.0-milestone-c5 in H:/000ProjectCode/AI_Project_Controller. Prior checkpoint dfc3fbd; Section3A da1c2f78a270e589a810d89a832cf16abcbae322. This section supersedes scheduled handoff below.
+- Conditional final RG01 repair5 used under immutable Commander Extension02 after repair4 collection/lint/format PASS plus semantic fixture failure. Both preservation hashes verified, no active worker, genuine RecoveryManager NO_RECOVERY_NEEDED/COMPLETED. Canonical authoring attempt3 continued through guarded typed existing-record recovery bootstrap; original history preserved, no counter reset/new attempt claim. Usage RG01 5/5; milestone5/10; no sixth RG01 repair authorized.
+- Qualified Stable Hydrogen session d8063e88-70a7-48cb-958b-4579212ae8e1 exited0, genuine receipt runtime_c/milestone_c5/worker_evidence/rg01_extension02_iteration5/task-rg01-policy/worker_receipt.json; sanitized environment, zero forbidden paths. Worker aligned redaction fixture approval/policy owner and later contexts; production trust ordering preserved. Two RG01 source/test files now ready for coherent verified commit. Supervisor authored no production implementation.
+- Fresh sanitized project-venv pytest tests/unit/test_c5_rg01_policy.py -q:20 passed; Ruff check PASS; Ruff format --check PASS; git diff --check PASS. Positive/negative model-derived JSON Schema, exact bool rejection, parsing/path/hash/approval/tamper/redaction tests covered. Logs audit/c5_rg01_extension02_iteration5_{tests,lint,format}.log and verification.json. No claim of full regressions/CI/live acceptance yet.
+- Next RG02 -> RG03 -> RG04 remains explicitly authorized. Each Worker prompt prohibits protected schemas/Stable targets, credential-shaped fixtures and strict Literal constraints, and requires Ruff-compliant output. RG03 must enforce both real repair routes with durable cumulative budget. RG01 queue outcome deferred pending final exactSHA review, never PhaseGate PASS. Actual Stable clean4b0d19e3fd3ee30d06f9731ae90564581204f2be untouched; rollback preserved.
+- One-time scheduled fallback remains20:43 Asia/Bangkok2026-11-17 (audit/c5_scheduled_resume_time_correction.json); it must recover actual latest state and stop if verified PR already opened. Earlier22:49 schedule superseded. Final frozenSHA/CI/review/PR pending; review invocations0. No merge, auto-merge, deploy or D. EXPERIMENTAL/SUPERVISED.
+
+
 ## Extension02 scheduled resume checkpoint — 2026-11-17 (authoritative)
 
 - Phase Milestone C.5 RG01-RG04, status PARTIAL / SCHEDULED_RESUME. Phase Gate PENDING. Candidate gemini/aipc-2.0-milestone-c5 in H:/000ProjectCode/AI_Project_Controller. Prior handoff91e235bc5d3c68d793ef6e9a1a631bd4fb4bbbaa; verified Section3A da1c2f78a270e589a810d89a832cf16abcbae322. No RG01 PASS or verified production-code commit yet.
