@@ -233,3 +233,15 @@ budget enforcement at the existing repair-dispatch boundary without altering can
   `PersistentTaskQueue.begin_dispatch`. Enforces cumulative per-root-lineage and per-milestone
   ceilings across restarts, provider switches, and approved child-task splits, with idempotent
   reservation keys and single-use, scoped, expiring human `BudgetExtensionGrant` records.
+
+C.5 remediation01 binds triage proof to trusted CriterionRule associations and renders worker
+repair instructions solely from approved RELEASE_BLOCKER findings, keeping raw review provenance
+immutable. The B03 local-verification producer uses those same associations instead of selecting
+an arbitrary collected artifact.
+
+Grant-funded budget reservations require explicit approved target paths and retain individual
+grant identity, remaining capacity, task/root scope and expiry. Reservation replay and actual
+dispatch, including same-attempt recovery replay, revalidate the grant without double charging.
+A budget-exhausted BLOCKED queue task can use resume_after_budget_extension only with a verified,
+unspent, unexpired task/path-matching grant; unrelated BLOCKED reasons remain non-resumable.
+Legacy private ledger states missing the required grant accounting fail closed.

@@ -885,6 +885,8 @@ class DurableRepairBudgetLedger:
         target_paths: tuple[str, ...] | None,
         grant_approval_id: str | None = None,
     ) -> tuple[int, AppliedExtensionRecord] | None:
+        if not target_paths:
+            return None
         clean_id = grant_approval_id.strip() if grant_approval_id is not None else None
         for idx, grant_rec in enumerate(state.applied_grants):
             if clean_id is not None and grant_rec.approval_id != clean_id:
@@ -897,13 +899,96 @@ class DurableRepairBudgetLedger:
                 continue
             if grant_rec.remaining_repairs is None or grant_rec.remaining_repairs <= 0:
                 continue
-            if target_paths is not None and not all(
+            if not all(
                 _is_path_allowed_in_scope(p, allowed_paths=grant_rec.scope_paths)
                 for p in target_paths
             ):
                 continue
             return idx, grant_rec
         return None
+
+    def _validate_bound_grant(
+        self,
+        state: RepairBudgetLedgerState,
+        *,
+        reservation: BudgetReservationRecord,
+        task_id: str,
+        expected_root: str,
+        loaded_policy: LoadedReviewGovernancePolicy,
+        now: datetime,
+        norm_req_paths: tuple[str, ...] | None = None,
+        for_consumption: bool = False,
+    ) -> AppliedExtensionRecord:
+        res_id = reservation.reservation_id
+        if reservation.grant_approval_id is None:
+            raise RepairBudgetError(
+                f"Grant-funded reservation '{res_id}' missing grant_approval_id"
+            )
+        grant_rec = next(
+            (g for g in state.applied_grants if g.approval_id == reservation.grant_approval_id),
+            None,
+        )
+        if grant_rec is None:
+            raise RepairBudgetError(
+                f"Reservation '{res_id}' references missing grant '{reservation.grant_approval_id}'"
+            )
+        if reservation.grant_sha256 is not None and not hmac.compare_digest(
+            grant_rec.grant_sha256, reservation.grant_sha256
+        ):
+            raise RepairBudgetError(f"Reservation '{res_id}' grant digest mismatch")
+        if grant_rec.authorized_by != loaded_policy.authorized_by:
+            raise RepairBudgetError(
+                f"Grant '{grant_rec.approval_id}' owner mismatch at consumption"
+                if for_consumption
+                else f"Grant '{grant_rec.approval_id}' owner mismatch"
+            )
+        if grant_rec.root_task != expected_root:
+            raise RepairBudgetError(
+                f"Grant '{grant_rec.approval_id}' root_task mismatch at consumption"
+                if for_consumption
+                else f"Grant '{grant_rec.approval_id}' root_task mismatch"
+            )
+        if grant_rec.task_id is not None and grant_rec.task_id != task_id:
+            raise RepairBudgetError(
+                f"Grant '{grant_rec.approval_id}' is bound to task "
+                f"'{grant_rec.task_id}', not '{task_id}'"
+            )
+        if now >= grant_rec.expires_at:
+            raise RepairBudgetError(
+                f"Grant '{grant_rec.approval_id}' expired before dispatch consumption"
+                if for_consumption
+                else f"Grant '{grant_rec.approval_id}' is expired"
+            )
+        if (
+            grant_rec.consumed_repairs is None
+            or grant_rec.remaining_repairs is None
+            or grant_rec.consumed_repairs < 1
+            or grant_rec.consumed_repairs + grant_rec.remaining_repairs
+            != grant_rec.additional_repairs
+        ):
+            raise RepairBudgetError(
+                f"Grant '{grant_rec.approval_id}' capacity invariant invalid at consumption"
+                if for_consumption
+                else f"Grant '{grant_rec.approval_id}' capacity invariant invalid"
+            )
+        if not reservation.target_paths:
+            raise RepairBudgetError(
+                f"Grant-funded reservation '{res_id}' requires bound target_paths"
+            )
+        for bound_path in reservation.target_paths:
+            if not _is_path_allowed_in_scope(bound_path, allowed_paths=grant_rec.scope_paths):
+                raise RepairBudgetError(
+                    f"Bound reservation path '{bound_path}' is not approved by grant "
+                    f"'{grant_rec.approval_id}'"
+                )
+        if norm_req_paths is not None:
+            for req_path in norm_req_paths:
+                if not _is_path_allowed_in_scope(req_path, allowed_paths=grant_rec.scope_paths):
+                    raise RepairBudgetError(
+                        f"Requested dispatch path '{req_path}' is not approved by grant "
+                        f"'{grant_rec.approval_id}'"
+                    )
+        return grant_rec
 
     def verify_resumable_grant(
         self,
@@ -1021,6 +1106,24 @@ class DurableRepairBudgetLedger:
                     raise RepairBudgetError(
                         f"Conflicting replay for repair event_id '{event_id}' rejected"
                     )
+                if existing.funding_source == "GRANT" or existing.grant_approval_id is not None:
+                    if (
+                        grant_approval_id is not None
+                        and grant_approval_id.strip() != existing.grant_approval_id
+                    ):
+                        raise RepairBudgetError(
+                            f"Conflicting replay for repair event_id '{event_id}' rejected"
+                        )
+                    self._validate_bound_grant(
+                        state,
+                        reservation=existing,
+                        task_id=task_id,
+                        expected_root=root_task,
+                        loaded_policy=loaded_policy,
+                        now=self._clock(),
+                        norm_req_paths=norm_paths,
+                        for_consumption=False,
+                    )
                 return BudgetReservationDecision(
                     allowed=True,
                     idempotent_replay=True,
@@ -1097,6 +1200,10 @@ class DurableRepairBudgetLedger:
                 selected_idx, selected_grant = match
                 funding_source = "GRANT"
                 new_base_consumed = base_used
+                if not norm_paths:
+                    raise RepairBudgetError(
+                        "Grant-funded repair reservation requires non-empty target_paths"
+                    )
 
             ev_digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:12]
             res_id = f"res-{root_task}-att-{attempt:02d}-{ev_digest}"
@@ -1195,7 +1302,6 @@ class DurableRepairBudgetLedger:
                 "Consuming a repair reservation requires controller loaded_policy and trust_context"
             )
         norm_req_paths = _normalize_target_paths(target_paths)
-        norm_contract_paths = _normalize_target_paths(contract_in_scope)
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
             if expected_project_id is not None and state.project_id != expected_project_id:
@@ -1233,6 +1339,19 @@ class DurableRepairBudgetLedger:
                         raise RepairBudgetError(
                             f"Requested dispatch path '{req_path}' exceeds reserved target_paths"
                         )
+            now = self._clock()
+            if res.funding_source == "GRANT" or res.grant_approval_id is not None:
+                self._validate_bound_grant(
+                    state,
+                    reservation=res,
+                    task_id=task_id,
+                    expected_root=expected_root,
+                    loaded_policy=loaded_policy,
+                    now=now,
+                    norm_req_paths=norm_req_paths,
+                    for_consumption=True,
+                )
+
             if res.status == "CONSUMED":
                 if allow_recovery_redispatch and res.consumed_attempt_id == attempt_id:
                     return res
@@ -1240,70 +1359,6 @@ class DurableRepairBudgetLedger:
                     f"Repair reservation '{reservation_id}' already consumed; "
                     "replay dispatch rejected"
                 )
-
-            now = self._clock()
-            if res.funding_source == "GRANT" or res.grant_approval_id is not None:
-                if res.grant_approval_id is None:
-                    raise RepairBudgetError(
-                        f"Grant-funded reservation '{reservation_id}' missing grant_approval_id"
-                    )
-                grant_rec = next(
-                    (g for g in state.applied_grants if g.approval_id == res.grant_approval_id),
-                    None,
-                )
-                if grant_rec is None:
-                    raise RepairBudgetError(
-                        f"Reservation '{reservation_id}' references missing grant "
-                        f"'{res.grant_approval_id}'"
-                    )
-                if res.grant_sha256 is not None and not hmac.compare_digest(
-                    grant_rec.grant_sha256, res.grant_sha256
-                ):
-                    raise RepairBudgetError(f"Reservation '{reservation_id}' grant digest mismatch")
-                if grant_rec.authorized_by != loaded_policy.authorized_by:
-                    raise RepairBudgetError(
-                        f"Grant '{grant_rec.approval_id}' owner mismatch at consumption"
-                    )
-                if grant_rec.root_task != expected_root:
-                    raise RepairBudgetError(
-                        f"Grant '{grant_rec.approval_id}' root_task mismatch at consumption"
-                    )
-                if grant_rec.task_id is not None and grant_rec.task_id != task_id:
-                    raise RepairBudgetError(
-                        f"Grant '{grant_rec.approval_id}' is bound to task "
-                        f"'{grant_rec.task_id}', not '{task_id}'"
-                    )
-                if now >= grant_rec.expires_at:
-                    raise RepairBudgetError(
-                        f"Grant '{grant_rec.approval_id}' expired before dispatch consumption"
-                    )
-                if (
-                    grant_rec.consumed_repairs is None
-                    or grant_rec.remaining_repairs is None
-                    or grant_rec.consumed_repairs < 1
-                    or grant_rec.consumed_repairs + grant_rec.remaining_repairs
-                    != grant_rec.additional_repairs
-                ):
-                    raise RepairBudgetError(
-                        f"Grant '{grant_rec.approval_id}' capacity invariant invalid at consumption"
-                    )
-                paths_to_check = (
-                    norm_req_paths
-                    if norm_req_paths is not None
-                    else res.target_paths
-                    if res.target_paths is not None
-                    else norm_contract_paths
-                )
-                if paths_to_check is None:
-                    raise RepairBudgetError(
-                        "Grant-funded dispatch consumption requires bound target_paths"
-                    )
-                for req_path in paths_to_check:
-                    if not _is_path_allowed_in_scope(req_path, allowed_paths=grant_rec.scope_paths):
-                        raise RepairBudgetError(
-                            f"Requested dispatch path '{req_path}' is not approved by grant "
-                            f"'{grant_rec.approval_id}'"
-                        )
 
             consumed = res.model_copy(
                 update={

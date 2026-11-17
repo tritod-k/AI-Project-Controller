@@ -807,6 +807,7 @@ def test_rg04_restart_provider_switch_task_split_and_duplicate_replay(
         candidate_sha=res_record.candidate_sha,
         review_id=res_record.review_id,
         route=res_record.route,
+        target_paths=res_record.target_paths,
     )
     assert replay.idempotent_replay is True
     assert replay.root_consumed == 1
@@ -1139,6 +1140,7 @@ def test_rg04_valid_scoped_expiring_extension_vs_invalid_grants(
         candidate_sha="a" * 40,
         review_id="rev-ext-3",
         route="REVIEW_COORDINATOR",
+        target_paths=(_IN_SCOPE_TEST_PATH,),
     )
     assert d2.allowed is True
     assert d2.root_consumed == 2

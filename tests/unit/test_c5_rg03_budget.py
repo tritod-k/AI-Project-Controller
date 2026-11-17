@@ -1650,6 +1650,231 @@ def test_rg03_per_grant_isolation_expiry_depletion_and_legacy_fail_closed(
         DurableRepairBudgetLedger(legacy_path).load()
 
 
+def test_rg03_strict_grant_target_paths_replay_and_recovery_validation(
+    tmp_path: Path,
+) -> None:
+    trust_ctx, ext_root, _cand, _pol, approval_path = _create_trust_env(
+        tmp_path, per_task=1, per_milestone=8
+    )
+    loaded = load_policy_trust_context(trust_ctx)
+    now_ref = [_FIXED_NOW]
+    ledger_path = ext_root / "budget_rg03_strict.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: now_ref[0])
+    ledger.initialize(
+        loaded_policy=loaded,
+        registered_roots=("rg03",),
+        child_to_root={"task-rg03-a": "rg03"},
+        trust_context=trust_ctx,
+    )
+
+    # Consume base 1/1 without target_paths (base compatibility preserved).
+    d_base = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-strict-base-1",
+        task_id="task-rg03-a",
+        attempt=2,
+        candidate_sha="1" * 40,
+        review_id="rev-strict-base-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+    )
+    assert d_base.allowed is True
+    assert d_base.reservation is not None
+    assert d_base.reservation.funding_source == "BASE"
+
+    contract_a = ApprovedTaskContract(
+        task_id="task-rg03-a",
+        phase_id="rg03",
+        milestone_id="milestone-c5",
+        title="RG03 strict grant validation",
+        objective="Enforce strict grant path and expiry validation",
+        max_attempts=6,
+        in_scope=(
+            "src/aipc/controller/repair_budget.py",
+            "src/aipc/controller/task_queue.py",
+        ),
+        validation_commands=("pytest -q",),
+        approval_id="c5-approval-001",
+        approval_evidence_path=str(approval_path),
+    )
+    grant_path, grant_sha = _write_extension_json(
+        ext_root / "ext_strict.json",
+        approval_id="ktritod-ext-strict-01",
+        root_task="rg03",
+        task_id="task-rg03-a",
+        max_additional_repairs=2,
+        scope_paths=("src/aipc/controller/repair_budget.py",),
+        issued_at=_FIXED_NOW,
+        expires_at=_FIXED_NOW + timedelta(hours=2),
+    )
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=contract_a,
+        expected_grant_sha256=grant_sha,
+    )
+
+    # 1. Unknown-target grant reservation (target_paths=None) rejects with counters unchanged.
+    d_unknown = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-strict-unknown-1",
+        task_id="task-rg03-a",
+        attempt=3,
+        candidate_sha="2" * 40,
+        review_id="rev-strict-unknown-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=None,
+    )
+    assert d_unknown.allowed is False
+    assert d_unknown.action == "HALT_ON_RETRY_EXHAUSTION"
+    after_unknown = ledger.load(loaded_policy=loaded, trust_context=trust_ctx)
+    assert after_unknown.milestone_consumed == 1
+    assert after_unknown.registered_roots["rg03"].consumed == 1
+    assert after_unknown.applied_grants[0].consumed_repairs == 0
+    assert after_unknown.applied_grants[0].remaining_repairs == 2
+
+    # 2. Approved paths strictness: mixed approved + unapproved path rejects; traversal rejects.
+    d_mixed = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-strict-mixed-1",
+        task_id="task-rg03-a",
+        attempt=3,
+        candidate_sha="2" * 40,
+        review_id="rev-strict-mixed-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=(
+            "src/aipc/controller/repair_budget.py",
+            "src/aipc/controller/task_queue.py",
+        ),
+    )
+    assert d_mixed.allowed is False
+    assert d_mixed.action == "HALT_ON_RETRY_EXHAUSTION"
+    with pytest.raises(RepairBudgetError, match="Invalid or unsafe target path"):
+        ledger.reserve_repair(
+            loaded_policy=loaded,
+            event_id="ev-strict-trav-1",
+            task_id="task-rg03-a",
+            attempt=3,
+            candidate_sha="2" * 40,
+            review_id="rev-strict-trav-1",
+            route="REVIEW_COORDINATOR",
+            trust_context=trust_ctx,
+            target_paths=("../outside.py",),
+        )
+    assert ledger.load(loaded_policy=loaded, trust_context=trust_ctx).milestone_consumed == 1
+
+    # Valid approved-path grant reservation succeeds and spends 1 grant slot.
+    d_valid = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-strict-valid-1",
+        task_id="task-rg03-a",
+        attempt=3,
+        candidate_sha="2" * 40,
+        review_id="rev-strict-valid-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_valid.allowed is True
+    assert d_valid.reservation is not None
+    assert d_valid.reservation.funding_source == "GRANT"
+    assert d_valid.reservation.target_paths == ("src/aipc/controller/repair_budget.py",)
+
+    # 3. Unexpired idempotent replay succeeds without spending twice; expired replay fails closed.
+    d_replay = ledger.reserve_repair(
+        loaded_policy=loaded,
+        event_id="ev-strict-valid-1",
+        task_id="task-rg03-a",
+        attempt=3,
+        candidate_sha="2" * 40,
+        review_id="rev-strict-valid-1",
+        route="REVIEW_COORDINATOR",
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert d_replay.allowed is True
+    assert d_replay.idempotent_replay is True
+    after_replay = ledger.load(loaded_policy=loaded, trust_context=trust_ctx)
+    assert after_replay.milestone_consumed == 2
+    assert after_replay.applied_grants[0].consumed_repairs == 1
+    assert after_replay.applied_grants[0].remaining_repairs == 1
+
+    now_ref[0] = _FIXED_NOW + timedelta(hours=3)
+    with pytest.raises(RepairBudgetError, match="expired"):
+        ledger.reserve_repair(
+            loaded_policy=loaded,
+            event_id="ev-strict-valid-1",
+            task_id="task-rg03-a",
+            attempt=3,
+            candidate_sha="2" * 40,
+            review_id="rev-strict-valid-1",
+            route="REVIEW_COORDINATOR",
+            trust_context=trust_ctx,
+            target_paths=("src/aipc/controller/repair_budget.py",),
+        )
+    assert ledger.load(loaded_policy=loaded, trust_context=trust_ctx).milestone_consumed == 2
+
+    # 4. Live unexpired consumption and same-attempt recovery accepted without double-charge.
+    now_ref[0] = _FIXED_NOW + timedelta(minutes=30)
+    consumed = ledger.consume_dispatch_reservation(
+        reservation_id=d_valid.reservation.reservation_id,
+        task_id="task-rg03-a",
+        attempt=3,
+        attempt_id="att-03-task-rg03-a",
+        worker_id="agy-hydrogen",
+        provider="gemini",
+        candidate_sha="2" * 40,
+        loaded_policy=loaded,
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert consumed.status == "CONSUMED"
+
+    recovered = ledger.consume_dispatch_reservation(
+        reservation_id=d_valid.reservation.reservation_id,
+        task_id="task-rg03-a",
+        attempt=3,
+        attempt_id="att-03-task-rg03-a",
+        worker_id="codex-worker",
+        provider="openai",
+        candidate_sha="2" * 40,
+        allow_recovery_redispatch=True,
+        loaded_policy=loaded,
+        trust_context=trust_ctx,
+        target_paths=("src/aipc/controller/repair_budget.py",),
+    )
+    assert recovered.status == "CONSUMED"
+    assert recovered.consumed_attempt_id == "att-03-task-rg03-a"
+    after_recovery = ledger.load(loaded_policy=loaded, trust_context=trust_ctx)
+    assert after_recovery.milestone_consumed == 2
+    assert after_recovery.applied_grants[0].consumed_repairs == 1
+    assert after_recovery.applied_grants[0].remaining_repairs == 1
+
+    # 5. Consumed same-attempt recovery after grant expiry rejects with counters unchanged.
+    now_ref[0] = _FIXED_NOW + timedelta(hours=3)
+    with pytest.raises(RepairBudgetError, match="expired before dispatch consumption"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=d_valid.reservation.reservation_id,
+            task_id="task-rg03-a",
+            attempt=3,
+            attempt_id="att-03-task-rg03-a",
+            worker_id="codex-worker",
+            provider="openai",
+            candidate_sha="2" * 40,
+            allow_recovery_redispatch=True,
+            loaded_policy=loaded,
+            trust_context=trust_ctx,
+            target_paths=("src/aipc/controller/repair_budget.py",),
+        )
+    after_exp_recovery = ledger.load(loaded_policy=loaded, trust_context=trust_ctx)
+    assert after_exp_recovery.milestone_consumed == 2
+    assert after_exp_recovery.registered_roots["rg03"].consumed == 2
+    assert after_exp_recovery.applied_grants[0].consumed_repairs == 1
+    assert after_exp_recovery.applied_grants[0].remaining_repairs == 1
+
+
 @pytest.mark.parametrize(
     "import_sequence",
     [
