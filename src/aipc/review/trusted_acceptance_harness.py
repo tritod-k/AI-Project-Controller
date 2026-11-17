@@ -75,8 +75,15 @@ _MILESTONE_C5_TOKEN_RE = re.compile(
 )
 _UNAUTHORIZED_FUTURE_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)|"
-    r"rg(?:00|0[5-9]|[1-9]\d)|phase[-_](?:2[5-9]|[3-9]\d)|milestone[-_][e-z])(?![0-9])"
+    r"rg(?:00|0[5-9]|[1-9]\d)|phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
+    r"milestone[-_][d-z](?![a-z]))(?![0-9])"
 )
+_UNAUTHORIZED_FUTURE_TASK_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:d(?:0[1-9]|[1-9]\d)|"
+    r"rg(?:00|0[5-9]|[1-9]\d)|phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
+    r"milestone[-_][d-z](?![a-z]))(?![0-9])"
+)
+_LEGACY_MILESTONE_C_TASK_LABEL_RE = re.compile(r"^task[-_]c\d{2}[-_][a-z][a-z0-9_-]*$")
 
 _DEFAULT_PROTECTED_HARNESS_GLOBS: tuple[NonBlank, ...] = (
     "tests/acceptance/**",
@@ -135,10 +142,16 @@ def _normalize_criterion_test_nodes(
     return normalized
 
 
-def _contains_unauthorized_prefix(value: str) -> bool:
+def _contains_unauthorized_prefix(
+    value: str,
+    *,
+    allow_legacy_c_task_label: bool = False,
+) -> bool:
     norm = value.strip().lower()
     if any(prefix in norm for prefix in UNAUTHORIZED_MILESTONE_PREFIXES):
         return True
+    if allow_legacy_c_task_label and _LEGACY_MILESTONE_C_TASK_LABEL_RE.fullmatch(norm):
+        return bool(_UNAUTHORIZED_FUTURE_TASK_TOKEN_RE.search(norm))
     return bool(_UNAUTHORIZED_FUTURE_TOKEN_RE.search(norm))
 
 
@@ -163,7 +176,10 @@ def assert_milestone_c_scope_authorized(
             f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: phase_id '{phase_id}' references "
             "unauthorized Milestone D scope"
         )
-    if task_id is not None and _contains_unauthorized_prefix(task_id):
+    if task_id is not None and _contains_unauthorized_prefix(
+        task_id,
+        allow_legacy_c_task_label=norm_milestone == "milestone-c",
+    ):
         raise ValueError(
             f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
             "unauthorized Milestone D scope"

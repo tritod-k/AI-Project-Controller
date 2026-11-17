@@ -546,6 +546,96 @@ def test_trusted_harness_c5_requires_persisted_approval_and_blocks_d_unknown(
     assert manifest_c.milestone_id == "milestone-c"
 
 
+def test_trusted_harness_legacy_task_labels_and_future_scope_denials(tmp_path: Path) -> None:
+    # Legitimate legacy Milestone C and Phase 00-24 task identifiers remain accepted
+    assert_milestone_c_scope_authorized("milestone-c", phase_id="c03", task_id="task-c16-keyring")
+    assert_milestone_c_scope_authorized("milestone-c", task_id="task-c16-keyring")
+    assert_milestone_c_scope_authorized("milestone-c", phase_id="c02", task_id="task-c10-audit")
+    for milestone_id, phase_id, task_id in (
+        ("phase-24", "phase-00", "task-phase-00-bootstrap"),
+        ("phase-24", "phase-12", "task-12-codex"),
+        ("phase-24", "phase-24", "task-phase-24-01"),
+        ("milestone-a", "a01", "task-a01-init"),
+        ("milestone-b", "b03", "task-b03-repair"),
+    ):
+        assert_milestone_c_scope_authorized(milestone_id, phase_id=phase_id, task_id=task_id)
+
+    # Declared future milestones remain blocked even when paired with a legacy task label
+    for bad_ms in (
+        "milestone-d",
+        "milestone_d",
+        "d01",
+        "d02",
+        "d03",
+        "d04",
+        "d99",
+        "milestone-e",
+        "milestone_e",
+        "milestone-f",
+        "milestone-z",
+        "phase-25",
+        "phase-100",
+        "milestone-c6",
+        "unknown-milestone",
+    ):
+        with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+            assert_milestone_c_scope_authorized(bad_ms, task_id="task-c16-keyring")
+
+    # Unauthorized phase/workstream declarations remain blocked even with a legacy task label
+    for bad_phase in (
+        "c04",
+        "c16",
+        "d01",
+        "d04",
+        "d99",
+        "milestone-d",
+        "milestone_d",
+        "milestone-e",
+        "phase-25",
+        "rg01",
+        "rg05",
+    ):
+        with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+            assert_milestone_c_scope_authorized(
+                "milestone-c",
+                phase_id=bad_phase,
+                task_id="task-c16-keyring",
+            )
+
+    # Future/unauthorized task tokens remain blocked under milestone-c
+    for bad_task in (
+        "task-c04",
+        "task-d01",
+        "task-d04",
+        "task-d99",
+        "task-milestone-d",
+        "task-milestone_d",
+        "task-milestone-e",
+        "task-phase-25",
+        "task-rg01",
+        "task-rg05",
+        "task-c16-d04",
+        "task-c16-milestone-e",
+        "task-c16-rg01",
+    ):
+        with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+            assert_milestone_c_scope_authorized("milestone-c", phase_id="c03", task_id=bad_task)
+
+    # Legacy C task label is not permitted under milestone-c5, and C5 without approval still fails
+    c5_auth_path = _persist_c5_approval(tmp_path / "c5_approval.json")
+    with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+        assert_milestone_c_scope_authorized(
+            "milestone-c5",
+            phase_id="rg01",
+            task_id="task-c16-keyring",
+            approval_id="appr-c5-01",
+            approval_evidence_path=c5_auth_path,
+            project_id="aipc",
+        )
+    with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+        assert_milestone_c_scope_authorized("milestone-c5", phase_id="rg01", task_id="task-rg01")
+
+
 def test_aipc_implementation_worker_authorizes_c5_rg01_rg04_and_preserves_restrictions() -> None:
     worker_md = Path(".agents/agents/aipc-implementation-worker.md").read_text(encoding="utf-8")
     lowered = worker_md.lower()
