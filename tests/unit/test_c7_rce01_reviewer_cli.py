@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import subprocess
@@ -16,7 +17,13 @@ from tests.llm.support import proposal
 from tests.review.conftest import context
 
 from aipc.adapters.gemini.doctor import AntigravityQualificationResult
-from aipc.agents.role_registry import ProviderRuntimeObservation, RoleModelBinding
+from aipc.adapters.subscription_qualification import qualify_antigravity_subscription_runtime
+from aipc.agents.role_registry import (
+    ProviderRuntimeObservation,
+    RoleBasedModelRegistry,
+    RoleModelBinding,
+    RoleSelectionRequest,
+)
 from aipc.agents.routing_models import CapabilityStatus
 from aipc.controller import (
     ApprovedTaskContract,
@@ -25,17 +32,20 @@ from aipc.controller import (
 )
 from aipc.domain.models import TestSummary as DomainTestSummary
 from aipc.project.models import ProjectDefinition
-from aipc.review.context import checked_context
+from aipc.review.context import checked_context, digest
 from aipc.review.governance_policy import PolicyTrustContext
 from aipc.review.governance_triage import UntrustedFindingDescriptor
 from aipc.review.llm import (
     LIVE_REVIEW_UNVERIFIED,
     AntigravitySubscriptionReviewerTransport,
     CodexSubscriptionReviewerTransport,
+    LLMReviewerConfig,
     LLMReviewError,
     LLMReviewRequest,
     SubscriptionReviewerConfig,
 )
+from aipc.review.llm.models import ReviewRequestManifest
+from aipc.review.llm.request import sha
 from aipc.review.models import CriterionRule
 from aipc.review.subscription_reviewer_gate import (
     EXIT_MALFORMED_JOB,
@@ -45,6 +55,7 @@ from aipc.review.subscription_reviewer_gate import (
     C7ReviewerCliReceipt,
     C7ReviewJob,
     SubscriptionReviewerGateConfig,
+    _report_to_observation,
     build_cli_subscription_reviewer_transport_factory,
     get_c7_review_job_json_schema,
     main,
@@ -1034,3 +1045,259 @@ def test_rce01_production_factory_codex_nonzero_rate_limit_fails_closed(
     assert sidecar.read_text(encoding="utf-8").strip().startswith(expected_digest)
     persisted = C7ReviewerCliReceipt.model_validate_json(receipt_file.read_text(encoding="utf-8"))
     assert persisted == receipt
+
+
+def test_remediation01_agy_nonzero_exit_with_valid_pass_payload_fails_closed(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """Nonzero AGY exit fails closed even when stdout stream-json holds a schema-valid PASS."""
+    job_path, _, _, _ = _build_job_bundle(review_case, tmp_path)
+    fake_agy = tmp_path / "bin" / "agy.exe"
+    fake_agy.parent.mkdir(parents=True, exist_ok=True)
+    fake_agy.write_text("", encoding="utf-8")
+    calls = 0
+
+    async def fake_exec(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        stdin_text: str | None,
+        timeout_seconds: float,
+    ) -> tuple[int, str, str]:
+        nonlocal calls
+        calls += 1
+        del cwd, env, stdin_text, timeout_seconds
+        prompt = argv[argv.index("-p") + 1]
+        frame = {
+            "event": "result",
+            "result": {
+                "conversation_id": "agy-nonzero-pass-001",
+                "response": json.dumps(_proposal_from_prompt(prompt)),
+            },
+        }
+        return 7, json.dumps(frame) + "\n", "nonfatal diagnostic warning: cache miss"
+
+    factory = build_cli_subscription_reviewer_transport_factory(
+        subprocess_exec=fake_exec,
+        agy_executable=fake_agy,
+    )
+    code, receipt = run_subscription_reviewer_job(
+        job_path,
+        runtime_probe=lambda: _probe(codex_ok=False, agy_ok=True),
+        transport_factory=factory,
+    )
+
+    assert calls == 1
+    assert code != EXIT_PASS
+    assert code == EXIT_PROVIDER_UNAVAILABLE
+    assert isinstance(receipt, C7ReviewerCliReceipt)
+    assert receipt.gate_outcome != "PASS"
+    assert receipt.gate_outcome == "WAITING_PROVIDER"
+    assert receipt.reviewed_candidate_sha is None
+    assert receipt.phase_gate_decision is None
+    assert receipt.canonical_review is not None
+    assert receipt.canonical_review.verdict == "ERROR"
+    assert receipt.canonical_review.next_phase_allowed is False
+    assert receipt.canonical_review.metadata.get("live_review_status") == LIVE_REVIEW_UNVERIFIED
+    assert receipt.session_isolation_audit is not None
+    assert receipt.session_isolation_audit.rejection_code == "REVIEWER_QUOTA_OR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    ("stderr_text", "expected_err"),
+    [
+        ("429 resource_exhausted rate_limit", "rate_limit"),
+        ("401 unauthenticated login required", "auth"),
+        ("nonfatal diagnostic warning", "service"),
+    ],
+)
+def test_remediation01_agy_nonzero_exit_preserves_auth_and_quota_classification(
+    tmp_path: Path,
+    stderr_text: str,
+    expected_err: str,
+) -> None:
+    """Nonzero AGY exit raises LLMReviewError and preserves auth/quota classification."""
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    fake_agy = tmp_path / "bin" / "agy.exe"
+    fake_agy.parent.mkdir(parents=True, exist_ok=True)
+    fake_agy.write_text("", encoding="utf-8")
+    dummy_sha = "a" * 40
+    dummy_digest = "a" * 64
+    calls = 0
+
+    async def fake_exec(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        stdin_text: str | None,
+        timeout_seconds: float,
+    ) -> tuple[int, str, str]:
+        nonlocal calls
+        calls += 1
+        del cwd, env, stdin_text, timeout_seconds
+        prompt = argv[argv.index("-p") + 1]
+        frame = {
+            "event": "result",
+            "result": {
+                "conversation_id": "agy-err-001",
+                "response": json.dumps(_proposal_from_prompt(prompt)),
+            },
+        }
+        return 7, json.dumps(frame) + "\n", stderr_text
+
+    binding = RoleModelBinding(
+        binding_id="reviewer-agy-strict",
+        role="reviewer",
+        provider_id="gemini-antigravity",
+        provider_family="google_antigravity",
+        model_id="gemini-3.8-flash-medium",
+        model_tier="review_strict",
+        execution_mode="reviewer",
+        auth_mode="antigravity_subscription",
+        required_capabilities=("read_only_review",),
+        priority=95,
+        fallback_order=0,
+    )
+    llm_cfg = LLMReviewerConfig(
+        reviewer_id=binding.binding_id,
+        provider="gemini",
+        model=binding.model_id,
+    )
+    sub_cfg = SubscriptionReviewerConfig(
+        llm_config=llm_cfg,
+        auth_mode="antigravity_subscription",
+        independence_policy="allow_isolated_same_provider_fallback",
+        expected_candidate_sha=dummy_sha,
+        candidate_workspace=str(ws),
+    )
+    instructions = "Review candidate."
+    input_json = json.dumps(
+        {
+            "review_request_id": dummy_digest,
+            "acceptance_criteria": [{"criterion_id": "AC-tests"}],
+        }
+    )
+    req = LLMReviewRequest(
+        request_id=dummy_digest,
+        config=llm_cfg,
+        instructions=instructions,
+        input_json=input_json,
+        manifest=ReviewRequestManifest(
+            project_id="example",
+            run_id="run-1",
+            phase_id="rce01",
+            attempt=1,
+            task_id="task-rce01-review",
+            worker_agent_id="worker-agy-fast",
+            worker_provider="gemini",
+            worker_model="gemini-3.8-flash-medium",
+            input_digest=sha(input_json.encode()),
+            instructions_digest=sha(instructions.encode()),
+            config_digest=digest(llm_cfg),
+            context_digest=dummy_digest,
+            task_digest=dummy_digest,
+            agent_result_digest=dummy_digest,
+            evidence_digest=dummy_digest,
+            git_commit=dummy_sha,
+            items=(),
+        ),
+    )
+    factory = build_cli_subscription_reviewer_transport_factory(
+        subprocess_exec=fake_exec,
+        agy_executable=fake_agy,
+    )
+    transport = factory(binding, sub_cfg)
+    with pytest.raises(LLMReviewError, match=expected_err):
+        asyncio.run(transport.review(req))
+    assert calls == 1
+
+
+def test_remediation01_report_to_observation_preserves_model_eligibility_for_selection(
+    tmp_path: Path,
+) -> None:
+    """_report_to_observation retains model_eligibility so registry skips restricted models."""
+    home = tmp_path / "home"
+    (home / ".gemini" / "antigravity").mkdir(parents=True)
+    fake_agy = tmp_path / "agy.exe"
+    fake_agy.write_text("binary", encoding="utf-8")
+
+    base_report = qualify_antigravity_subscription_runtime(
+        executable=fake_agy,
+        home_dir=home,
+        qualification_override=AntigravityQualificationResult(
+            qualified=True,
+            version="1.5.8",
+            reason="qualified",
+            cli_compatible=True,
+            effective_security_verified=True,
+        ),
+        oauth_present_override=True,
+    )
+    report = base_report.model_copy(
+        update={
+            "supported_model_ids": ("argon", "gemini-4-hydrogen-medium"),
+            "unverified_or_unavailable_model_ids": (),
+            "model_eligibility": {
+                "argon": "RATE_LIMITED",
+                "gemini-4-hydrogen-medium": "QUALIFIED",
+            },
+        }
+    )
+
+    obs = _report_to_observation(report)
+    assert obs.model_states == {
+        "argon": "RATE_LIMITED",
+        "gemini-4-hydrogen-medium": "QUALIFIED",
+    }
+
+    registry = RoleBasedModelRegistry(observations=lambda: (obs,))
+    registry.register(
+        RoleModelBinding(
+            binding_id="reviewer-agy-argon",
+            role="reviewer",
+            provider_id="gemini-antigravity",
+            provider_family="google_antigravity",
+            model_id="argon",
+            model_tier="review_strict",
+            execution_mode="reviewer",
+            auth_mode="antigravity_subscription",
+            required_capabilities=("read_only_review",),
+            priority=99,
+            fallback_order=0,
+        )
+    )
+    registry.register(
+        RoleModelBinding(
+            binding_id="reviewer-agy-hydrogen",
+            role="reviewer",
+            provider_id="gemini-antigravity",
+            provider_family="google_antigravity",
+            model_id="gemini-4-hydrogen-medium",
+            model_tier="review_strict",
+            execution_mode="reviewer",
+            auth_mode="antigravity_subscription",
+            required_capabilities=("read_only_review",),
+            priority=95,
+            fallback_order=1,
+        )
+    )
+
+    decision = registry.resolve(
+        RoleSelectionRequest(
+            role="reviewer",
+            preferred_tiers=("review_strict",),
+            required_capabilities=("read_only_review",),
+        )
+    )
+    assert decision.outcome == "SELECTED"
+    assert decision.selected_binding is not None
+    assert decision.selected_binding.binding_id == "reviewer-agy-hydrogen"
+    assert decision.selected_binding.model_id == "gemini-4-hydrogen-medium"
+    assert any(
+        rej.binding_id == "reviewer-agy-argon"
+        and rej.model_id == "argon"
+        and rej.code == "MODEL_RATE_LIMITED"
+        for rej in decision.rejected_bindings
+    )

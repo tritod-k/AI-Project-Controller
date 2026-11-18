@@ -726,6 +726,9 @@ def _build_agy_cli_runner(
             None,
             float(reviewer_config.llm_config.timeout_seconds),
         )
+        if returncode != 0:
+            raise LLMReviewError(_classify_cli_error(stderr_text))
+
         if stderr_text.strip():
             err_kind = _classify_cli_error(stderr_text)
             if err_kind in ("rate_limit", "auth"):
@@ -745,9 +748,6 @@ def _build_agy_cli_runner(
                 if isinstance(res, dict):
                     conv_id = str(res.get("conversation_id") or session_id)
                     response_text = str(res.get("response") or "").strip()
-
-        if returncode != 0 and not response_text:
-            raise LLMReviewError(_classify_cli_error(stderr_text))
 
         payload_text = _strip_code_fences(response_text)
         return LLMReviewRawResult(
@@ -1835,6 +1835,7 @@ def _report_to_observation(
         runtime_state=runtime_state,
         supported_models=report.supported_model_ids if is_qualified else (),
         unverified_models=report.unverified_or_unavailable_model_ids,
+        model_states=dict(report.model_eligibility),
         supported_modes=tuple(modes),
         capabilities=capabilities,
     )

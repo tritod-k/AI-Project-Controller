@@ -1,3 +1,18 @@
+## C.7 Tier-2 remediation cycle 1 — RCE01 verified, RCE02 next
+
+Status: IN_PROGRESS. Phase Gate: PENDING. Commander K.TRITOD explicitly unfreezes prior6255f00b5ab313833b97bbce5740274c0958274c for scoped remediation01. Review1 returned REVISE/HOLD_FOR_HUMAN_TRIAGE (three NEEDS_TRIAGE and C7-VALIDATION UNVERIFIED); all original receipts/frozen artifacts remain unchanged. No PR/merge/auto-merge/Milestone D.
+
+Current branch/worktree: gemini/aipc-2.0-milestone-c7 at H:/000ProjectCode/AI_Project_Controller. Last stable checkpoint: f98846e8639b3ab846afe49454a6f79f6b236c36, clean pinned H:/AIPC_Workspace/stable_c untouched. Prior attempt SHA6255f00 retained; this attempt commit SHA is recorded externally in progress.json.
+
+RCE01 tests-first worker e7038a53-4bbc-425d-a3a5-5c5b4cf5f05b reproduced actual nonzero AGY PASS acceptance and dropped model restrictions. Three extra classification fixtures initially had malformed manifest digests; implementation worker cf9c72ca-e36c-448a-a6ca-69420930dee5 corrected the fixtures and the narrow production defects. AGY now rejects all nonzero exits before parsing results; observation conversion copies model_eligibility into canonical private model_states. Fresh RCE01+B02 host23 passed50.34s; network-none immutable Candidate Docker23 passed4.25s; Ruff check/format2files and diff passed. Genuine Stable single-pass receipts, separate Candidate Docker bindings retained; no current inner corrections or fabricated qualification.
+
+Repair grant: runtime_c/audit/c7_commander_tier2_triage_remediation_grant_01.json+sha and derived rce02 grant; exact Commander request/plan in runtime_c/milestone_c7/remediation01. Counters ZERO reset: Tier1=19/32, Tier2=1/2; rce01=12/14, rce02=3/8, rce03=1/6, bootstrap3/6. Historical worker invocations now19 (central15 plus historical4); historical inner correction1 retained. Canonical queue schema max_attempts10 remains distinct from RCE01 root allowance14; current attempt9 is locally verified, not independently approved. Existing task histories preserved, DEFERRED-to-repair transition was explicit Commander-authorized typed snapshot reconciliation.
+
+Remaining/required fixes: mandatory external trust for C7+ queue/planner/worker while preserving only pre-C7 legacy compatibility and D denial; scaffolding unresolved file/ancestor alias checks with preserved external bytes; directly inspectable complete receipt/schema evidence within131072-byte review content budget. Then full nontrusted regressions separately from isolated C03, static/schema/wheel, four prefreeze docs, freeze2/push/exactSHA CI2, exactly one fresh read-only ephemeral RCE01 CLI Review2. Only PASS with zero RELEASE_BLOCKER and zero NEEDS_TRIAGE permits PR master. No next milestone authorized.
+
+Recovery: use canonical queue/ledger and existing worker receipts, do not duplicate completed work or reset counters. Native automation ACTIVE09:06:06 Bangkok; stop<=12% remaining quota. Next action RCE02 tests-first qualified Stable Hydrogen worker, then host/Docker verification. Timestamp: 2026-11-19 Asia/Bangkok; precise run times retained externally.
+
+---
 ## C.7 final local verification checkpoint (authoritative; supersedes older pending items below)
 
 Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: Milestone C.7 RCE01-RCE03; attempt history and counters remain in the canonical queue/ledger. All three implementations are committed and locally verified. Freeze/push, exact-SHA CI, exactly one independent CLI review and PR remain pending. No merge, auto-merge or Milestone D is authorized.
