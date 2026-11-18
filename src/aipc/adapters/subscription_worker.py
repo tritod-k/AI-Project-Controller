@@ -37,8 +37,10 @@ from aipc.adapters.gemini.antigravity_transport import (
     DEFAULT_CISL_VERIFIER_IMAGE,
     DENY_RULES,
     ContainerSnapshotVerificationReceipt,
+    check_build_config_mutations,
     find_agy_executable,
     run_cisl_container_snapshot_verifier,
+    snapshot_build_and_hook_configs,
 )
 from aipc.adapters.gemini.events import redact
 from aipc.adapters.operational_integration import classify_subscription_operational_error
@@ -1442,6 +1444,8 @@ class AntigravitySubscriptionWorkerAutomation:
         pass_idx: int,
         inv_res: WorkerInvocationResponse,
         files_changed: list[FileChange],
+        reservation_id: str | None = None,
+        dispatch_claim_id: str | None = None,
     ) -> None:
         ev_task_dir = Path(self._config.evidence_output_dir).resolve() / task_id
         ev_task_dir.mkdir(parents=True, exist_ok=True)
@@ -1464,6 +1468,8 @@ class AntigravitySubscriptionWorkerAutomation:
                 saved_files[rel_posix] = None
         payload = {
             "pass_index": pass_idx,
+            "reservation_id": reservation_id,
+            "dispatch_claim_id": dispatch_claim_id,
             "invocation_response": inv_res.model_dump(mode="json"),
             "saved_files": saved_files,
         }
@@ -1475,12 +1481,22 @@ class AntigravitySubscriptionWorkerAutomation:
         worktree: Path,
         task_id: str,
         pass_idx: int,
+        expected_reservation_id: str | None = None,
+        expected_claim_id: str | None = None,
     ) -> WorkerInvocationResponse | None:
         ev_task_dir = Path(self._config.evidence_output_dir).resolve() / task_id
         ckpt_file = ev_task_dir / f"cisl_pass_{pass_idx:02d}_checkpoint.json"
         if not ckpt_file.is_file():
             return None
         payload = json.loads(ckpt_file.read_text(encoding="utf-8"))
+        if expected_reservation_id is not None:
+            ckpt_res_id = payload.get("reservation_id")
+            if ckpt_res_id is not None and ckpt_res_id != expected_reservation_id:
+                return None
+        if expected_claim_id is not None:
+            ckpt_claim_id = payload.get("dispatch_claim_id")
+            if ckpt_claim_id is not None and ckpt_claim_id != expected_claim_id:
+                return None
         inv_res = WorkerInvocationResponse.model_validate(payload["invocation_response"])
         resolved_wt = worktree.resolve()
         for rel_posix, b64_data in payload.get("saved_files", {}).items():
@@ -1611,6 +1627,7 @@ class AntigravitySubscriptionWorkerAutomation:
 
         pre_paths = {fc.path for fc in pre_changes}
         pre_snap = snapshot_candidate_workspace(worktree)
+        pre_config_digests = snapshot_build_and_hook_configs(worktree)
         pre_file_bytes: dict[str, bytes | None] = {}
         for p in pre_paths:
             f_path = (worktree / PurePosixPath(p)).resolve()
@@ -1647,7 +1664,12 @@ class AntigravitySubscriptionWorkerAutomation:
                     explicit_root_task=self._config.explicit_root_task,
                     target_paths=self._config.in_scope_paths or None,
                 )
-                if not decision.allowed:
+                if not decision.allowed or decision.idempotent_replay:
+                    err_code = (
+                        "AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED"
+                        if decision.idempotent_replay
+                        else "HALT_ON_RETRY_EXHAUSTION"
+                    )
                     return self._build_outcome(
                         task=task,
                         provider_label=provider_label,
@@ -1668,23 +1690,36 @@ class AntigravitySubscriptionWorkerAutomation:
                         noop_detected=False,
                         forbidden_paths=[],
                         errors=[decision.reason],
-                        error_code="HALT_ON_RETRY_EXHAUSTION",
+                        error_code=err_code,
                         worker_invocations_count=0,
-                        inner_halt_reason="HALT_ON_RETRY_EXHAUSTION",
+                        inner_halt_reason=err_code,
                     )
                 if decision.reservation is not None:
                     pass0_res_id = decision.reservation.reservation_id
                     inner_reservation_ids.append(pass0_res_id)
 
-            inv_res = await self._invoke_worker_with_guards(
-                task=task,
-                worktree=worktree,
-                sanitized_env=sanitized_env,
-                resolved_model=resolved_model,
-                pre_changes=pre_changes,
-                pre_snap=pre_snap,
-                base_sha=base_sha,
-            )
+            try:
+                inv_res = await self._invoke_worker_with_guards(
+                    task=task,
+                    worktree=worktree,
+                    sanitized_env=sanitized_env,
+                    resolved_model=resolved_model,
+                    pre_changes=pre_changes,
+                    pre_snap=pre_snap,
+                    base_sha=base_sha,
+                )
+            except Exception:
+                if ledger_pair is not None and pass0_res_id is not None:
+                    ledger, loaded_policy, trust_ctx = ledger_pair
+                    ledger.mark_worker_invocation_interrupted(
+                        reservation_id=pass0_res_id,
+                        attempt_id=f"att-{task.attempt:02d}-pass-00",
+                        worker_id=self._config.agent_name,
+                        provider=provider_label,
+                        loaded_policy=loaded_policy,
+                        trust_context=trust_ctx,
+                    )
+                raise
             if inv_res is None:
                 self._revert_unauthorized_changes(
                     worktree,
@@ -1884,7 +1919,106 @@ class AntigravitySubscriptionWorkerAutomation:
                         inner_reservation_ids=tuple(inner_reservation_ids),
                     )
 
-                if not decision.allowed:
+                if (
+                    decision.idempotent_replay
+                    and decision.reservation is not None
+                    and decision.reservation.status == "RESERVED"
+                ):
+                    inner_reservation_ids.append(decision.reservation.reservation_id)
+                    restored_inv = self._restore_cisl_pass_checkpoint(
+                        worktree=worktree,
+                        task_id=task.task_id,
+                        pass_idx=pass_idx,
+                        expected_reservation_id=decision.reservation.reservation_id,
+                        expected_claim_id=decision.reservation.dispatch_claim_id,
+                    )
+                    if restored_inv is not None:
+                        ledger.consume_worker_invocation(
+                            reservation_id=decision.reservation.reservation_id,
+                            dispatch_claim_id=decision.reservation.dispatch_claim_id,
+                            attempt_id=f"att-{task.attempt:02d}-pass-{pass_idx:02d}",
+                            worker_id=self._config.agent_name,
+                            provider=provider_label,
+                            loaded_policy=loaded_policy,
+                            trust_context=trust_ctx,
+                        )
+                        inv_res = restored_inv
+                        worker_invocations_count += 1
+                        if pass_idx > 0:
+                            inner_passes_attempted += 1
+                    else:
+                        return self._build_outcome(
+                            task=task,
+                            provider_label=provider_label,
+                            status=AgentStatus.FAILED,
+                            summary=decision.reason,
+                            started_at=started_at,
+                            completed_at=datetime.now(UTC),
+                            prompt_sha256=prompt_sha256,
+                            prompt_excerpt=prompt_excerpt,
+                            model_used=inv_res.model_used if inv_res else resolved_model,
+                            session_id=inv_res.session_id if inv_res else f"halted-{task.task_id}",
+                            base_sha=base_sha,
+                            candidate_sha=base_sha,
+                            files_changed=files_changed,
+                            diff_text=diff_text,
+                            command_receipts=[],
+                            tests_summary=None,
+                            noop_detected=False,
+                            forbidden_paths=[],
+                            errors=[decision.reason],
+                            error_code="AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED",
+                            inner_passes_attempted=inner_passes_attempted,
+                            worker_invocations_count=worker_invocations_count,
+                            inner_verifier_receipts=tuple(inner_verifier_receipts),
+                            inner_halt_reason="AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED",
+                            inner_reservation_ids=tuple(inner_reservation_ids),
+                        )
+                elif (
+                    decision.idempotent_replay
+                    and decision.reservation is not None
+                    and decision.reservation.status == "INTERRUPTED"
+                ):
+                    inner_reservation_ids.append(decision.reservation.reservation_id)
+                    worker_invocations_count += 1
+                    if pass_idx > 0:
+                        inner_passes_attempted += 1
+                    if pass_idx >= self._config.max_inner_correction_passes:
+                        err_msg = (
+                            f"HALT_ON_RETRY_EXHAUSTION: pass {pass_idx} was INTERRUPTED and "
+                            "max inner correction passes reached."
+                        )
+                        return self._build_outcome(
+                            task=task,
+                            provider_label=provider_label,
+                            status=AgentStatus.FAILED,
+                            summary=err_msg,
+                            started_at=started_at,
+                            completed_at=datetime.now(UTC),
+                            prompt_sha256=prompt_sha256,
+                            prompt_excerpt=prompt_excerpt,
+                            model_used=inv_res.model_used if inv_res else resolved_model,
+                            session_id=(
+                                inv_res.session_id if inv_res else f"halted-{task.task_id}"
+                            ),
+                            base_sha=base_sha,
+                            candidate_sha=base_sha,
+                            files_changed=files_changed,
+                            diff_text=diff_text,
+                            command_receipts=[],
+                            tests_summary=None,
+                            noop_detected=False,
+                            forbidden_paths=[],
+                            errors=[err_msg],
+                            error_code="HALT_ON_RETRY_EXHAUSTION",
+                            inner_passes_attempted=inner_passes_attempted,
+                            worker_invocations_count=worker_invocations_count,
+                            inner_verifier_receipts=tuple(inner_verifier_receipts),
+                            inner_halt_reason="HALT_ON_RETRY_EXHAUSTION",
+                            inner_reservation_ids=tuple(inner_reservation_ids),
+                        )
+                    continue
+                elif not decision.allowed:
                     return self._build_outcome(
                         task=task,
                         provider_label=provider_label,
@@ -1912,98 +2046,140 @@ class AntigravitySubscriptionWorkerAutomation:
                         inner_halt_reason="HALT_ON_RETRY_EXHAUSTION",
                         inner_reservation_ids=tuple(inner_reservation_ids),
                     )
-
-                if decision.reservation is not None:
-                    inner_reservation_ids.append(decision.reservation.reservation_id)
-
-                restored_inv: WorkerInvocationResponse | None = None
-                if (
-                    decision.idempotent_replay
-                    and decision.reservation is not None
-                    and decision.reservation.status == "CONSUMED"
-                ):
-                    restored_inv = self._restore_cisl_pass_checkpoint(
-                        worktree=worktree,
-                        task_id=task.task_id,
-                        pass_idx=pass_idx,
-                    )
-
-                if restored_inv is not None:
-                    inv_res = restored_inv
-                    worker_invocations_count += 1
-                    if pass_idx > 0:
-                        inner_passes_attempted += 1
                 else:
-                    inv_res = await self._invoke_worker_with_guards(
-                        task=current_task,
-                        worktree=worktree,
-                        sanitized_env=sanitized_env,
-                        resolved_model=resolved_model,
-                        pre_changes=pre_changes,
-                        pre_snap=pre_snap,
-                        base_sha=base_sha,
-                    )
-                    if inv_res is None:
-                        self._revert_unauthorized_changes(
+                    assert decision.reservation is not None
+                    inner_reservation_ids.append(decision.reservation.reservation_id)
+                    if decision.idempotent_replay and decision.reservation.status == "CONSUMED":
+                        restored_inv = self._restore_cisl_pass_checkpoint(
+                            worktree=worktree,
+                            task_id=task.task_id,
+                            pass_idx=pass_idx,
+                            expected_reservation_id=decision.reservation.reservation_id,
+                            expected_claim_id=decision.reservation.dispatch_claim_id,
+                        )
+                        if restored_inv is None:
+                            err_msg = (
+                                "AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED: missing checkpoint for "
+                                f"CONSUMED reservation {decision.reservation.reservation_id}."
+                            )
+                            return self._build_outcome(
+                                task=task,
+                                provider_label=provider_label,
+                                status=AgentStatus.FAILED,
+                                summary=err_msg,
+                                started_at=started_at,
+                                completed_at=datetime.now(UTC),
+                                prompt_sha256=prompt_sha256,
+                                prompt_excerpt=prompt_excerpt,
+                                model_used=inv_res.model_used if inv_res else resolved_model,
+                                session_id=(
+                                    inv_res.session_id if inv_res else f"halted-{task.task_id}"
+                                ),
+                                base_sha=base_sha,
+                                candidate_sha=base_sha,
+                                files_changed=files_changed,
+                                diff_text=diff_text,
+                                command_receipts=[],
+                                tests_summary=None,
+                                noop_detected=False,
+                                forbidden_paths=[],
+                                errors=[err_msg],
+                                error_code="AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED",
+                                inner_passes_attempted=inner_passes_attempted,
+                                worker_invocations_count=worker_invocations_count,
+                                inner_verifier_receipts=tuple(inner_verifier_receipts),
+                                inner_halt_reason="AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED",
+                                inner_reservation_ids=tuple(inner_reservation_ids),
+                            )
+                        inv_res = restored_inv
+                        worker_invocations_count += 1
+                        if pass_idx > 0:
+                            inner_passes_attempted += 1
+                    else:
+                        try:
+                            inv_res = await self._invoke_worker_with_guards(
+                                task=current_task,
+                                worktree=worktree,
+                                sanitized_env=sanitized_env,
+                                resolved_model=resolved_model,
+                                pre_changes=pre_changes,
+                                pre_snap=pre_snap,
+                                base_sha=base_sha,
+                            )
+                        except Exception:
+                            ledger.mark_worker_invocation_interrupted(
+                                reservation_id=decision.reservation.reservation_id,
+                                dispatch_claim_id=decision.reservation.dispatch_claim_id,
+                                attempt_id=f"att-{task.attempt:02d}-pass-{pass_idx:02d}",
+                                worker_id=self._config.agent_name,
+                                provider=provider_label,
+                                loaded_policy=loaded_policy,
+                                trust_context=trust_ctx,
+                            )
+                            raise
+                        if inv_res is None:
+                            self._revert_unauthorized_changes(
+                                worktree,
+                                sanitized_env,
+                                pre_existing_paths=pre_paths,
+                                pre_file_bytes=pre_file_bytes,
+                                base_sha=base_sha,
+                                pre_snap=pre_snap,
+                            )
+                            return self._build_outcome(
+                                task=task,
+                                provider_label=provider_label,
+                                status=AgentStatus.CANCELLED,
+                                summary="Subscription worker execution cancelled in flight.",
+                                started_at=started_at,
+                                completed_at=datetime.now(UTC),
+                                prompt_sha256=prompt_sha256,
+                                prompt_excerpt=prompt_excerpt,
+                                model_used=resolved_model,
+                                session_id=f"cancelled-{task.task_id}",
+                                base_sha=base_sha,
+                                candidate_sha=base_sha,
+                                files_changed=[],
+                                diff_text="",
+                                command_receipts=[],
+                                tests_summary=None,
+                                noop_detected=False,
+                                forbidden_paths=[],
+                                errors=["CANCELLED"],
+                                error_code="CANCELLED",
+                                inner_passes_attempted=inner_passes_attempted,
+                                worker_invocations_count=worker_invocations_count,
+                                inner_verifier_receipts=tuple(inner_verifier_receipts),
+                                inner_halt_reason="CANCELLED",
+                                inner_reservation_ids=tuple(inner_reservation_ids),
+                            )
+                        pass_files, _ = self._collect_git_changes_and_diff(
                             worktree,
                             sanitized_env,
-                            pre_existing_paths=pre_paths,
-                            pre_file_bytes=pre_file_bytes,
                             base_sha=base_sha,
                             pre_snap=pre_snap,
                         )
-                        return self._build_outcome(
-                            task=task,
-                            provider_label=provider_label,
-                            status=AgentStatus.CANCELLED,
-                            summary="Subscription worker execution cancelled in flight.",
-                            started_at=started_at,
-                            completed_at=datetime.now(UTC),
-                            prompt_sha256=prompt_sha256,
-                            prompt_excerpt=prompt_excerpt,
-                            model_used=resolved_model,
-                            session_id=f"cancelled-{task.task_id}",
-                            base_sha=base_sha,
-                            candidate_sha=base_sha,
-                            files_changed=[],
-                            diff_text="",
-                            command_receipts=[],
-                            tests_summary=None,
-                            noop_detected=False,
-                            forbidden_paths=[],
-                            errors=["CANCELLED"],
-                            error_code="CANCELLED",
-                            inner_passes_attempted=inner_passes_attempted,
-                            worker_invocations_count=worker_invocations_count,
-                            inner_verifier_receipts=tuple(inner_verifier_receipts),
-                            inner_halt_reason="CANCELLED",
-                            inner_reservation_ids=tuple(inner_reservation_ids),
+                        self._save_cisl_pass_checkpoint(
+                            worktree=worktree,
+                            task_id=task.task_id,
+                            pass_idx=pass_idx,
+                            inv_res=inv_res,
+                            files_changed=pass_files,
+                            reservation_id=decision.reservation.reservation_id,
+                            dispatch_claim_id=decision.reservation.dispatch_claim_id,
                         )
-                    assert decision.reservation is not None
-                    ledger.consume_worker_invocation(
-                        reservation_id=decision.reservation.reservation_id,
-                        attempt_id=f"att-{task.attempt:02d}-pass-{pass_idx:02d}",
-                        worker_id=self._config.agent_name,
-                        provider=provider_label,
-                        loaded_policy=loaded_policy,
-                        trust_context=trust_ctx,
-                    )
-                    worker_invocations_count += 1
-                    if pass_idx > 0:
-                        inner_passes_attempted += 1
-                    pass_files, _ = self._collect_git_changes_and_diff(
-                        worktree,
-                        sanitized_env,
-                        base_sha=base_sha,
-                        pre_snap=pre_snap,
-                    )
-                    self._save_cisl_pass_checkpoint(
-                        worktree=worktree,
-                        task_id=task.task_id,
-                        pass_idx=pass_idx,
-                        inv_res=inv_res,
-                        files_changed=pass_files,
-                    )
+                        ledger.consume_worker_invocation(
+                            reservation_id=decision.reservation.reservation_id,
+                            dispatch_claim_id=decision.reservation.dispatch_claim_id,
+                            attempt_id=f"att-{task.attempt:02d}-pass-{pass_idx:02d}",
+                            worker_id=self._config.agent_name,
+                            provider=provider_label,
+                            loaded_policy=loaded_policy,
+                            trust_context=trust_ctx,
+                        )
+                        worker_invocations_count += 1
+                        if pass_idx > 0:
+                            inner_passes_attempted += 1
 
                 files_changed, diff_text = self._collect_git_changes_and_diff(
                     worktree,
@@ -2059,6 +2235,57 @@ class AntigravitySubscriptionWorkerAutomation:
                         worker_invocations_count=worker_invocations_count,
                         inner_verifier_receipts=tuple(inner_verifier_receipts),
                         inner_halt_reason="SCOPE_VIOLATION_BLOCKED",
+                        inner_reservation_ids=tuple(inner_reservation_ids),
+                        forensic_violation_evidence_path=forensic_path,
+                    )
+
+                config_mutations = check_build_config_mutations(worktree, pre_config_digests)
+                if config_mutations:
+                    forensic_path = self._write_forensic_violation_evidence(
+                        worktree=worktree,
+                        task_id=task.task_id,
+                        pass_idx=pass_idx,
+                        forbidden_violations=list(config_mutations),
+                        files_changed=files_changed,
+                        diff_text=diff_text,
+                    )
+                    self._revert_unauthorized_changes(
+                        worktree,
+                        sanitized_env,
+                        pre_existing_paths=pre_paths,
+                        pre_file_bytes=pre_file_bytes,
+                        base_sha=base_sha,
+                        pre_snap=pre_snap,
+                    )
+                    err_msg = (
+                        "CONFIG_GUARD_VIOLATION: worker modified protected build/hook configs: "
+                        + ", ".join(config_mutations)
+                    )
+                    return self._build_outcome(
+                        task=task,
+                        provider_label=provider_label,
+                        status=AgentStatus.FAILED,
+                        summary=err_msg,
+                        started_at=started_at,
+                        completed_at=datetime.now(UTC),
+                        prompt_sha256=prompt_sha256,
+                        prompt_excerpt=prompt_excerpt,
+                        model_used=inv_res.model_used,
+                        session_id=inv_res.session_id,
+                        base_sha=base_sha,
+                        candidate_sha=base_sha,
+                        files_changed=files_changed,
+                        diff_text="",
+                        command_receipts=[],
+                        tests_summary=None,
+                        noop_detected=False,
+                        forbidden_paths=list(config_mutations),
+                        errors=[err_msg],
+                        error_code="CONFIG_GUARD_VIOLATION",
+                        inner_passes_attempted=inner_passes_attempted,
+                        worker_invocations_count=worker_invocations_count,
+                        inner_verifier_receipts=tuple(inner_verifier_receipts),
+                        inner_halt_reason="CONFIG_GUARD_VIOLATION",
                         inner_reservation_ids=tuple(inner_reservation_ids),
                         forensic_violation_evidence_path=forensic_path,
                     )
@@ -2144,8 +2371,58 @@ class AntigravitySubscriptionWorkerAutomation:
                     out_of_scope_paths=self._config.out_of_scope_paths,
                     forbidden_paths=self._config.forbidden_paths,
                     changed_paths=[fc.path for fc in files_changed],
+                    pre_config_digests=pre_config_digests,
                 )
                 inner_verifier_receipts.append(cisl_receipt.model_dump(mode="json"))
+
+                if cisl_receipt.error_code == "CONFIG_GUARD_VIOLATION":
+                    forensic_path = self._write_forensic_violation_evidence(
+                        worktree=worktree,
+                        task_id=task.task_id,
+                        pass_idx=pass_idx,
+                        forbidden_violations=[
+                            cisl_receipt.log_text or "CONFIG_GUARD_VIOLATION",
+                        ],
+                        files_changed=files_changed,
+                        diff_text=diff_text,
+                    )
+                    self._revert_unauthorized_changes(
+                        worktree,
+                        sanitized_env,
+                        pre_existing_paths=pre_paths,
+                        pre_file_bytes=pre_file_bytes,
+                        base_sha=base_sha,
+                        pre_snap=pre_snap,
+                    )
+                    err_msg = f"CONFIG_GUARD_VIOLATION: {cisl_receipt.log_text}".strip()
+                    return self._build_outcome(
+                        task=task,
+                        provider_label=provider_label,
+                        status=AgentStatus.FAILED,
+                        summary=err_msg,
+                        started_at=started_at,
+                        completed_at=datetime.now(UTC),
+                        prompt_sha256=prompt_sha256,
+                        prompt_excerpt=prompt_excerpt,
+                        model_used=inv_res.model_used,
+                        session_id=inv_res.session_id,
+                        base_sha=base_sha,
+                        candidate_sha=base_sha,
+                        files_changed=files_changed,
+                        diff_text="",
+                        command_receipts=[],
+                        tests_summary=cisl_receipt.tests_summary,
+                        noop_detected=False,
+                        forbidden_paths=[],
+                        errors=[err_msg],
+                        error_code="CONFIG_GUARD_VIOLATION",
+                        inner_passes_attempted=inner_passes_attempted,
+                        worker_invocations_count=worker_invocations_count,
+                        inner_verifier_receipts=tuple(inner_verifier_receipts),
+                        inner_halt_reason="CONFIG_GUARD_VIOLATION",
+                        inner_reservation_ids=tuple(inner_reservation_ids),
+                        forensic_violation_evidence_path=forensic_path,
+                    )
 
                 if cisl_receipt.error_code == CONTAINER_VERIFIER_UNAVAILABLE:
                     err_msg = f"{CONTAINER_VERIFIER_UNAVAILABLE}: {cisl_receipt.log_text}".strip()

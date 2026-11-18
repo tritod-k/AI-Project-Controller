@@ -38,6 +38,7 @@ from aipc.controller import (
 from aipc.controller.repair_budget import (
     DurableRepairBudgetLedger,
     RepairBudgetError,
+    _compute_ledger_state_digest,
     _normalize_milestone,
     load_policy_trust_context,
 )
@@ -671,10 +672,14 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
 
     assert len(invoked_prompts) == 2
     mid_state = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
-    # Pass 0 was consumed; pass 1 was reserved before crash
+    # Pass 0 was consumed; pass 1 was marked INTERRUPTED and retains its charge
     assert mid_state.registered_roots["task-cisl02"].worker_invocations_consumed == 2
+    assert mid_state.registered_roots["task-cisl02"].inner_corrections_by_attempt == {"1": 1}
+    pass1_res_id = mid_state.event_to_reservation["cisl-inv-task-cisl02-att-01-pass-01"]
+    assert mid_state.reservations[pass1_res_id].status == "INTERRUPTED"
 
-    # Resume with a new automation instance; pass 0 must replay from checkpoint without invoking
+    # Resume with a new automation instance; pass 0 replays from checkpoint,
+    # pass 1 (INTERRUPTED) is skipped without re-invoking, and pass 2 executes.
     resumed_calls = 0
 
     async def resumed_invoker(
@@ -686,7 +691,7 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
         nonlocal resumed_calls
         resumed_calls += 1
         (repo / "src" / "mod.py").write_text("x = 2  # fixed\n", encoding="utf-8")
-        return WorkerInvocationResponse(session_id="pass1-resumed", model_used=model)
+        return WorkerInvocationResponse(session_id="pass2-resumed", model_used=model)
 
     auto_2 = AntigravitySubscriptionWorkerAutomation(
         cfg,
@@ -698,6 +703,250 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
     outcome = asyncio.run(auto_2.execute_worker_task(task))
     assert outcome.agent_result.status == AgentStatus.COMPLETED
     assert resumed_calls == 1
+    assert len(invoked_prompts) + resumed_calls == 3
     assert outcome.receipt.inner_halt_reason == "INNER_VERIFICATION_PASSED"
     final_state = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
-    assert final_state.registered_roots["task-cisl02"].worker_invocations_consumed == 2
+    assert final_state.registered_roots["task-cisl02"].worker_invocations_consumed == 3
+    assert final_state.registered_roots["task-cisl02"].inner_corrections_by_attempt == {"1": 2}
+
+    # Second restart after pass 2 is CONSUMED: replays pass 0 & pass 2 with 0 new calls
+    third_calls = 0
+
+    async def never_called_invoker(
+        _task: TaskRequest,
+        _cfg: SubscriptionWorkerConfig,
+        _env: Any,
+        model: str,
+    ) -> WorkerInvocationResponse:
+        nonlocal third_calls
+        third_calls += 1
+        return WorkerInvocationResponse(session_id="unexpected", model_used=model)
+
+    auto_3 = AntigravitySubscriptionWorkerAutomation(
+        cfg,
+        qualification_report=_qualified_report(),
+        worker_invoker=never_called_invoker,
+        command_runner=lambda cmd, _wt, _env: WorkerCommandReceipt(command=cmd, exit_code=0),
+        cisl_verifier=verifier,
+    )
+    outcome_3 = asyncio.run(auto_3.execute_worker_task(task))
+    assert outcome_3.agent_result.status == AgentStatus.COMPLETED
+    assert third_calls == 0
+    assert (
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+        .registered_roots["task-cisl02"]
+        .worker_invocations_consumed
+        == 3
+    )
+
+    # Missing checkpoint for CONSUMED pass 0 must fail closed without invoking worker
+    ckpt_0 = Path(cfg.evidence_output_dir) / "task-cisl02" / "cisl_pass_00_checkpoint.json"
+    ckpt_0.unlink()
+    outcome_missing_ckpt = asyncio.run(auto_3.execute_worker_task(task))
+    assert outcome_missing_ckpt.agent_result.status == AgentStatus.FAILED
+    assert (
+        outcome_missing_ckpt.agent_result.metadata["error_code"]
+        == "AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED"
+    )
+    assert third_calls == 0
+
+    # In-flight RESERVED reservation without checkpoint must fail closed without invoking worker
+    trust_b, ledger_path_b, _ = _create_trust_env(tmp_path / "reserved_case")
+    policy_b = load_policy_trust_context(trust_b)
+    ledger_b = DurableRepairBudgetLedger(ledger_path_b, clock=lambda: _FIXED_NOW)
+    ledger_b.initialize(
+        loaded_policy=policy_b,
+        registered_roots=["task-cisl02"],
+        trust_context=trust_b,
+    )
+    ledger_b.reserve_worker_invocation(
+        loaded_policy=policy_b,
+        trust_context=trust_b,
+        event_id="cisl-inv-task-cisl02-att-01-pass-00",
+        task_id="task-cisl02",
+        outer_attempt=1,
+        inner_pass_index=0,
+        candidate_sha=_C6_BASELINE_SHA,
+    )
+    cfg_b = cfg.model_copy(
+        update={
+            "evidence_output_dir": str(tmp_path / "reserved_case" / "ev"),
+            "budget_ledger_path": str(ledger_path_b),
+            "policy_trust_context": trust_b.model_dump(mode="json"),
+        }
+    )
+    auto_reserved = AntigravitySubscriptionWorkerAutomation(
+        cfg_b,
+        qualification_report=_qualified_report(),
+        worker_invoker=never_called_invoker,
+        cisl_verifier=verifier,
+    )
+    outcome_reserved = asyncio.run(auto_reserved.execute_worker_task(task))
+    assert outcome_reserved.agent_result.status == AgentStatus.FAILED
+    assert (
+        outcome_reserved.agent_result.metadata["error_code"]
+        == "AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED"
+    )
+    assert third_calls == 0
+
+
+def test_legacy_c5_signed_ledger_backward_compatible_load_and_migration(tmp_path: Path) -> None:
+    trust_ctx, ledger_path, _ = _create_trust_env(tmp_path)
+    policy = load_policy_trust_context(trust_ctx)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_c5: dict[str, Any] = {
+        "schema_version": "1.0",
+        "project_id": "aipc",
+        "milestone_id": "milestone-c6",
+        "policy_id": policy.policy.policy_id,
+        "policy_sha256": policy.policy_sha256,
+        "approval_id": policy.approval_id,
+        "authorized_by": policy.authorized_by,
+        "counter_reset_allowed": False,
+        "base_per_root_limit": 2,
+        "base_milestone_limit": 8,
+        "milestone_limit": 8,
+        "milestone_consumed": 1,
+        "imported_milestone_consumed": 0,
+        "registered_roots": {
+            "task-c5-legacy": {
+                "root_task": "task-c5-legacy",
+                "consumed": 1,
+                "base_limit": 2,
+                "base_consumed": 1,
+                "extension_allowance": 0,
+                "effective_limit": 2,
+                "extension_approval_ids": [],
+                "imported_consumed": 0,
+            }
+        },
+        "child_to_root": {},
+        "reservations": {
+            "res-task-c5-legacy-att-01-abc": {
+                "reservation_id": "res-task-c5-legacy-att-01-abc",
+                "event_id": "ev-c5-1",
+                "task_id": "task-c5-legacy",
+                "root_task": "task-c5-legacy",
+                "milestone_id": "milestone-c6",
+                "attempt": 1,
+                "candidate_sha": _C6_BASELINE_SHA,
+                "review_id": "rev-c5-1",
+                "route": "REVIEW_COORDINATOR",
+                "status": "CONSUMED",
+                "funding_source": "BASE",
+                "grant_approval_id": None,
+                "grant_sha256": None,
+                "target_paths": ["src/"],
+                "consumed_attempt_id": "att-01",
+                "consumed_worker_id": "worker-1",
+                "consumed_provider": "google",
+                "approval_id": policy.approval_id,
+                "policy_sha256": policy.policy_sha256,
+                "created_at": _FIXED_NOW.isoformat().replace("+00:00", "Z"),
+                "consumed_at": _FIXED_NOW.isoformat().replace("+00:00", "Z"),
+            }
+        },
+        "event_to_reservation": {"ev-c5-1": "res-task-c5-legacy-att-01-abc"},
+        "applied_grants": [],
+        "imported_receipts": [],
+        "updated_at": _FIXED_NOW.isoformat().replace("+00:00", "Z"),
+    }
+    raw_c5["state_digest"] = _compute_ledger_state_digest(raw_c5)
+    ledger_path.write_text(json.dumps(raw_c5, indent=2), encoding="utf-8")
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: _FIXED_NOW)
+    loaded = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    assert loaded.milestone_consumed == 1
+    assert loaded.registered_roots["task-c5-legacy"].consumed == 1
+    assert "res-task-c5-legacy-att-01-abc" in loaded.reservations
+
+    dec = ledger.reserve_worker_invocation(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-c6-after-c5",
+        task_id="task-c5-legacy",
+        outer_attempt=1,
+        inner_pass_index=0,
+        candidate_sha=_C6_BASELINE_SHA,
+    )
+    assert dec.allowed is True
+    assert dec.reservation is not None
+    ledger.consume_worker_invocation(
+        reservation_id=dec.reservation.reservation_id,
+        dispatch_claim_id=dec.reservation.dispatch_claim_id,
+        attempt_id="att-01-pass-00",
+        worker_id="worker-1",
+        provider="google",
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+    )
+    migrated = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    assert migrated.registered_roots["task-c5-legacy"].worker_invocations_consumed == 1
+    assert migrated.registered_roots["task-c5-legacy"].consumed == 1
+
+
+def test_cisl_execute_worker_task_enforces_build_config_guard(tmp_path: Path) -> None:
+    trust_ctx, ledger_path, _ = _create_trust_env(tmp_path)
+    policy = load_policy_trust_context(trust_ctx)
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: _FIXED_NOW)
+    ledger.initialize(
+        loaded_policy=policy,
+        registered_roots=["task-cisl02"],
+        trust_context=trust_ctx,
+    )
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    pyproject_file = repo / "pyproject.toml"
+    original_pyproject = '[project]\nname = "aipc-test"\n'
+    pyproject_file.write_text(original_pyproject, encoding="utf-8")
+    subprocess.run(["git", "add", "pyproject.toml"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add pyproject"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+
+    async def config_mutating_invoker(
+        _task: TaskRequest,
+        _cfg: SubscriptionWorkerConfig,
+        _env: Any,
+        model: str,
+    ) -> WorkerInvocationResponse:
+        pyproject_file.write_text('[project]\nname = "hijacked"\n', encoding="utf-8")
+        return WorkerInvocationResponse(session_id="cfg-mutate", model_used=model)
+
+    cfg = SubscriptionWorkerConfig(
+        candidate_worktree=str(repo),
+        evidence_output_dir=str(tmp_path / "ev"),
+        in_scope_paths=("src/", "pyproject.toml"),
+        enable_cisl_inner_loop=True,
+        budget_ledger_path=str(ledger_path),
+        policy_trust_context=trust_ctx.model_dump(mode="json"),
+    )
+    auto = AntigravitySubscriptionWorkerAutomation(
+        cfg,
+        qualification_report=_qualified_report(),
+        worker_invoker=config_mutating_invoker,
+        cisl_verifier=lambda *_args, **_kwargs: _pass_receipt(),
+    )
+    task = TaskRequest(
+        schema_version="1.0",
+        task_id="task-cisl02",
+        project_id="aipc",
+        phase_id="cisl02",
+        attempt=1,
+        task_type="implementation",
+        prompt="Fix module",
+        workspace=str(repo),
+        allowed_tools=["filesystem"],
+        forbidden_actions=["network"],
+        timeout_seconds=60,
+    )
+    outcome = asyncio.run(auto.execute_worker_task(task))
+    assert outcome.agent_result.status == AgentStatus.FAILED
+    assert outcome.agent_result.metadata["error_code"] == "CONFIG_GUARD_VIOLATION"
+    assert outcome.receipt.inner_halt_reason == "CONFIG_GUARD_VIOLATION"
+    assert outcome.receipt.forensic_violation_evidence_path is not None
+    assert Path(outcome.receipt.forensic_violation_evidence_path).is_file()
+    assert pyproject_file.read_text(encoding="utf-8") == original_pyproject

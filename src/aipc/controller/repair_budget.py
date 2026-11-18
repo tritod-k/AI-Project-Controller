@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
+from uuid import uuid4
 
 from pydantic import (
     BeforeValidator,
@@ -239,7 +240,8 @@ class BudgetReservationRecord(CanonicalRecord):
     ]
     bucket: Literal["OUTER_REPAIR", "INNER_CORRECTION", "INITIAL_INVOCATION"] = "OUTER_REPAIR"
     inner_pass_index: NonNegativeInt = 0
-    status: Literal["RESERVED", "CONSUMED"] = "RESERVED"
+    dispatch_claim_id: str | None = None
+    status: Literal["RESERVED", "CONSUMED", "INTERRUPTED"] = "RESERVED"
     funding_source: Literal["BASE", "GRANT"] | None = None
     grant_approval_id: NonBlank | None = None
     grant_sha256: Sha256Hex | None = None
@@ -409,6 +411,26 @@ class RepairBudgetLedgerState(CanonicalRecord):
                 raise ValueError(
                     f"Legacy reservation '{res.reservation_id}' missing funding_source"
                 )
+            if res.status == "INTERRUPTED":
+                if res.bucket not in ("INITIAL_INVOCATION", "INNER_CORRECTION"):
+                    raise ValueError(
+                        f"INTERRUPTED reservation '{res.reservation_id}' must be a worker "
+                        "invocation"
+                    )
+                root_counter = self.registered_roots.get(res.root_task)
+                if root_counter is None or root_counter.worker_invocations_consumed < 1:
+                    raise ValueError(
+                        f"INTERRUPTED reservation '{res.reservation_id}' missing retained "
+                        "worker_invocations_consumed charge"
+                    )
+                if (
+                    res.bucket == "INNER_CORRECTION"
+                    and root_counter.inner_corrections_by_attempt.get(str(res.attempt), 0) < 1
+                ):
+                    raise ValueError(
+                        f"INTERRUPTED reservation '{res.reservation_id}' missing retained "
+                        "inner_corrections_by_attempt charge"
+                    )
         for child, root in self.child_to_root.items():
             if root not in self.registered_roots:
                 raise ValueError(f"child '{child}' maps to unregistered root '{root}'")
@@ -416,11 +438,31 @@ class RepairBudgetLedgerState(CanonicalRecord):
             res = self.reservations.get(res_id)
             if res is None or res.event_id != ev_id:
                 raise ValueError(f"event_to_reservation mismatch for '{ev_id}'")
-        expected_digest = _compute_state_digest(self)
-        if self.state_digest is not None and not hmac.compare_digest(
-            self.state_digest, expected_digest
-        ):
-            raise ValueError("repair budget ledger state_digest mismatch")
+        if self.state_digest is not None:
+            payload = self.model_dump(mode="json", exclude={"state_digest"})
+            expected_digest = _compute_ledger_state_digest(payload)
+            if not hmac.compare_digest(self.state_digest, expected_digest):
+                no_c6_invocations = (
+                    self.milestone_worker_invocations_consumed == 0
+                    and self.global_worker_invocations_consumed == 0
+                    and all(
+                        c.worker_invocations_consumed == 0 and not c.inner_corrections_by_attempt
+                        for c in self.registered_roots.values()
+                    )
+                    and all(
+                        r.bucket == "OUTER_REPAIR"
+                        and r.inner_pass_index == 0
+                        and r.dispatch_claim_id is None
+                        for r in self.reservations.values()
+                    )
+                )
+                legacy_expected = (
+                    _compute_legacy_c5_ledger_state_digest(payload) if no_c6_invocations else None
+                )
+                if legacy_expected is None or not hmac.compare_digest(
+                    self.state_digest, legacy_expected
+                ):
+                    raise ValueError("repair budget ledger state_digest mismatch")
         _assert_no_secrets_local(self.model_dump(mode="json"))
         return self
 
@@ -441,10 +483,62 @@ class BudgetReservationDecision(CanonicalRecord):
     reason: NonBlank
 
 
+def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
+
+
+def _compute_ledger_state_digest(payload: Mapping[str, Any]) -> str:
+    body = {k: v for k, v in payload.items() if k != "state_digest"}
+    return hashlib.sha256(_canonical_json_bytes(body)).hexdigest()
+
+
+def _compute_legacy_c5_ledger_state_digest(payload: Mapping[str, Any]) -> str:
+    c6_top_keys = {
+        "state_digest",
+        "ledger_id",
+        "max_inner_corrections_per_outer_attempt",
+        "milestone_worker_invocations_consumed",
+        "milestone_worker_invocations_limit",
+        "global_worker_invocations_consumed",
+        "global_worker_invocations_limit",
+    }
+    c6_root_keys = {
+        "max_inner_corrections_per_outer_attempt",
+        "inner_corrections_by_attempt",
+        "worker_invocations_consumed",
+        "worker_invocations_limit",
+    }
+    c6_res_keys = {"bucket", "inner_pass_index", "dispatch_claim_id"}
+
+    legacy: dict[str, Any] = {k: v for k, v in payload.items() if k not in c6_top_keys}
+    raw_roots = legacy.get("registered_roots")
+    if isinstance(raw_roots, Mapping):
+        legacy["registered_roots"] = {
+            rk: (
+                {k: v for k, v in rv.items() if k not in c6_root_keys}
+                if isinstance(rv, Mapping)
+                else rv
+            )
+            for rk, rv in raw_roots.items()
+        }
+    raw_reservations = legacy.get("reservations")
+    if isinstance(raw_reservations, Mapping):
+        legacy["reservations"] = {
+            res_k: (
+                {k: v for k, v in res_v.items() if k not in c6_res_keys}
+                if isinstance(res_v, Mapping)
+                else res_v
+            )
+            for res_k, res_v in raw_reservations.items()
+        }
+    return hashlib.sha256(_canonical_json_bytes(legacy)).hexdigest()
+
+
 def _compute_state_digest(state: RepairBudgetLedgerState) -> str:
     payload = state.model_dump(mode="json", exclude={"state_digest"})
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return _compute_ledger_state_digest(payload)
 
 
 def _with_digest(state: RepairBudgetLedgerState) -> RepairBudgetLedgerState:
@@ -843,9 +937,21 @@ class DurableRepairBudgetLedger:
         try:
             raw = load_json(self._path)
             _assert_no_secrets_local(raw)
-            if isinstance(raw, dict) and not raw.get("state_digest"):
-                raise RepairBudgetError("Repair budget ledger missing required state_digest")
-            state = RepairBudgetLedgerState.model_validate(raw)
+            if isinstance(raw, dict):
+                raw_digest = raw.get("state_digest")
+                if not raw_digest:
+                    raise RepairBudgetError("Repair budget ledger missing required state_digest")
+                if "ledger_id" not in raw:
+                    if not isinstance(raw_digest, str) or not hmac.compare_digest(
+                        raw_digest, _compute_ledger_state_digest(raw)
+                    ):
+                        raise RepairBudgetError("Repair budget ledger state_digest mismatch")
+                    state = RepairBudgetLedgerState.model_validate({**raw, "state_digest": None})
+                    state = _with_digest(state)
+                else:
+                    state = RepairBudgetLedgerState.model_validate(raw)
+            else:
+                state = RepairBudgetLedgerState.model_validate(raw)
         except RepairBudgetError:
             raise
         except Exception as exc:
@@ -1491,10 +1597,45 @@ class DurableRepairBudgetLedger:
                     raise RepairBudgetError(
                         f"Conflicting replay for worker invocation event_id '{event_id}' rejected"
                     )
+                if existing.status == "CONSUMED":
+                    return BudgetReservationDecision(
+                        allowed=True,
+                        idempotent_replay=True,
+                        action="RESERVE_REPAIR",
+                        root_task=root_task,
+                        task_id=task_id,
+                        reservation=existing,
+                        root_consumed=counter.consumed,
+                        root_limit=counter.effective_limit,
+                        milestone_consumed=state.milestone_consumed,
+                        milestone_limit=state.milestone_limit,
+                        reason=(
+                            "Idempotent replay of bound worker invocation reservation "
+                            f"'{existing.reservation_id}'."
+                        ),
+                    )
+                if existing.status == "INTERRUPTED":
+                    return BudgetReservationDecision(
+                        allowed=False,
+                        idempotent_replay=True,
+                        action="HALT_ON_RETRY_EXHAUSTION",
+                        root_task=root_task,
+                        task_id=task_id,
+                        reservation=existing,
+                        root_consumed=counter.consumed,
+                        root_limit=counter.effective_limit,
+                        milestone_consumed=state.milestone_consumed,
+                        milestone_limit=state.milestone_limit,
+                        reason=(
+                            "INTERRUPTED_INVOCATION_SPENT: reservation "
+                            f"'{existing.reservation_id}' was interrupted mid-flight and its "
+                            "charge is permanently spent."
+                        ),
+                    )
                 return BudgetReservationDecision(
-                    allowed=True,
+                    allowed=False,
                     idempotent_replay=True,
-                    action="RESERVE_REPAIR",
+                    action="HALT_ON_RETRY_EXHAUSTION",
                     root_task=root_task,
                     task_id=task_id,
                     reservation=existing,
@@ -1503,8 +1644,9 @@ class DurableRepairBudgetLedger:
                     milestone_consumed=state.milestone_consumed,
                     milestone_limit=state.milestone_limit,
                     reason=(
-                        "Idempotent replay of bound worker invocation reservation "
-                        f"'{existing.reservation_id}'."
+                        "AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED: reservation "
+                        f"{existing.reservation_id} is already RESERVED in-flight "
+                        "without completion receipt."
                     ),
                 )
 
@@ -1578,6 +1720,7 @@ class DurableRepairBudgetLedger:
                 route=route,
                 bucket=bucket,
                 inner_pass_index=inner_pass_index,
+                dispatch_claim_id=uuid4().hex,
                 status="RESERVED",
                 funding_source="BASE",
                 target_paths=norm_paths,
@@ -1642,10 +1785,63 @@ class DurableRepairBudgetLedger:
                 reason=f"Reserved {bucket} worker invocation '{res_id}' for root '{root_task}'.",
             )
 
+    def mark_worker_invocation_interrupted(
+        self,
+        *,
+        reservation_id: str,
+        dispatch_claim_id: str | None = None,
+        attempt_id: str,
+        worker_id: str,
+        provider: str,
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
+        trust_context: PolicyTrustContext | None = None,
+    ) -> BudgetReservationRecord:
+        """Mark an in-flight worker invocation reservation as INTERRUPTED, retaining its charge."""
+        with _acquire_ledger_lock(self._path):
+            state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
+            res = state.reservations.get(reservation_id)
+            if res is None:
+                raise RepairBudgetError(
+                    f"Unknown or missing worker invocation reservation '{reservation_id}'"
+                )
+            if (
+                dispatch_claim_id is not None
+                and res.dispatch_claim_id is not None
+                and dispatch_claim_id != res.dispatch_claim_id
+            ):
+                raise RepairBudgetError(
+                    "dispatch_claim_id mismatch for worker invocation interruption"
+                )
+            if res.status == "INTERRUPTED":
+                return res
+            if res.status == "CONSUMED":
+                raise RepairBudgetError(
+                    f"Worker invocation reservation '{reservation_id}' already CONSUMED; "
+                    "cannot mark INTERRUPTED"
+                )
+            now = self._clock()
+            interrupted = res.model_copy(
+                update={
+                    "status": "INTERRUPTED",
+                    "consumed_attempt_id": attempt_id,
+                    "consumed_worker_id": worker_id,
+                    "consumed_provider": provider,
+                    "consumed_at": now,
+                }
+            )
+            new_reservations = dict(state.reservations)
+            new_reservations[reservation_id] = interrupted
+            updated = _with_digest(
+                state.model_copy(update={"reservations": new_reservations, "updated_at": now})
+            )
+            write_json_atomic(self._path, updated.model_dump(mode="json"))
+            return interrupted
+
     def consume_worker_invocation(
         self,
         *,
         reservation_id: str,
+        dispatch_claim_id: str | None = None,
         attempt_id: str,
         worker_id: str,
         provider: str,
@@ -1659,6 +1855,19 @@ class DurableRepairBudgetLedger:
             if res is None:
                 raise RepairBudgetError(
                     f"Unknown or missing worker invocation reservation '{reservation_id}'"
+                )
+            if (
+                dispatch_claim_id is not None
+                and res.dispatch_claim_id is not None
+                and dispatch_claim_id != res.dispatch_claim_id
+            ):
+                raise RepairBudgetError(
+                    "dispatch_claim_id mismatch for worker invocation consumption"
+                )
+            if res.status == "INTERRUPTED":
+                raise RepairBudgetError(
+                    f"Worker invocation reservation '{reservation_id}' is INTERRUPTED and "
+                    "cannot be consumed"
                 )
             if res.status == "CONSUMED":
                 if res.consumed_attempt_id == attempt_id:

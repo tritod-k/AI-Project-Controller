@@ -549,6 +549,8 @@ def test_cisl03_04_mid_inner_loop_quota_exhaustion_and_restart_recovery_no_doubl
     mid_counter = mid_state.registered_roots["task-cisl03"]
     assert mid_counter.worker_invocations_consumed == 2
     assert mid_counter.inner_corrections_by_attempt == {"1": 1}
+    pass1_res_id = mid_state.event_to_reservation["cisl-inv-task-cisl03-att-01-pass-01"]
+    assert mid_state.reservations[pass1_res_id].status == "INTERRUPTED"
 
     resumed_calls = 0
 
@@ -561,7 +563,7 @@ def test_cisl03_04_mid_inner_loop_quota_exhaustion_and_restart_recovery_no_doubl
         nonlocal resumed_calls
         resumed_calls += 1
         (repo / "src" / "mod.py").write_text("x = 2  # fixed\n", encoding="utf-8")
-        return WorkerInvocationResponse(session_id="p1-resumed", model_used=model)
+        return WorkerInvocationResponse(session_id="p2-resumed", model_used=model)
 
     auto_2 = AntigravitySubscriptionWorkerAutomation(
         cfg,
@@ -574,10 +576,85 @@ def test_cisl03_04_mid_inner_loop_quota_exhaustion_and_restart_recovery_no_doubl
     assert outcome.agent_result.status == AgentStatus.COMPLETED
     assert outcome.receipt.inner_halt_reason == "INNER_VERIFICATION_PASSED"
     assert resumed_calls == 1
+    assert invocations + resumed_calls == 3
     final_state = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
     final_counter = final_state.registered_roots["task-cisl03"]
-    assert final_counter.worker_invocations_consumed == 2
-    assert final_counter.inner_corrections_by_attempt == {"1": 1}
+    assert final_counter.worker_invocations_consumed == 3
+    assert final_counter.inner_corrections_by_attempt == {"1": 2}
+
+    # Second restart after pass 2 is CONSUMED: replays pass 0 & pass 2 with 0 new calls
+    third_calls = 0
+
+    async def never_called_invoker(
+        _task: TaskRequest,
+        _cfg: SubscriptionWorkerConfig,
+        _env: Any,
+        model: str,
+    ) -> WorkerInvocationResponse:
+        nonlocal third_calls
+        third_calls += 1
+        return WorkerInvocationResponse(session_id="unexpected", model_used=model)
+
+    auto_3 = AntigravitySubscriptionWorkerAutomation(
+        cfg,
+        qualification_report=_qualified_report(),
+        worker_invoker=never_called_invoker,
+        command_runner=lambda cmd, _wt, _env: WorkerCommandReceipt(command=cmd, exit_code=0),
+        cisl_verifier=verifier,
+    )
+    outcome_3 = asyncio.run(auto_3.execute_worker_task(task))
+    assert outcome_3.agent_result.status == AgentStatus.COMPLETED
+    assert third_calls == 0
+    assert (
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+        .registered_roots["task-cisl03"]
+        .worker_invocations_consumed
+        == 3
+    )
+
+    # Missing checkpoint for CONSUMED pass 0 fails closed
+    ckpt_0 = Path(cfg.evidence_output_dir) / "task-cisl03" / "cisl_pass_00_checkpoint.json"
+    ckpt_0.unlink()
+    outcome_missing = asyncio.run(auto_3.execute_worker_task(task))
+    assert outcome_missing.agent_result.status == AgentStatus.FAILED
+    assert (
+        outcome_missing.agent_result.metadata["error_code"]
+        == "AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED"
+    )
+    assert third_calls == 0
+
+    # In-flight RESERVED reservation without checkpoint fails closed
+    trust_b, ledger_path_b, ledger_b = _init_ledger(tmp_path / "reserved_case")
+    policy_b = load_policy_trust_context(trust_b)
+    ledger_b.reserve_worker_invocation(
+        loaded_policy=policy_b,
+        trust_context=trust_b,
+        event_id="cisl-inv-task-cisl03-att-01-pass-00",
+        task_id="task-cisl03",
+        outer_attempt=1,
+        inner_pass_index=0,
+        candidate_sha=_C6_BASELINE_SHA,
+    )
+    cfg_b = cfg.model_copy(
+        update={
+            "evidence_output_dir": str(tmp_path / "reserved_case" / "ev"),
+            "budget_ledger_path": str(ledger_path_b),
+            "policy_trust_context": trust_b.model_dump(mode="json"),
+        }
+    )
+    auto_reserved = AntigravitySubscriptionWorkerAutomation(
+        cfg_b,
+        qualification_report=_qualified_report(),
+        worker_invoker=never_called_invoker,
+        cisl_verifier=verifier,
+    )
+    outcome_reserved = asyncio.run(auto_reserved.execute_worker_task(task))
+    assert outcome_reserved.agent_result.status == AgentStatus.FAILED
+    assert (
+        outcome_reserved.agent_result.metadata["error_code"]
+        == "AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED"
+    )
+    assert third_calls == 0
 
 
 def test_cisl03_05_inner_or_aggregate_c5_budget_exhaustion_halts_deterministically(
