@@ -574,10 +574,10 @@ class IndependentSubscriptionReviewerGate:
         binding = role_decision.selected_binding
         reviewer_family = _normalize_family(binding.provider_family)
         att_num = checked_ctx.task.attempt
-        fresh_token = uuid4().hex[:8]
+        fresh_nonce = uuid4().hex[:8]
         default_sess = (
             f"rev-sess-{binding.provider_id}-{task_id}-att-{att_num:02d}-"
-            f"{candidate_sha[:8]}-{fresh_token}"
+            f"{candidate_sha[:8]}-{fresh_nonce}"
         )
         reviewer_session_id = proposed_reviewer_session_id or default_sess
 
