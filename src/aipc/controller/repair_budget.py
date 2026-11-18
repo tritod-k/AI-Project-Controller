@@ -79,6 +79,8 @@ def _normalize_milestone(milestone_id: str) -> str:
     low = milestone_id.strip().lower()
     if low in {"milestone-c5", "milestone_c5", "milestone-c.5", "milestone_c.5", "c.5"}:
         return "milestone-c5"
+    if low in {"milestone-c6", "milestone_c6", "milestone-c.6", "milestone_c.6", "c.6"}:
+        return "milestone-c6"
     return low
 
 
@@ -189,6 +191,10 @@ class RootBudgetCounter(CanonicalRecord):
     effective_limit: NonNegativeInt = 2
     extension_approval_ids: tuple[NonBlank, ...] = ()
     imported_consumed: NonNegativeInt = 0
+    max_inner_corrections_per_outer_attempt: NonNegativeInt = 2
+    inner_corrections_by_attempt: dict[str, NonNegativeInt] = Field(default_factory=dict)
+    worker_invocations_consumed: NonNegativeInt = 0
+    worker_invocations_limit: PositiveInt = 9
 
     @model_validator(mode="after")
     def validate_counter(self) -> Self:
@@ -201,6 +207,15 @@ class RootBudgetCounter(CanonicalRecord):
                 raise ValueError("base_consumed cannot exceed base_limit")
             if self.base_consumed > self.consumed:
                 raise ValueError("base_consumed cannot exceed consumed")
+        if self.max_inner_corrections_per_outer_attempt > 2:
+            raise ValueError("max_inner_corrections_per_outer_attempt cannot exceed 2")
+        for att_key, inner_count in self.inner_corrections_by_attempt.items():
+            if inner_count > self.max_inner_corrections_per_outer_attempt:
+                raise ValueError(
+                    f"inner_corrections_by_attempt['{att_key}']={inner_count} exceeds "
+                    f"max_inner_corrections_per_outer_attempt="
+                    f"{self.max_inner_corrections_per_outer_attempt}"
+                )
         _assert_no_secrets_local(self.model_dump(mode="json"))
         return self
 
@@ -216,7 +231,14 @@ class BudgetReservationRecord(CanonicalRecord):
     attempt: PositiveInt
     candidate_sha: Commit
     review_id: NonBlank
-    route: Literal["REVIEW_COORDINATOR", "VERIFICATION_FAILURE"]
+    route: Literal[
+        "REVIEW_COORDINATOR",
+        "VERIFICATION_FAILURE",
+        "INNER_SELF_CORRECTION",
+        "INITIAL_WORKER_DISPATCH",
+    ]
+    bucket: Literal["OUTER_REPAIR", "INNER_CORRECTION", "INITIAL_INVOCATION"] = "OUTER_REPAIR"
+    inner_pass_index: NonNegativeInt = 0
     status: Literal["RESERVED", "CONSUMED"] = "RESERVED"
     funding_source: Literal["BASE", "GRANT"] | None = None
     grant_approval_id: NonBlank | None = None
@@ -309,6 +331,7 @@ class RepairBudgetLedgerState(CanonicalRecord):
     """Atomic, digest-verified persistent state of the adaptive repair budget."""
 
     schema_version: Literal["1.0"] = "1.0"
+    ledger_id: NonBlank = "c5_central_governance_ledger"
     project_id: Identifier
     milestone_id: Identifier
     policy_id: NonBlank
@@ -321,6 +344,11 @@ class RepairBudgetLedgerState(CanonicalRecord):
     milestone_limit: NonNegativeInt = 8
     milestone_consumed: NonNegativeInt = 0
     imported_milestone_consumed: NonNegativeInt = 0
+    max_inner_corrections_per_outer_attempt: NonNegativeInt = 2
+    milestone_worker_invocations_consumed: NonNegativeInt = 0
+    milestone_worker_invocations_limit: PositiveInt = 30
+    global_worker_invocations_consumed: NonNegativeInt = 0
+    global_worker_invocations_limit: PositiveInt = 30
     registered_roots: dict[str, RootBudgetCounter] = Field(min_length=1)
     child_to_root: dict[str, str] = Field(default_factory=dict)
     reservations: dict[str, BudgetReservationRecord] = Field(default_factory=dict)
@@ -336,9 +364,24 @@ class RepairBudgetLedgerState(CanonicalRecord):
             raise ValueError("milestone_limit cannot be less than base_milestone_limit")
         if self.milestone_consumed < self.imported_milestone_consumed:
             raise ValueError("milestone_consumed cannot be less than imported_milestone_consumed")
+        if self.max_inner_corrections_per_outer_attempt > 2:
+            raise ValueError("max_inner_corrections_per_outer_attempt cannot exceed 2")
         root_sum = sum(counter.consumed for counter in self.registered_roots.values())
         if root_sum > self.milestone_consumed:
             raise ValueError("sum of root consumed counts cannot exceed milestone_consumed")
+        root_inv_sum = sum(
+            counter.worker_invocations_consumed for counter in self.registered_roots.values()
+        )
+        if root_inv_sum > self.milestone_worker_invocations_consumed:
+            raise ValueError(
+                "sum of root worker_invocations_consumed cannot exceed "
+                "milestone_worker_invocations_consumed"
+            )
+        if self.milestone_worker_invocations_consumed > self.global_worker_invocations_consumed:
+            raise ValueError(
+                "milestone_worker_invocations_consumed cannot exceed "
+                "global_worker_invocations_consumed"
+            )
         for grant_rec in self.applied_grants:
             if grant_rec.consumed_repairs is None or grant_rec.remaining_repairs is None:
                 raise ValueError(
@@ -726,6 +769,7 @@ class DurableRepairBudgetLedger:
                     extension_allowance=0,
                     effective_limit=base_root,
                     imported_consumed=used,
+                    worker_invocations_limit=(base_root + 1) * 3,
                 )
 
             state = RepairBudgetLedgerState(
@@ -1399,6 +1443,248 @@ class DurableRepairBudgetLedger:
             write_json_atomic(self._path, updated.model_dump(mode="json"))
             return consumed
 
+    def reserve_worker_invocation(
+        self,
+        *,
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
+        trust_context: PolicyTrustContext | None = None,
+        event_id: str,
+        task_id: str,
+        outer_attempt: int,
+        inner_pass_index: int,
+        candidate_sha: str,
+        explicit_root_task: str | None = None,
+        target_paths: Sequence[str] | None = None,
+    ) -> BudgetReservationDecision:
+        """Atomically reserve one worker invocation slot (initial pass or inner correction)."""
+        if outer_attempt < 1:
+            raise RepairBudgetError("outer_attempt must be >= 1")
+        if inner_pass_index < 0:
+            raise RepairBudgetError("inner_pass_index must be >= 0")
+        norm_paths = _normalize_target_paths(target_paths)
+        bucket: Literal["INITIAL_INVOCATION", "INNER_CORRECTION"] = (
+            "INITIAL_INVOCATION" if inner_pass_index == 0 else "INNER_CORRECTION"
+        )
+        route: Literal["INITIAL_WORKER_DISPATCH", "INNER_SELF_CORRECTION"] = (
+            "INITIAL_WORKER_DISPATCH" if inner_pass_index == 0 else "INNER_SELF_CORRECTION"
+        )
+
+        with _acquire_ledger_lock(self._path):
+            state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
+            root_task = self.resolve_root_task(
+                state,
+                task_id=task_id,
+                explicit_root_task=explicit_root_task,
+            )
+            counter = state.registered_roots[root_task]
+
+            existing_res_id = state.event_to_reservation.get(event_id)
+            if existing_res_id is not None:
+                existing = state.reservations[existing_res_id]
+                if (
+                    existing.task_id != task_id
+                    or existing.root_task != root_task
+                    or existing.attempt != outer_attempt
+                    or existing.inner_pass_index != inner_pass_index
+                    or existing.bucket != bucket
+                ):
+                    raise RepairBudgetError(
+                        f"Conflicting replay for worker invocation event_id '{event_id}' rejected"
+                    )
+                return BudgetReservationDecision(
+                    allowed=True,
+                    idempotent_replay=True,
+                    action="RESERVE_REPAIR",
+                    root_task=root_task,
+                    task_id=task_id,
+                    reservation=existing,
+                    root_consumed=counter.consumed,
+                    root_limit=counter.effective_limit,
+                    milestone_consumed=state.milestone_consumed,
+                    milestone_limit=state.milestone_limit,
+                    reason=(
+                        "Idempotent replay of bound worker invocation reservation "
+                        f"'{existing.reservation_id}'."
+                    ),
+                )
+
+            att_key = str(outer_attempt)
+            used_inner = counter.inner_corrections_by_attempt.get(att_key, 0)
+            if inner_pass_index > 0 and (
+                inner_pass_index > counter.max_inner_corrections_per_outer_attempt
+                or used_inner >= counter.max_inner_corrections_per_outer_attempt
+            ):
+                return BudgetReservationDecision(
+                    allowed=False,
+                    action="HALT_ON_RETRY_EXHAUSTION",
+                    root_task=root_task,
+                    task_id=task_id,
+                    reservation=None,
+                    root_consumed=counter.consumed,
+                    root_limit=counter.effective_limit,
+                    milestone_consumed=state.milestone_consumed,
+                    milestone_limit=state.milestone_limit,
+                    reason=(
+                        f"Root lineage '{root_task}' outer attempt {outer_attempt} inner_budget "
+                        f"exhausted ({used_inner}/"
+                        f"{counter.max_inner_corrections_per_outer_attempt}); "
+                        "HALT_ON_RETRY_EXHAUSTION / HUMAN_REVIEW_REQUIRED."
+                    ),
+                )
+
+            if (
+                counter.worker_invocations_consumed >= counter.worker_invocations_limit
+                or state.milestone_worker_invocations_consumed
+                >= state.milestone_worker_invocations_limit
+                or state.global_worker_invocations_consumed >= state.global_worker_invocations_limit
+            ):
+                return BudgetReservationDecision(
+                    allowed=False,
+                    action="HALT_ON_RETRY_EXHAUSTION",
+                    root_task=root_task,
+                    task_id=task_id,
+                    reservation=None,
+                    root_consumed=counter.consumed,
+                    root_limit=counter.effective_limit,
+                    milestone_consumed=state.milestone_consumed,
+                    milestone_limit=state.milestone_limit,
+                    reason=(
+                        f"Root '{root_task}' aggregate_budget exhausted "
+                        f"(root {counter.worker_invocations_consumed}/"
+                        f"{counter.worker_invocations_limit}, "
+                        f"milestone {state.milestone_worker_invocations_consumed}/"
+                        f"{state.milestone_worker_invocations_limit}, "
+                        f"global {state.global_worker_invocations_consumed}/"
+                        f"{state.global_worker_invocations_limit}); "
+                        "HALT_ON_RETRY_EXHAUSTION / HUMAN_REVIEW_REQUIRED."
+                    ),
+                )
+
+            now = self._clock()
+            ev_digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:12]
+            res_id = (
+                f"res-inv-{root_task}-att-{outer_attempt:02d}-p{inner_pass_index:02d}-{ev_digest}"
+            )
+            review_id = f"cisl-att-{outer_attempt:02d}-pass-{inner_pass_index:02d}"
+            record = BudgetReservationRecord(
+                reservation_id=res_id,
+                event_id=event_id,
+                task_id=task_id,
+                root_task=root_task,
+                milestone_id=state.milestone_id,
+                attempt=outer_attempt,
+                candidate_sha=candidate_sha,
+                review_id=review_id,
+                route=route,
+                bucket=bucket,
+                inner_pass_index=inner_pass_index,
+                status="RESERVED",
+                funding_source="BASE",
+                target_paths=norm_paths,
+                approval_id=(
+                    loaded_policy.approval_id if loaded_policy is not None else state.approval_id
+                ),
+                policy_sha256=(
+                    loaded_policy.policy_sha256
+                    if loaded_policy is not None
+                    else state.policy_sha256
+                ),
+                created_at=now,
+            )
+
+            new_inner_by_attempt = dict(counter.inner_corrections_by_attempt)
+            if inner_pass_index == 0:
+                new_inner_by_attempt.setdefault(att_key, 0)
+            else:
+                new_inner_by_attempt[att_key] = used_inner + 1
+
+            new_counter = counter.model_copy(
+                update={
+                    "worker_invocations_consumed": counter.worker_invocations_consumed + 1,
+                    "inner_corrections_by_attempt": new_inner_by_attempt,
+                }
+            )
+            new_roots = dict(state.registered_roots)
+            new_roots[root_task] = new_counter
+            new_reservations = dict(state.reservations)
+            new_reservations[res_id] = record
+            new_events = dict(state.event_to_reservation)
+            new_events[event_id] = res_id
+
+            updated = _with_digest(
+                state.model_copy(
+                    update={
+                        "milestone_worker_invocations_consumed": (
+                            state.milestone_worker_invocations_consumed + 1
+                        ),
+                        "global_worker_invocations_consumed": (
+                            state.global_worker_invocations_consumed + 1
+                        ),
+                        "registered_roots": new_roots,
+                        "reservations": new_reservations,
+                        "event_to_reservation": new_events,
+                        "updated_at": now,
+                    }
+                )
+            )
+            write_json_atomic(self._path, updated.model_dump(mode="json"))
+            return BudgetReservationDecision(
+                allowed=True,
+                idempotent_replay=False,
+                action="RESERVE_REPAIR",
+                root_task=root_task,
+                task_id=task_id,
+                reservation=record,
+                root_consumed=new_counter.consumed,
+                root_limit=new_counter.effective_limit,
+                milestone_consumed=updated.milestone_consumed,
+                milestone_limit=updated.milestone_limit,
+                reason=f"Reserved {bucket} worker invocation '{res_id}' for root '{root_task}'.",
+            )
+
+    def consume_worker_invocation(
+        self,
+        *,
+        reservation_id: str,
+        attempt_id: str,
+        worker_id: str,
+        provider: str,
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
+        trust_context: PolicyTrustContext | None = None,
+    ) -> BudgetReservationRecord:
+        """Mark a worker invocation reservation as CONSUMED, idempotent for same attempt_id."""
+        with _acquire_ledger_lock(self._path):
+            state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
+            res = state.reservations.get(reservation_id)
+            if res is None:
+                raise RepairBudgetError(
+                    f"Unknown or missing worker invocation reservation '{reservation_id}'"
+                )
+            if res.status == "CONSUMED":
+                if res.consumed_attempt_id == attempt_id:
+                    return res
+                raise RepairBudgetError(
+                    f"Worker invocation reservation '{reservation_id}' already consumed by "
+                    f"'{res.consumed_attempt_id}'; conflicting attempt '{attempt_id}' rejected"
+                )
+            now = self._clock()
+            consumed = res.model_copy(
+                update={
+                    "status": "CONSUMED",
+                    "consumed_attempt_id": attempt_id,
+                    "consumed_worker_id": worker_id,
+                    "consumed_provider": provider,
+                    "consumed_at": now,
+                }
+            )
+            new_reservations = dict(state.reservations)
+            new_reservations[reservation_id] = consumed
+            updated = _with_digest(
+                state.model_copy(update={"reservations": new_reservations, "updated_at": now})
+            )
+            write_json_atomic(self._path, updated.model_dump(mode="json"))
+            return consumed
+
     def apply_extension_grant(
         self,
         *,
@@ -1569,11 +1855,15 @@ class DurableRepairBudgetLedger:
                 prev_ms_limit if already_reflected_in_policy else grant.milestone_repair_limit
             )
 
+        new_invocations_limit = counter.worker_invocations_limit + grant.max_additional_repairs * (
+            counter.max_inner_corrections_per_outer_attempt + 1
+        )
         new_counter = counter.model_copy(
             update={
                 "extension_allowance": new_ext_allowance,
                 "effective_limit": new_root_limit,
                 "extension_approval_ids": (*counter.extension_approval_ids, grant.approval_id),
+                "worker_invocations_limit": new_invocations_limit,
             }
         )
         new_roots = dict(state.registered_roots)
