@@ -39,6 +39,15 @@ _PROHIBITED_MILESTONE_PREFIXES: tuple[str, ...] = (
     "aipc-2-",
     "aipc_2_0",
     "aipc2",
+    "milestone-c7",
+    "milestone_c7",
+    "milestone-c.7",
+    "milestone_c.7",
+    "workstream-c7",
+    "workstream-c.7",
+    "rce01",
+    "rce02",
+    "rce03",
     "milestone-d",
     "milestone_d",
     "workstream-d",
@@ -50,15 +59,20 @@ _PROHIBITED_MILESTONE_PREFIXES: tuple[str, ...] = (
 
 _MILESTONE_C_BASELINE_SHA = "849c86684867487f6f0ad8eb54c603cba240dd34"
 _MILESTONE_C5_BASELINE_SHA = "4b0d19e3fd3ee30d06f9731ae90564581204f2be"
+_MILESTONE_C6_BASELINE_SHA = "a66d19f2dbf3fe806317472c5599b2e0a381175e"
 
 _AUTHORIZED_LEGACY_MILESTONE_IDS: frozenset[str] = frozenset(
     {"phase-24", "milestone-a", "milestone-b"}
 )
 _AUTHORIZED_MILESTONE_C_WORKSTREAMS: frozenset[str] = frozenset({"c01", "c02", "c03"})
 _AUTHORIZED_MILESTONE_C5_WORKSTREAMS: frozenset[str] = frozenset({"rg01", "rg02", "rg03", "rg04"})
+_AUTHORIZED_MILESTONE_C6_WORKSTREAMS: frozenset[str] = frozenset({"cisl01", "cisl02", "cisl03"})
 _AUTHORIZED_MILESTONE_C_IDS: frozenset[str] = frozenset({"milestone-c", "aipc-2.0-milestone-c"})
 _AUTHORIZED_MILESTONE_C5_IDS: frozenset[str] = frozenset(
     {"milestone-c5", "milestone_c5", "milestone-c.5", "milestone_c.5", "c.5"}
+)
+_AUTHORIZED_MILESTONE_C6_IDS: frozenset[str] = frozenset(
+    {"milestone-c6", "milestone_c6", "milestone-c.6", "milestone_c.6", "c.6"}
 )
 _AUTHORIZED_MILESTONE_C_COMPOSITE_PHASES: frozenset[str] = frozenset(
     {"milestone-c-repair", "milestone-c-docs", "milestone-c-hydrogen"}
@@ -89,8 +103,12 @@ _MILESTONE_C_WORKSTREAM_RE = re.compile(r"(?<![a-z0-9])c0[123](?![0-9])")
 _MILESTONE_C5_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]c\.?5|workstream[-_]c\.?5|c\.5|rg0[1-4])(?![0-9])"
 )
+_MILESTONE_C6_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]c\.?6|workstream[-_]c\.?6|c\.6|cisl0[1-3])(?![0-9])"
+)
 _FORBIDDEN_WORKSTREAM_RE = re.compile(
-    r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)|rg(?:00|0[5-9]|[1-9]\d))(?![0-9])"
+    r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)|rg(?:00|0[5-9]|[1-9]\d)|"
+    r"cisl(?:00|0[4-9]|[1-9]\d)|rce\d+|milestone[-_]c\.?7|workstream[-_]c\.?7|c\.7)(?![0-9])"
 )
 
 
@@ -112,9 +130,16 @@ def _is_milestone_c5_scope(text: str) -> bool:
     return bool(_MILESTONE_C5_TOKEN_RE.search(lowered))
 
 
+def _is_milestone_c6_scope(text: str) -> bool:
+    lowered = text.strip().lower()
+    if lowered in _AUTHORIZED_MILESTONE_C6_IDS:
+        return True
+    return bool(_MILESTONE_C6_TOKEN_RE.search(lowered))
+
+
 def _is_milestone_c_scope(text: str) -> bool:
     lowered = text.strip().lower()
-    if _is_milestone_c5_scope(lowered):
+    if _is_milestone_c5_scope(lowered) or _is_milestone_c6_scope(lowered):
         return False
     if lowered in _AUTHORIZED_MILESTONE_C_IDS:
         return True
@@ -123,7 +148,11 @@ def _is_milestone_c_scope(text: str) -> bool:
 
 def _normalize_c5_milestone_id(milestone_id: str) -> str:
     low = milestone_id.strip().lower()
-    return "milestone-c5" if low in _AUTHORIZED_MILESTONE_C5_IDS else low
+    if low in _AUTHORIZED_MILESTONE_C5_IDS:
+        return "milestone-c5"
+    if low in _AUTHORIZED_MILESTONE_C6_IDS:
+        return "milestone-c6"
+    return low
 
 
 def _is_authorized_milestone_identifier(milestone_id: str) -> bool:
@@ -134,11 +163,12 @@ def _is_authorized_milestone_identifier(milestone_id: str) -> bool:
         low in _AUTHORIZED_LEGACY_MILESTONE_IDS
         or low in _AUTHORIZED_MILESTONE_C_IDS
         or low in _AUTHORIZED_MILESTONE_C5_IDS
+        or low in _AUTHORIZED_MILESTONE_C6_IDS
     )
 
 
 class MilestoneAuthorizationEvidence(CanonicalRecord):
-    """Persisted human authorization evidence for bounded Milestone C or C.5 execution."""
+    """Persisted human authorization evidence for bounded Milestone C, C.5, or C.6 execution."""
 
     approval_id: Identifier
     project_id: Identifier
@@ -162,13 +192,14 @@ class MilestoneAuthorizationEvidence(CanonicalRecord):
     def validate_evidence(self) -> Self:
         milestone_low = self.milestone_id.strip().lower()
         is_c5 = milestone_low in _AUTHORIZED_MILESTONE_C5_IDS
+        is_c6 = milestone_low in _AUTHORIZED_MILESTONE_C6_IDS
         is_c = milestone_low in _AUTHORIZED_MILESTONE_C_IDS and not _is_unapproved_future_scope(
             self.milestone_id
         )
-        if not (is_c or is_c5):
+        if not (is_c or is_c5 or is_c6):
             raise ValueError(
                 f"milestone_id {self.milestone_id!r} is not an authorized "
-                "Milestone C or C.5 identifier"
+                "Milestone C, C.5, or C.6 identifier"
             )
         if is_c5:
             if "baseline_commit_sha" not in self.model_fields_set:
@@ -180,8 +211,22 @@ class MilestoneAuthorizationEvidence(CanonicalRecord):
                     "Milestone C.5 authorization requires baseline_commit_sha "
                     f"{_MILESTONE_C5_BASELINE_SHA!r}, got {self.baseline_commit_sha!r}"
                 )
+        elif is_c6:
+            if "baseline_commit_sha" not in self.model_fields_set:
+                object.__setattr__(self, "baseline_commit_sha", _MILESTONE_C6_BASELINE_SHA)
+            if "authorized_workstreams" not in self.model_fields_set:
+                object.__setattr__(self, "authorized_workstreams", ("cisl01", "cisl02", "cisl03"))
+            if self.baseline_commit_sha != _MILESTONE_C6_BASELINE_SHA:
+                raise ValueError(
+                    "Milestone C.6 authorization requires baseline_commit_sha "
+                    f"{_MILESTONE_C6_BASELINE_SHA!r}, got {self.baseline_commit_sha!r}"
+                )
         allowed_workstreams = (
-            _AUTHORIZED_MILESTONE_C5_WORKSTREAMS if is_c5 else _AUTHORIZED_MILESTONE_C_WORKSTREAMS
+            _AUTHORIZED_MILESTONE_C5_WORKSTREAMS
+            if is_c5
+            else _AUTHORIZED_MILESTONE_C6_WORKSTREAMS
+            if is_c6
+            else _AUTHORIZED_MILESTONE_C_WORKSTREAMS
         )
         if not self.authorized_workstreams:
             raise ValueError("authorized_workstreams must not be empty")
@@ -232,9 +277,12 @@ def load_milestone_authorization_evidence(path: Path) -> MilestoneAuthorizationE
         assert_no_secrets(raw)
         if isinstance(raw, dict):
             ms_raw = str(raw.get("milestone_id", "")).strip().lower()
-            if ms_raw in _AUTHORIZED_MILESTONE_C5_IDS and not raw.get("evidence_digest"):
+            if (
+                ms_raw in _AUTHORIZED_MILESTONE_C5_IDS or ms_raw in _AUTHORIZED_MILESTONE_C6_IDS
+            ) and not raw.get("evidence_digest"):
                 raise ValueError(
-                    "Milestone C.5 authorization evidence requires a persisted evidence_digest"
+                    "Milestone C.5 / C.6 authorization evidence requires a "
+                    "persisted evidence_digest"
                 )
         return MilestoneAuthorizationEvidence.model_validate(raw)
     except ValueError:
@@ -251,13 +299,19 @@ def _is_forbidden_phase_token(phase_low: str) -> bool:
     )
 
 
-def _is_phase_in_workstreams(phase_low: str, workstreams: set[str], *, is_c5: bool = False) -> bool:
+def _is_phase_in_workstreams(
+    phase_low: str,
+    workstreams: set[str],
+    *,
+    is_c5: bool = False,
+    is_c6: bool = False,
+) -> bool:
     if any(
         phase_low == w or phase_low.startswith(f"{w}-") or phase_low.endswith(f"-{w}")
         for w in workstreams
     ):
         return True
-    if is_c5:
+    if is_c5 or is_c6:
         return False
     mapped = _MILESTONE_C_PHASE_ALIASES.get(phase_low)
     if mapped is not None:
@@ -277,12 +331,20 @@ def verify_milestone_authorization_scope(
     in_scope_paths: Sequence[str],
     expected_approval_id: str | None = None,
 ) -> None:
-    """Verify persisted Milestone C or C.5 authorization evidence covers the requested scope."""
+    """Verify persisted Milestone C, C.5, or C.6 authorization evidence covers the scope."""
     ev_ms_low = evidence.milestone_id.strip().lower()
     req_ms_low = milestone_id.strip().lower()
     ev_is_c5 = ev_ms_low in _AUTHORIZED_MILESTONE_C5_IDS
     req_is_c5 = _is_milestone_c5_scope(req_ms_low)
-    label = "Milestone C.5" if (ev_is_c5 or req_is_c5) else "Milestone C"
+    ev_is_c6 = ev_ms_low in _AUTHORIZED_MILESTONE_C6_IDS
+    req_is_c6 = _is_milestone_c6_scope(req_ms_low)
+    label = (
+        "Milestone C.6"
+        if (ev_is_c6 or req_is_c6)
+        else "Milestone C.5"
+        if (ev_is_c5 or req_is_c5)
+        else "Milestone C"
+    )
 
     if evidence.decision != "APPROVED":
         raise ValueError(f"{label} authorization is not APPROVED (decision={evidence.decision})")
@@ -294,7 +356,7 @@ def verify_milestone_authorization_scope(
         raise ValueError(
             f"project_id mismatch: expected {project_id!r}, got {evidence.project_id!r}"
         )
-    if ev_is_c5 != req_is_c5:
+    if ev_is_c5 != req_is_c5 or ev_is_c6 != req_is_c6:
         raise ValueError(
             f"milestone_id mismatch: expected {milestone_id!r}, got {evidence.milestone_id!r}"
         )
@@ -307,6 +369,15 @@ def verify_milestone_authorization_scope(
             raise ValueError(
                 f"Milestone C.5 baseline_commit_sha mismatch: {evidence.baseline_commit_sha!r}"
             )
+    elif ev_is_c6:
+        if _normalize_c5_milestone_id(ev_ms_low) != _normalize_c5_milestone_id(req_ms_low):
+            raise ValueError(
+                f"milestone_id mismatch: expected {milestone_id!r}, got {evidence.milestone_id!r}"
+            )
+        if evidence.baseline_commit_sha != _MILESTONE_C6_BASELINE_SHA:
+            raise ValueError(
+                f"Milestone C.6 baseline_commit_sha mismatch: {evidence.baseline_commit_sha!r}"
+            )
     elif ev_ms_low != req_ms_low:
         raise ValueError(
             f"milestone_id mismatch: expected {milestone_id!r}, got {evidence.milestone_id!r}"
@@ -315,7 +386,7 @@ def verify_milestone_authorization_scope(
     p_low = phase_id.strip().lower()
     allowed_workstreams = {w.strip().lower() for w in evidence.authorized_workstreams}
     if _is_forbidden_phase_token(p_low) or not _is_phase_in_workstreams(
-        p_low, allowed_workstreams, is_c5=ev_is_c5
+        p_low, allowed_workstreams, is_c5=ev_is_c5, is_c6=ev_is_c6
     ):
         raise ValueError(f"phase_id {phase_id!r} is outside authorized {label} workstream scope")
 
@@ -346,12 +417,16 @@ def verify_milestone_c_authorization_scope(
     expected_approval_id: str | None = None,
 ) -> None:
     """Verify persisted Milestone C authorization evidence covers the requested scope."""
+    ev_ms_low = evidence.milestone_id.strip().lower()
     if (
-        evidence.milestone_id.strip().lower() in _AUTHORIZED_MILESTONE_C5_IDS
+        ev_ms_low in _AUTHORIZED_MILESTONE_C5_IDS
+        or ev_ms_low in _AUTHORIZED_MILESTONE_C6_IDS
         or _is_milestone_c5_scope(milestone_id)
+        or _is_milestone_c6_scope(milestone_id)
     ):
         raise ValueError(
-            f"milestone_id {milestone_id!r} is Milestone C.5 and cannot use Milestone C verifier"
+            f"milestone_id {milestone_id!r} is Milestone C.5/C.6 and "
+            "cannot use Milestone C verifier"
         )
     verify_milestone_authorization_scope(
         evidence,
@@ -412,6 +487,9 @@ class ApprovedTaskContract(CanonicalRecord):
         is_c5 = any(
             _is_milestone_c5_scope(val) for val in (self.milestone_id, self.phase_id, self.task_id)
         )
+        is_c6 = any(
+            _is_milestone_c6_scope(val) for val in (self.milestone_id, self.phase_id, self.task_id)
+        )
         is_c = any(
             _is_milestone_c_scope(val) for val in (self.milestone_id, self.phase_id, self.task_id)
         )
@@ -432,6 +510,34 @@ class ApprovedTaskContract(CanonicalRecord):
                 raise ValueError(
                     f"phase_id {self.phase_id!r} is outside authorized "
                     "Milestone C.5 RG01-RG04 scope"
+                )
+            if self.approval_evidence_path is not None:
+                evidence = load_milestone_authorization_evidence(Path(self.approval_evidence_path))
+                verify_milestone_authorization_scope(
+                    evidence,
+                    project_id=evidence.project_id,
+                    milestone_id=self.milestone_id,
+                    phase_id=self.phase_id,
+                    in_scope_paths=self.in_scope,
+                    expected_approval_id=self.approval_id,
+                )
+        elif is_c6:
+            if self.milestone_id.strip().lower() not in _AUTHORIZED_MILESTONE_C6_IDS:
+                raise ValueError(
+                    f"milestone_id {self.milestone_id!r} cannot host Milestone C.6 task/phase scope"
+                )
+            if self.approval_id is None:
+                raise ValueError(
+                    "Milestone C.6 task contract requires an explicit approval_id "
+                    "reference to persisted authorization evidence"
+                )
+            p_low = self.phase_id.strip().lower()
+            if _is_forbidden_phase_token(p_low) or not _is_phase_in_workstreams(
+                p_low, set(_AUTHORIZED_MILESTONE_C6_WORKSTREAMS), is_c6=True
+            ):
+                raise ValueError(
+                    f"phase_id {self.phase_id!r} is outside authorized "
+                    "Milestone C.6 CISL01-CISL03 scope"
                 )
             if self.approval_evidence_path is not None:
                 evidence = load_milestone_authorization_evidence(Path(self.approval_evidence_path))
@@ -660,14 +766,24 @@ class PersistentTaskQueue:
             _is_milestone_c5_scope(val)
             for val in (milestone_id, contract.milestone_id, contract.phase_id, contract.task_id)
         )
+        is_c6 = any(
+            _is_milestone_c6_scope(val)
+            for val in (milestone_id, contract.milestone_id, contract.phase_id, contract.task_id)
+        )
         is_c = any(
             _is_milestone_c_scope(val)
             for val in (milestone_id, contract.milestone_id, contract.phase_id, contract.task_id)
         )
-        if not (is_c or is_c5):
+        if not (is_c or is_c5 or is_c6):
             return
 
-        default_filename = "milestone_c5_approval.json" if is_c5 else "milestone_c_approval.json"
+        default_filename = (
+            "milestone_c6_approval.json"
+            if is_c6
+            else "milestone_c5_approval.json"
+            if is_c5
+            else "milestone_c_approval.json"
+        )
         resolved_path = (
             Path(approval_evidence_path)
             if approval_evidence_path is not None
@@ -681,7 +797,7 @@ class PersistentTaskQueue:
             evidence = load_milestone_authorization_evidence(resolved_path)
             verifier = (
                 verify_milestone_authorization_scope
-                if is_c5
+                if (is_c5 or is_c6)
                 else verify_milestone_c_authorization_scope
             )
             verifier(
@@ -693,7 +809,7 @@ class PersistentTaskQueue:
                 expected_approval_id=contract.approval_id,
             )
         except Exception as exc:
-            label = "Milestone C.5" if is_c5 else "Milestone C"
+            label = "Milestone C.6" if is_c6 else "Milestone C.5" if is_c5 else "Milestone C"
             raise ControllerError(f"{label} authorization verification failed: {exc}") from exc
 
     def initialize(
@@ -894,10 +1010,20 @@ class PersistentTaskQueue:
                 target.contract.task_id,
             )
         )
-        if target.status == QueuedTaskStatus.REPAIR_REQUIRED and is_c5:
+        is_c6 = any(
+            _is_milestone_c6_scope(val)
+            for val in (
+                snap.milestone_id,
+                target.contract.milestone_id,
+                target.contract.phase_id,
+                target.contract.task_id,
+            )
+        )
+        if target.status == QueuedTaskStatus.REPAIR_REQUIRED and (is_c5 or is_c6):
+            scope_label = "Milestone C.6" if is_c6 else "Milestone C.5"
             if self._repair_budget_path is None:
                 raise ControllerError(
-                    "Milestone C.5 repair dispatch requires a controller-bound budget ledger"
+                    f"{scope_label} repair dispatch requires a controller-bound budget ledger"
                 )
             if (
                 budget_ledger_path is not None
@@ -919,11 +1045,11 @@ class PersistentTaskQueue:
             )
             if effective_trust_ctx is None:
                 raise ControllerError(
-                    "Milestone C.5 repair dispatch requires controller PolicyTrustContext"
+                    f"{scope_label} repair dispatch requires controller PolicyTrustContext"
                 )
             if repair_reservation_id is None or not repair_reservation_id.strip():
                 raise ControllerError(
-                    "Milestone C.5 repair dispatch requires a valid repair_reservation_id "
+                    f"{scope_label} repair dispatch requires a valid repair_reservation_id "
                     "and controller-bound budget ledger"
                 )
             from aipc.controller.repair_budget import (
@@ -957,7 +1083,7 @@ class PersistentTaskQueue:
                 )
             except RepairBudgetError as exc:
                 raise ControllerError(
-                    f"Milestone C.5 repair budget enforcement rejected dispatch: {exc}"
+                    f"{scope_label} repair budget enforcement rejected dispatch: {exc}"
                 ) from exc
 
         ledger = TaskAttemptLedger(

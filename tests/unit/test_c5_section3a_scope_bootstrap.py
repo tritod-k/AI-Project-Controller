@@ -26,6 +26,7 @@ from aipc.review.trusted_acceptance_harness import (
 )
 
 C5_BASELINE_SHA = "4b0d19e3fd3ee30d06f9731ae90564581204f2be"
+C6_BASELINE_SHA = "a66d19f2dbf3fe806317472c5599b2e0a381175e"
 C_BASELINE_SHA = "849c86684867487f6f0ad8eb54c603cba240dd34"
 
 
@@ -42,6 +43,26 @@ def _persist_c5_approval(
         approval_id=approval_id,
         project_id=project_id,
         milestone_id="milestone-c5",
+        decision=decision,  # type: ignore[arg-type]
+        baseline_commit_sha=baseline_sha,
+        authorized_workstreams=workstreams,
+    )
+    return persist_milestone_authorization_evidence(path, evidence)
+
+
+def _persist_c6_approval(
+    path: Path,
+    *,
+    approval_id: str = "appr-c6-01",
+    project_id: str = "aipc",
+    decision: str = "APPROVED",
+    workstreams: tuple[str, ...] = ("cisl01", "cisl02", "cisl03"),
+    baseline_sha: str = C6_BASELINE_SHA,
+) -> Path:
+    evidence = MilestoneAuthorizationEvidence(
+        approval_id=approval_id,
+        project_id=project_id,
+        milestone_id="milestone-c6",
         decision=decision,  # type: ignore[arg-type]
         baseline_commit_sha=baseline_sha,
         authorized_workstreams=workstreams,
@@ -644,3 +665,263 @@ def test_aipc_implementation_worker_authorizes_c5_rg01_rg04_and_preserves_restri
     assert "never call `run_command` or shell tools" in lowered
     assert "never self-approve" in lowered
     assert "milestone d" in lowered
+
+
+def test_c6_authorization_evidence_roundtrip_and_digest_verification(tmp_path: Path) -> None:
+    default_ev = MilestoneAuthorizationEvidence(
+        approval_id="appr-c6-default",
+        project_id="aipc",
+        milestone_id="milestone-c6",
+    )
+    assert default_ev.baseline_commit_sha == C6_BASELINE_SHA
+    assert default_ev.authorized_workstreams == ("cisl01", "cisl02", "cisl03")
+
+    auth_path = _persist_c6_approval(tmp_path / "milestone_c6_approval.json")
+    loaded = load_milestone_authorization_evidence(auth_path)
+    assert loaded.milestone_id == "milestone-c6"
+    assert loaded.baseline_commit_sha == C6_BASELINE_SHA
+    assert loaded.authorized_workstreams == ("cisl01", "cisl02", "cisl03")
+    assert loaded.evidence_digest is not None
+
+    raw = json.loads(auth_path.read_text(encoding="utf-8"))
+    raw["authorized_workstreams"] = ["cisl01"]
+    tampered_path = tmp_path / "tampered_c6.json"
+    tampered_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="digest mismatch"):
+        load_milestone_authorization_evidence(tampered_path)
+
+    no_digest_raw = json.loads(auth_path.read_text(encoding="utf-8"))
+    no_digest_raw["evidence_digest"] = None
+    no_digest_path = tmp_path / "no_digest_c6.json"
+    no_digest_path.write_text(json.dumps(no_digest_raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="evidence_digest"):
+        load_milestone_authorization_evidence(no_digest_path)
+
+    for bad_ws, bad_sha in (
+        (("rg01",), C6_BASELINE_SHA),
+        (("cisl04",), C6_BASELINE_SHA),
+        (("cisl01",), C5_BASELINE_SHA),
+    ):
+        with pytest.raises(ValueError):
+            MilestoneAuthorizationEvidence(
+                approval_id="appr-c6-bad",
+                project_id="aipc",
+                milestone_id="milestone-c6",
+                baseline_commit_sha=bad_sha,
+                authorized_workstreams=bad_ws,
+            )
+
+
+def test_task_queue_c6_cisl01_to_cisl03_positive_and_rejections(tmp_path: Path) -> None:
+    auth_path = _persist_c6_approval(tmp_path / "milestone_c6_approval.json")
+    for ws in ("cisl01", "cisl02", "cisl03"):
+        contract = ApprovedTaskContract(
+            task_id=f"task-c6-{ws}",
+            phase_id=ws,
+            milestone_id="milestone-c6",
+            title=f"Implement {ws.upper()} task",
+            objective=f"Bounded {ws.upper()} execution",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id="appr-c6-01",
+            approval_evidence_path=str(auth_path),
+        )
+        queue_dir = tmp_path / f"q_{ws}"
+        queue_dir.mkdir()
+        queue = PersistentTaskQueue(queue_dir / "queue.json")
+        snap = queue.initialize(
+            project_id="aipc",
+            milestone_id=contract.milestone_id,
+            contracts=(contract,),
+            approval_id="appr-c6-01",
+            approval_evidence_path=auth_path,
+        )
+        assert snap.tasks[0].status == QueuedTaskStatus.ELIGIBLE
+        running = queue.begin_dispatch(
+            f"task-c6-{ws}",
+            worker_id="agy-hydrogen",
+            provider="gemini",
+        )
+        assert running.status == QueuedTaskStatus.RUNNING
+
+    # Unapproved milestone-c6 contracts must fail closed
+    for bad_phase, bad_appr in (
+        ("phase-01", "appr-c6-01"),
+        ("cisl01", None),
+        ("cisl04", "appr-c6-01"),
+        ("rce01", "appr-c6-01"),
+        ("d01", "appr-c6-01"),
+    ):
+        with pytest.raises(ValueError):
+            ApprovedTaskContract(
+                task_id="task-c6-bad",
+                phase_id=bad_phase,
+                milestone_id="milestone-c6",
+                title="Invalid C6 contract",
+                objective="Must fail",
+                in_scope=("src/aipc/controller/task_queue.py",),
+                validation_commands=("pytest -q",),
+                approval_id=bad_appr,
+            )
+
+    # Cross-milestone C5 <-> C6 approval reuse must fail closed
+    c5_auth_path = _persist_c5_approval(tmp_path / "milestone_c5_approval.json")
+    with pytest.raises(ValueError):
+        ApprovedTaskContract(
+            task_id="task-c6-cisl01",
+            phase_id="cisl01",
+            milestone_id="milestone-c6",
+            title="C5 approval used for C6",
+            objective="Must fail",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id="appr-c5-01",
+            approval_evidence_path=str(c5_auth_path),
+        )
+    with pytest.raises(ValueError):
+        ApprovedTaskContract(
+            task_id="task-c5-rg01",
+            phase_id="rg01",
+            milestone_id="milestone-c5",
+            title="C6 approval used for C5",
+            objective="Must fail",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id="appr-c6-01",
+            approval_evidence_path=str(auth_path),
+        )
+
+
+def test_task_queue_and_planner_block_c7_rce_cisl04_and_milestone_d(tmp_path: Path) -> None:
+    c6_auth_path = _persist_c6_approval(tmp_path / "c6_approval.json")
+    c5_auth_path = _persist_c5_approval(tmp_path / "c5_approval.json")
+
+    # Positive HumanGoalSpec for C.6
+    goal = _goal_spec(
+        milestone_id="milestone-c6",
+        phase_id="cisl01",
+        phase_name="CISL01 Scope Bootstrap",
+        approval_granted=True,
+        approval_id="appr-c6-01",
+        approval_evidence_path=str(c6_auth_path),
+    )
+    assert goal.milestone_id == "milestone-c6"
+
+    # Cross-milestone C5 <-> C6 rejected in HumanGoalSpec
+    with pytest.raises(ValueError):
+        _goal_spec(
+            milestone_id="milestone-c6",
+            phase_id="cisl01",
+            approval_granted=True,
+            approval_id="appr-c5-01",
+            approval_evidence_path=str(c5_auth_path),
+        )
+    with pytest.raises(ValueError):
+        _goal_spec(
+            milestone_id="milestone-c5",
+            phase_id="rg01",
+            approval_granted=True,
+            approval_id="appr-c6-01",
+            approval_evidence_path=str(c6_auth_path),
+        )
+
+    # C.7, RCE01-RCE03, CISL04, and Milestone D rejected in ApprovedTaskContract & HumanGoalSpec
+    for bad_ms, bad_phase in (
+        ("milestone-c7", "rce01"),
+        ("c.7", "rce02"),
+        ("milestone-c6", "cisl04"),
+        ("milestone-c6", "rce03"),
+        ("milestone-d", "d01"),
+        ("milestone-d", "d03"),
+    ):
+        with pytest.raises(ValueError):
+            ApprovedTaskContract(
+                task_id="task-bad-future",
+                phase_id=bad_phase,
+                milestone_id=bad_ms,
+                title="Blocked future scope",
+                objective="Must fail",
+                in_scope=("src/aipc/controller/task_queue.py",),
+                validation_commands=("pytest -q",),
+                approval_id="appr-c6-01",
+            )
+        with pytest.raises(ValueError):
+            _goal_spec(
+                milestone_id=bad_ms,
+                phase_id=bad_phase,
+                approval_granted=True,
+                approval_id="appr-c6-01",
+                approval_evidence_path=str(c6_auth_path),
+            )
+
+
+def test_trusted_harness_c6_requires_approval_and_blocks_c7_cisl04_d(tmp_path: Path) -> None:
+    workspace = tmp_path / "candidate_c6"
+    (workspace / "src" / "aipc" / "review").mkdir(parents=True)
+    gate_file = workspace / "src" / "aipc" / "review" / "gate.py"
+    gate_file.write_text("def ok() -> bool:\n    return True\n", encoding="utf-8")
+
+    # Without approval_evidence_path, C.6 must fail closed
+    with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+        assert_milestone_c_scope_authorized(
+            "milestone-c6", phase_id="cisl01", task_id="task-cisl01"
+        )
+
+    # With valid external C.6 approval, C.6 succeeds (including task_id extraction)
+    c6_auth_path = _persist_c6_approval(tmp_path / "external_c6_approval.json")
+    assert_milestone_c_scope_authorized(
+        "milestone-c6",
+        task_id="task-cisl02",
+        approval_id="appr-c6-01",
+        approval_evidence_path=c6_auth_path,
+        project_id="aipc",
+    )
+    manifest_c6 = build_trusted_harness_manifest(
+        project_id="aipc",
+        milestone_id="milestone-c6",
+        workspace=workspace,
+        protected_rel_paths=("src/aipc/review/gate.py",),
+        trusted_manifest_dir=tmp_path / "manifests_c6",
+        approval_id="appr-c6-01",
+        approval_evidence_path=c6_auth_path,
+    )
+    assert manifest_c6.milestone_id == "milestone-c6"
+    assert manifest_c6.approval_id == "appr-c6-01"
+
+    # Cross-milestone C5 <-> C6 and cisl01..03 under non-C6 milestones fail closed
+    c5_auth_path = _persist_c5_approval(tmp_path / "external_c5_approval.json")
+    with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+        assert_milestone_c_scope_authorized(
+            "milestone-c6",
+            phase_id="cisl01",
+            approval_id="appr-c5-01",
+            approval_evidence_path=c5_auth_path,
+            project_id="aipc",
+        )
+    with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+        assert_milestone_c_scope_authorized("milestone-c", phase_id="cisl01")
+    with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+        assert_milestone_c_scope_authorized("milestone-c", task_id="task-cisl01")
+
+    # C.7, RCE01-RCE03, CISL04, and Milestone D fail closed
+    for bad_ms, bad_phase, bad_task in (
+        ("milestone-c7", "rce01", "task-rce01"),
+        ("c.7", "rce02", "task-rce02"),
+        ("milestone-c", "cisl04", "task-cisl04"),
+        ("milestone-c", "rce03", "task-c16-rce03"),
+        ("milestone-d", "d01", "task-d01"),
+        ("milestone-d", "d03", "task-d03"),
+    ):
+        with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
+            assert_milestone_c_scope_authorized(bad_ms, phase_id=bad_phase, task_id=bad_task)
+
+
+def test_aipc_implementation_worker_authorizes_c6_cisl01_cisl03_and_blocks_c7_d() -> None:
+    worker_md = Path(".agents/agents/aipc-implementation-worker.md").read_text(encoding="utf-8")
+    lowered = worker_md.lower()
+    assert "milestone-c6" in lowered or "c.6" in lowered
+    assert "cisl01-cisl03" in lowered
+    assert "milestone-c7" in lowered
+    assert "rce01" in lowered and "rce03" in lowered
+    assert "milestone d" in lowered
+    assert "d01" in lowered and "d03" in lowered

@@ -15,6 +15,8 @@ QUALIFIED_AGY_VERSIONS: frozenset[str] = frozenset(
     {"1.5.2", "1.5.3", "1.5.5", "1.5.6", "1.5.7", "1.5.8", "1.5.9"}
 )
 AGY_VERSION_RANGE = ">=1.5.2,<2.0.0"
+CONTAINER_VERIFIER_UNAVAILABLE = "CONTAINER_VERIFIER_UNAVAILABLE"
+DEFAULT_CISL_VERIFIER_IMAGE = "aipc-cisl-verify:py313-v1"
 
 
 def is_compatible_agy_version(version: str) -> bool:
@@ -168,6 +170,24 @@ def check_docker(
         "image_id": image_id,
         "qualified": qualified,
     }
+
+
+def require_qualified_docker_verifier(
+    runtime: str = "docker",
+    image: str = DEFAULT_CISL_VERIFIER_IMAGE,
+) -> dict[str, object]:
+    """Fail closed if Docker daemon or qualified CISL verifier image is unavailable."""
+    info = check_docker(runtime=runtime, image=image)
+    if image == DEFAULT_CISL_VERIFIER_IMAGE and not info.get("image_present"):
+        fallback_info = check_docker(runtime=runtime, image="aipc-verify:py313-v1")
+        if fallback_info.get("qualified"):
+            info = fallback_info
+    if not info.get("qualified"):
+        raise RuntimeError(
+            f"{CONTAINER_VERIFIER_UNAVAILABLE}: "
+            f"Docker daemon or verifier image '{image}' is unavailable"
+        )
+    return info
 
 
 def qualify_antigravity_runtime(
@@ -429,6 +449,8 @@ def antigravity_runtime_info(
 
 __all__ = [
     "AntigravityQualificationResult",
+    "CONTAINER_VERIFIER_UNAVAILABLE",
+    "DEFAULT_CISL_VERIFIER_IMAGE",
     "QUALIFIED_AGY_VERSIONS",
     "REQUIRED_AGY_FLAGS",
     "_resolve_docker_executable",
@@ -436,5 +458,6 @@ __all__ = [
     "check_docker",
     "find_agy_executable",
     "qualify_antigravity_runtime",
+    "require_qualified_docker_verifier",
     "runtime_info",
 ]

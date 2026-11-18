@@ -4,27 +4,39 @@ import asyncio
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
-from collections.abc import Awaitable, Callable
+import tempfile
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
 from aipc.agents.models import AgentCapabilities, RawAgentResult, RunStatus
 from aipc.domain.errors import EvidencePathError
-from aipc.domain.models import AgentResult, TestSummary
+from aipc.domain.models import AgentResult, CanonicalRecord, TestSummary
 from aipc.evidence.paths import authorized_root
 from aipc.evidence.test_parser import PytestResultParser
+from aipc.hardening.env_isolation import (
+    ChildEnvironmentIsolationError,
+    assert_argv_no_credentials,
+    build_sanitized_child_env,
+)
+from aipc.hardening.errors import SecretExposureError
+from aipc.hardening.secrets import assert_no_secrets
 from aipc.normalization.context import NormalizationContext
 from aipc.normalization.validation import validate_agent_result
 from aipc.storage.json_store import _unique_object
 
 from .config import GeminiAdapterConfig
 from .doctor import (
+    CONTAINER_VERIFIER_UNAVAILABLE,
+    DEFAULT_CISL_VERIFIER_IMAGE,
     _resolve_docker_executable,
     antigravity_runtime_info,
+    check_docker,
     find_agy_executable,
     qualify_antigravity_runtime,
 )
@@ -376,6 +388,547 @@ def _classify_error_text(text: str) -> None:
         provider_failure(429)
     if any(token in lowered for token in ("max_turn_requests", "max_tokens")):
         provider_failure("max_turn_requests")
+
+
+class ContainerSnapshotVerificationReceipt(CanonicalRecord):
+    """Canonical receipt for CISL01 immutable snapshot and tmpfs Docker verification."""
+
+    passed: bool
+    error_code: str | None = None
+    pre_snapshot_hashes: dict[str, str]
+    post_snapshot_hashes: dict[str, str]
+    snapshot_immutable: bool
+    host_git_diff_check_passed: bool
+    host_git_diff_output: str = ""
+    container_image: str
+    container_runtime: str = "docker"
+    staging_tmpfs_path: str = "/tmp/work"
+    pytest_basetemp: str = "/tmp/pytest"
+    git_mounted_in_container: bool = False
+    commands_executed: tuple[str, ...] = ()
+    exit_codes: tuple[int, ...] = ()
+    tests_summary: TestSummary | None = None
+    log_text: str = ""
+    copy_overhead_ms: float = 0.0
+
+
+def normalize_cisl_container_command(command: tuple[str, ...] | str) -> list[str]:
+    """Normalize a Windows/host verification command for Linux tmpfs container execution."""
+    if isinstance(command, str):
+        raw_tokens = [
+            tok.strip("\"'") for tok in shlex.split(command, posix=False) if tok.strip("\"'")
+        ]
+    else:
+        raw_tokens = [str(tok) for tok in command]
+
+    if not raw_tokens:
+        raise ValueError("CISL container command must not be empty")
+
+    tokens = list(raw_tokens)
+    exe_posix = tokens[0].replace("\\", "/")
+    exe_name = exe_posix.rsplit("/", 1)[-1].lower()
+
+    if (
+        exe_name in ("python.exe", "python3.exe", "python", "python3")
+        or exe_posix.lower().endswith("/scripts/python.exe")
+        or exe_posix.lower().endswith("/bin/python")
+        or exe_posix.lower().endswith("/bin/python3")
+    ):
+        tokens[0] = "python3"
+    elif (
+        exe_name in ("ruff.exe", "ruff")
+        or exe_posix.lower().endswith("/scripts/ruff.exe")
+        or exe_posix.lower().endswith("/bin/ruff")
+    ):
+        tokens[:1] = ["python3", "-m", "ruff"]
+    elif exe_name in ("pytest.exe", "pytest"):
+        tokens[:1] = ["python3", "-m", "pytest"]
+
+    for idx in range(1, len(tokens)):
+        if "\\" in tokens[idx]:
+            tokens[idx] = tokens[idx].replace("\\", "/")
+
+    is_pytest = "pytest" in tokens or any(
+        t.replace("\\", "/").rsplit("/", 1)[-1].lower() in ("pytest", "pytest.exe") for t in tokens
+    )
+    if is_pytest:
+        if tokens[0] == "python3":
+            py_flag_limit = tokens.index("-m") if "-m" in tokens else len(tokens)
+            if "-B" not in tokens[:py_flag_limit]:
+                tokens.insert(1, "-B")
+        if "no:cacheprovider" not in tokens:
+            tokens.extend(["-p", "no:cacheprovider"])
+        if not any(t.startswith("--basetemp") for t in tokens):
+            tokens.append("--basetemp=/tmp/pytest")
+
+    return tokens
+
+
+def _norm_rel_path(path_str: str) -> str:
+    norm = path_str.replace("\\", "/").strip()
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm.rstrip("/")
+
+
+def _path_matches_pattern(rel_path: str, pattern: str) -> bool:
+    norm_path = _norm_rel_path(rel_path)
+    norm_pat = _norm_rel_path(pattern)
+    if not norm_pat:
+        return False
+    return norm_path == norm_pat or norm_path.startswith(norm_pat + "/")
+
+
+def _cisl_fail_receipt(
+    *,
+    error_code: str,
+    container_image: str,
+    container_runtime: str,
+    log_text: str,
+    pre_snapshot_hashes: dict[str, str] | None = None,
+    post_snapshot_hashes: dict[str, str] | None = None,
+    snapshot_immutable: bool = True,
+    host_git_diff_check_passed: bool = True,
+    host_git_diff_output: str = "",
+    commands_executed: tuple[str, ...] = (),
+    exit_codes: tuple[int, ...] = (),
+    tests_summary: TestSummary | None = None,
+    copy_overhead_ms: float = 0.0,
+) -> ContainerSnapshotVerificationReceipt:
+    pre = pre_snapshot_hashes if pre_snapshot_hashes is not None else {}
+    post = post_snapshot_hashes if post_snapshot_hashes is not None else dict(pre)
+    return ContainerSnapshotVerificationReceipt(
+        passed=False,
+        error_code=error_code,
+        pre_snapshot_hashes=pre,
+        post_snapshot_hashes=post,
+        snapshot_immutable=snapshot_immutable,
+        host_git_diff_check_passed=host_git_diff_check_passed,
+        host_git_diff_output=host_git_diff_output,
+        container_image=container_image,
+        container_runtime=container_runtime,
+        staging_tmpfs_path="/tmp/work",
+        pytest_basetemp="/tmp/pytest",
+        git_mounted_in_container=False,
+        commands_executed=commands_executed,
+        exit_codes=exit_codes,
+        tests_summary=tests_summary,
+        log_text=log_text,
+        copy_overhead_ms=copy_overhead_ms,
+    )
+
+
+def run_cisl_container_snapshot_verifier(
+    workspace: Path,
+    commands: Sequence[tuple[str, ...] | str],
+    *,
+    turn_id: str | None = None,
+    state_root: Path | None = None,
+    container_image: str = DEFAULT_CISL_VERIFIER_IMAGE,
+    container_runtime: str = "docker",
+    timeout_seconds: int = 120,
+    in_scope_paths: Sequence[str] | None = None,
+    out_of_scope_paths: Sequence[str] | None = None,
+    forbidden_paths: Sequence[str] | None = None,
+    changed_paths: Sequence[str] | None = None,
+    pre_config_digests: dict[str, str] | None = None,
+    allow_config_mutation: bool = False,
+    docker_checker: Callable[..., dict[str, object]] | None = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> ContainerSnapshotVerificationReceipt:
+    """Execute the 5-step CISL01 immutable snapshot & tmpfs Linux Docker verification flow."""
+    ws_real = workspace.resolve()
+    # Step 1 & 2: Host Controller Pre-Checks
+    try:
+        _check_no_env_files(ws_real)
+    except GeminiAdapterError as exc:
+        return _cisl_fail_receipt(
+            error_code="ENV_FILE_VIOLATION",
+            container_image=container_image,
+            container_runtime=container_runtime,
+            log_text=str(exc),
+        )
+
+    integrity_violations = scan_workspace_integrity(ws_real)
+    if integrity_violations:
+        return _cisl_fail_receipt(
+            error_code="WORKSPACE_INTEGRITY_VIOLATION",
+            container_image=container_image,
+            container_runtime=container_runtime,
+            log_text=f"Workspace integrity violation: {integrity_violations}",
+        )
+
+    if pre_config_digests is not None and not allow_config_mutation:
+        mutations = check_build_config_mutations(ws_real, pre_config_digests)
+        if mutations:
+            return _cisl_fail_receipt(
+                error_code="CONFIG_GUARD_VIOLATION",
+                container_image=container_image,
+                container_runtime=container_runtime,
+                log_text=f"Build/hook config mutation detected: {mutations}",
+            )
+
+    if changed_paths is not None:
+        norm_changed = [_norm_rel_path(p) for p in changed_paths if _norm_rel_path(p)]
+        if forbidden_paths is not None:
+            bad_forbidden = [
+                cp
+                for cp in norm_changed
+                if any(_path_matches_pattern(cp, fp) for fp in forbidden_paths)
+            ]
+            if bad_forbidden:
+                return _cisl_fail_receipt(
+                    error_code="FORBIDDEN_PATH_VIOLATION",
+                    container_image=container_image,
+                    container_runtime=container_runtime,
+                    log_text=f"Forbidden path modified: {bad_forbidden}",
+                )
+        if out_of_scope_paths is not None:
+            bad_oos = [
+                cp
+                for cp in norm_changed
+                if any(_path_matches_pattern(cp, op) for op in out_of_scope_paths)
+            ]
+            if bad_oos:
+                return _cisl_fail_receipt(
+                    error_code="OUT_OF_SCOPE_VIOLATION",
+                    container_image=container_image,
+                    container_runtime=container_runtime,
+                    log_text=f"Out-of-scope path modified: {bad_oos}",
+                )
+        if in_scope_paths is not None:
+            outside = [
+                cp
+                for cp in norm_changed
+                if not any(_path_matches_pattern(cp, ip) for ip in in_scope_paths)
+            ]
+            if outside:
+                return _cisl_fail_receipt(
+                    error_code="OUT_OF_SCOPE_VIOLATION",
+                    container_image=container_image,
+                    container_runtime=container_runtime,
+                    log_text=f"Changed path outside in_scope_paths: {outside}",
+                )
+
+    files_to_scan: list[Path] = []
+    if changed_paths is not None:
+        files_to_scan = [
+            ws_real / _norm_rel_path(p)
+            for p in changed_paths
+            if (ws_real / _norm_rel_path(p)).is_file()
+        ]
+    elif in_scope_paths is not None:
+        files_to_scan = [
+            ws_real / _norm_rel_path(p)
+            for p in in_scope_paths
+            if (ws_real / _norm_rel_path(p)).is_file()
+        ]
+    else:
+        skip_dirs = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
+        for item in ws_real.rglob("*"):
+            if any(part in skip_dirs for part in item.parts):
+                continue
+            if item.is_file():
+                files_to_scan.append(item)
+
+    for scan_file in files_to_scan:
+        try:
+            content = scan_file.read_text(encoding="utf-8", errors="replace")
+            assert_no_secrets(content)
+        except SecretExposureError as exc:
+            return _cisl_fail_receipt(
+                error_code="SECRET_EXPOSURE_DETECTED",
+                container_image=container_image,
+                container_runtime=container_runtime,
+                log_text=str(exc),
+            )
+        except OSError:
+            pass
+
+    host_git_diff_check_passed = True
+    host_git_diff_output = ""
+    git_marker = ws_real / ".git"
+    if git_marker.is_file() or (git_marker.is_dir() and (git_marker / "HEAD").is_file()):
+        with tempfile.TemporaryDirectory() as hooks_tmp:
+            hooks_dir = (state_root / "empty_hooks") if state_root else Path(hooks_tmp)
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            diff_res = _run_safe_git(["diff", "--check"], ws_real, hooks_dir)
+        host_git_diff_output = (diff_res.stdout or "") + (
+            "\n" + diff_res.stderr if diff_res.stderr else ""
+        )
+        if diff_res.returncode != 0:
+            return _cisl_fail_receipt(
+                error_code="GIT_DIFF_CHECK_FAILED",
+                container_image=container_image,
+                container_runtime=container_runtime,
+                host_git_diff_check_passed=False,
+                host_git_diff_output=host_git_diff_output,
+                log_text=host_git_diff_output.strip() or "git diff --check failed",
+            )
+
+    # Step 3: Pre-Verification SHA-256 Snapshot
+    pre_snapshot_hashes = _hash_workspace_files(ws_real)
+
+    # Step 4: Fail-Closed Docker Check & tmpfs /tmp/work Container Execution
+    checker = docker_checker or check_docker
+    docker_info = checker(runtime=container_runtime, image=container_image)
+    if not docker_info.get("qualified"):
+        return _cisl_fail_receipt(
+            error_code=CONTAINER_VERIFIER_UNAVAILABLE,
+            container_image=container_image,
+            container_runtime=container_runtime,
+            pre_snapshot_hashes=pre_snapshot_hashes,
+            post_snapshot_hashes=dict(pre_snapshot_hashes),
+            host_git_diff_check_passed=host_git_diff_check_passed,
+            host_git_diff_output=host_git_diff_output,
+            log_text=(
+                f"{CONTAINER_VERIFIER_UNAVAILABLE}: "
+                f"Docker daemon or verifier image '{container_image}' unavailable"
+            ),
+        )
+
+    runtime_bin = str(
+        docker_info.get("executable")
+        or _resolve_docker_executable(container_runtime)
+        or container_runtime
+    )
+    normalized_commands = [normalize_cisl_container_command(cmd) for cmd in commands]
+    commands_executed = tuple(" ".join(cmd) for cmd in normalized_commands)
+    safe_turn_id = "".join(
+        c if c.isalnum() or c in "-_." else "-" for c in str(turn_id or uuid4().hex[:12])
+    )
+    container_name = f"aipc-cisl-verify-{safe_turn_id}"
+
+    bootstrap_script = (
+        "import json, os, pathlib, shutil, subprocess, sys, time; "
+        "t0 = time.perf_counter(); "
+        "shutil.copytree('/workspace', '/tmp/work', symlinks=False, dirs_exist_ok=True, "
+        "ignore=shutil.ignore_patterns('.git', '.venv', '__pycache__', "
+        "'.pytest_cache', '.ruff_cache')); "
+        "[os.chmod(p, 0o644) for p in pathlib.Path('/tmp/work').rglob('*') if p.is_file()]; "
+        "copy_ms = round((time.perf_counter() - t0) * 1000.0, 3); "
+        "print(f'__AIPC_COPY_OVERHEAD_MS__={copy_ms}', flush=True); "
+        f"cmds = json.loads({json.dumps(json.dumps(normalized_commands))}); "
+        "codes = ["
+        "int(subprocess.run(cmd, cwd='/tmp/work', check=False).returncode) "
+        "for cmd in cmds]; "
+        "print(f'__AIPC_EXIT_CODES__={json.dumps(codes)}', flush=True); "
+        "sys.exit(next((c for c in codes if c != 0), 0))"
+    )
+
+    runner = subprocess_runner or subprocess.run
+    with tempfile.TemporaryDirectory() as mask_tmp:
+        git_mask_args: list[str] = []
+        git_path = ws_real / ".git"
+        if git_path.is_dir():
+            empty_git_dir = Path(mask_tmp) / "empty_git"
+            empty_git_dir.mkdir(parents=True, exist_ok=True)
+            git_mask_args = ["-v", f"{empty_git_dir.resolve()}:/workspace/.git:ro"]
+        elif git_path.is_file():
+            empty_git_file = Path(mask_tmp) / "empty_git_pointer"
+            empty_git_file.write_text("", encoding="utf-8")
+            git_mask_args = ["-v", f"{empty_git_file.resolve()}:/workspace/.git:ro"]
+
+        container_cmd = [
+            runtime_bin,
+            "run",
+            "--rm",
+            "--name",
+            container_name,
+            "--network",
+            "none",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,exec,nosuid,size=128m",
+            "--user",
+            "65534:65534",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "64",
+            "--memory",
+            "512m",
+            "-e",
+            "HOME=/tmp",
+            "-e",
+            "TMPDIR=/tmp",
+            "-e",
+            "TEMP=/tmp",
+            "-e",
+            "TMP=/tmp",
+            "-e",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "-e",
+            "VIRTUAL_ENV=/opt/aipc-venv",
+            "-e",
+            "PATH=/opt/aipc-venv/bin:/usr/local/bin:/usr/bin:/bin",
+            "-e",
+            "PYTHONPATH=/tmp/work/src",
+            "-e",
+            "RUFF_CACHE_DIR=/tmp/.ruff_cache",
+            "-v",
+            f"{ws_real}:/workspace:ro",
+            *git_mask_args,
+            "-w",
+            "/tmp",
+            container_image,
+            "python3",
+            "-B",
+            "-c",
+            bootstrap_script,
+        ]
+
+        try:
+            assert_argv_no_credentials(container_cmd)
+            sanitized_env = build_sanitized_child_env()
+        except ChildEnvironmentIsolationError as exc:
+            return _cisl_fail_receipt(
+                error_code="CHILD_ENVIRONMENT_ISOLATION_BLOCKED",
+                container_image=container_image,
+                container_runtime=container_runtime,
+                pre_snapshot_hashes=pre_snapshot_hashes,
+                post_snapshot_hashes=dict(pre_snapshot_hashes),
+                host_git_diff_check_passed=host_git_diff_check_passed,
+                host_git_diff_output=host_git_diff_output,
+                commands_executed=commands_executed,
+                log_text=f"BLOCKED: {exc}",
+            )
+
+        try:
+            res = runner(
+                container_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+                env=sanitized_env,
+            )
+        except subprocess.TimeoutExpired:
+            try:
+                runner(
+                    [runtime_bin, "rm", "-f", container_name],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                    env=sanitized_env,
+                )
+            except Exception:
+                pass
+            post_hashes = _hash_workspace_files(ws_real)
+            return _cisl_fail_receipt(
+                error_code="CONTAINER_TIMEOUT",
+                container_image=container_image,
+                container_runtime=container_runtime,
+                pre_snapshot_hashes=pre_snapshot_hashes,
+                post_snapshot_hashes=post_hashes,
+                snapshot_immutable=post_hashes == pre_snapshot_hashes,
+                host_git_diff_check_passed=host_git_diff_check_passed,
+                host_git_diff_output=host_git_diff_output,
+                commands_executed=commands_executed,
+                log_text="TIMEOUT: Container verification timed out",
+            )
+        except OSError as exc:
+            post_hashes = _hash_workspace_files(ws_real)
+            return _cisl_fail_receipt(
+                error_code=CONTAINER_VERIFIER_UNAVAILABLE,
+                container_image=container_image,
+                container_runtime=container_runtime,
+                pre_snapshot_hashes=pre_snapshot_hashes,
+                post_snapshot_hashes=post_hashes,
+                snapshot_immutable=post_hashes == pre_snapshot_hashes,
+                host_git_diff_check_passed=host_git_diff_check_passed,
+                host_git_diff_output=host_git_diff_output,
+                commands_executed=commands_executed,
+                log_text=f"ERROR: Container execution failed: {exc}",
+            )
+
+    copy_overhead_ms = 0.0
+    parsed_exit_codes: tuple[int, ...] | None = None
+    clean_lines: list[str] = []
+    for line in (res.stdout or "").splitlines():
+        if line.startswith("__AIPC_COPY_OVERHEAD_MS__="):
+            try:
+                copy_overhead_ms = float(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("__AIPC_EXIT_CODES__="):
+            try:
+                raw_codes = json.loads(line.split("=", 1)[1].strip())
+                if isinstance(raw_codes, list):
+                    parsed_exit_codes = tuple(int(c) for c in raw_codes)
+            except (ValueError, TypeError):
+                pass
+        else:
+            clean_lines.append(line)
+
+    stdout_clean = "\n".join(clean_lines)
+    stderr_clean = res.stderr or ""
+    log_text = stdout_clean + ("\n" + stderr_clean if stderr_clean else "")
+
+    if parsed_exit_codes is not None:
+        exit_codes = parsed_exit_codes
+    elif res.returncode == 0:
+        exit_codes = tuple(0 for _ in normalized_commands)
+    else:
+        exit_codes = (int(res.returncode),)
+
+    has_pytest = any("pytest" in cmd for cmd in normalized_commands)
+    tests_summary: TestSummary | None = None
+    if has_pytest:
+        try:
+            tests_summary = PytestResultParser().parse(log_text)
+        except Exception:
+            if res.returncode != 0:
+                tests_summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
+
+    # Step 5: Post-Verification SHA-256 Snapshot Immutability
+    post_snapshot_hashes = _hash_workspace_files(ws_real)
+    cache_created = (ws_real / ".pytest_cache").exists() or any(ws_real.rglob("__pycache__"))
+    snapshot_immutable = post_snapshot_hashes == pre_snapshot_hashes and not cache_created
+    if not snapshot_immutable:
+        return ContainerSnapshotVerificationReceipt(
+            passed=False,
+            error_code="SNAPSHOT_IMMUTABILITY_VIOLATION",
+            pre_snapshot_hashes=pre_snapshot_hashes,
+            post_snapshot_hashes=post_snapshot_hashes,
+            snapshot_immutable=False,
+            host_git_diff_check_passed=host_git_diff_check_passed,
+            host_git_diff_output=host_git_diff_output,
+            container_image=container_image,
+            container_runtime=container_runtime,
+            staging_tmpfs_path="/tmp/work",
+            pytest_basetemp="/tmp/pytest",
+            git_mounted_in_container=False,
+            commands_executed=commands_executed,
+            exit_codes=exit_codes,
+            tests_summary=tests_summary,
+            log_text=f"SNAPSHOT_IMMUTABILITY_VIOLATION: workspace mutated\n{log_text}".strip(),
+            copy_overhead_ms=copy_overhead_ms,
+        )
+
+    passed = res.returncode == 0 and all(rc == 0 for rc in exit_codes)
+    return ContainerSnapshotVerificationReceipt(
+        passed=passed,
+        error_code=None if passed else "CONTAINER_VERIFICATION_FAILED",
+        pre_snapshot_hashes=pre_snapshot_hashes,
+        post_snapshot_hashes=post_snapshot_hashes,
+        snapshot_immutable=True,
+        host_git_diff_check_passed=host_git_diff_check_passed,
+        host_git_diff_output=host_git_diff_output,
+        container_image=container_image,
+        container_runtime=container_runtime,
+        staging_tmpfs_path="/tmp/work",
+        pytest_basetemp="/tmp/pytest",
+        git_mounted_in_container=False,
+        commands_executed=commands_executed,
+        exit_codes=exit_codes,
+        tests_summary=tests_summary,
+        log_text=log_text,
+        copy_overhead_ms=copy_overhead_ms,
+    )
 
 
 class AntigravityCliTransport:
@@ -887,6 +1440,42 @@ sys.addaudithook(audit_hook)
             summary = TestSummary(total=1, passed=0, failed=1, skipped=0)
         passed = res.returncode == 0 and summary.failed == 0 and summary.passed > 0
         return passed, summary, log_text
+
+    def run_cisl_snapshot_verification(
+        self,
+        *,
+        turn_id: str,
+        workspace: Path,
+        commands: Sequence[tuple[str, ...] | str],
+        in_scope_paths: Sequence[str] | None = None,
+        out_of_scope_paths: Sequence[str] | None = None,
+        forbidden_paths: Sequence[str] | None = None,
+        changed_paths: Sequence[str] | None = None,
+        pre_config_digests: dict[str, str] | None = None,
+        timeout_seconds: int | None = None,
+        docker_checker: Callable[..., dict[str, object]] | None = None,
+        subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    ) -> ContainerSnapshotVerificationReceipt:
+        """Run CISL01 immutable snapshot & tmpfs Linux Docker verification."""
+        return run_cisl_container_snapshot_verifier(
+            workspace=workspace,
+            commands=commands,
+            turn_id=turn_id,
+            state_root=self.config.state_root,
+            container_image=self.container_image or DEFAULT_CISL_VERIFIER_IMAGE,
+            container_runtime=self.container_runtime,
+            timeout_seconds=(
+                timeout_seconds if timeout_seconds is not None else self.config.operation_timeout
+            ),
+            in_scope_paths=in_scope_paths,
+            out_of_scope_paths=out_of_scope_paths,
+            forbidden_paths=forbidden_paths,
+            changed_paths=changed_paths,
+            pre_config_digests=pre_config_digests,
+            allow_config_mutation=self.allow_config_mutation,
+            docker_checker=docker_checker,
+            subprocess_runner=subprocess_runner,
+        )
 
     def _run_container_verification(
         self,
@@ -1597,9 +2186,14 @@ __all__ = [
     "ALLOW_RULES",
     "AntigravityCliTransport",
     "AntigravityNormalizer",
+    "CONTAINER_VERIFIER_UNAVAILABLE",
+    "ContainerSnapshotVerificationReceipt",
+    "DEFAULT_CISL_VERIFIER_IMAGE",
     "DENY_RULES",
     "antigravity_runtime_plan",
     "check_build_config_mutations",
+    "normalize_cisl_container_command",
+    "run_cisl_container_snapshot_verifier",
     "scan_workspace_integrity",
     "snapshot_build_and_hook_configs",
 ]

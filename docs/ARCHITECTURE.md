@@ -245,3 +245,27 @@ dispatch, including same-attempt recovery replay, revalidate the grant without d
 A budget-exhausted BLOCKED queue task can use resume_after_budget_extension only with a verified,
 unspent, unexpired task/path-matching grant; unrelated BLOCKED reasons remain non-resumable.
 Legacy private ledger states missing the required grant accounting fail closed.
+
+## Milestone C.6 — Containerized Inner Self-Correction Loop (`CISL01`–`CISL03`)
+
+Milestone C.6 introduces an optional, controller-owned containerized inner verification and
+self-correction loop inside `AntigravitySubscriptionWorkerAutomation` while preserving `PhaseGate`,
+C03 `TrustedAcceptanceHarnessValidator`, and canonical domain models untouched:
+
+- **Immutable Snapshot & `tmpfs` Container Verifier (`aipc.adapters.gemini.antigravity_transport`,
+  `aipc.adapters.gemini.doctor`)**: executes host pre-checks (`.env`, integrity, build-config guard,
+  scope/forbidden paths, secret scan, and host-side `git diff --check`), computes a pre-verification
+  SHA-256 workspace snapshot, copies source from a read-only bind mount (`/workspace:ro` with `.git`
+  masked out) to an ephemeral `/tmp/work` `tmpfs` inside a `--network none --read-only` non-root
+  Linux Docker container (`aipc-cisl-verify:py313-v1`), and verifies 100% post-run SHA-256 snapshot
+  immutability. Missing Docker or verifier images fail closed (`CONTAINER_VERIFIER_UNAVAILABLE`).
+- **Bounded Inner Self-Correction Governed by C.5 Central Ledger (`aipc.controller.repair_budget`,
+  `aipc.adapters.subscription_worker`)**: enforces at most `2` inner self-correction passes per
+  outer attempt (`max 3` real worker invocations per outer attempt), tracked in an independent
+  per-attempt sub-budget window (`inner_corrections_by_attempt[str(outer_attempt)]`) while reserving
+  and consuming every real worker invocation in `c5_central_governance_ledger` against permanent
+  task-root (`9`), milestone (`30`), and global (`30`) aggregate caps. Container diagnostic output
+  is sanitized, secret-redacted, and wrapped inside passive untrusted-data delimiters
+  (`format_untrusted_cisl_diagnostic_feed`). Scope violations write external forensic SHA-256
+  evidence before reverting unauthorized edits, and durable pass checkpoints prevent duplicate
+  worker invocations or double-charging across mid-loop quota interruptions and process restarts.
