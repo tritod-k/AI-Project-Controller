@@ -1,4 +1,33 @@
-## Tier-2 remediation02 final verification — 2026-11-18 (authoritative current)
+## Milestone C.6 (`CISL01`–`CISL03`) Pre-Freeze Verification Handoff — 2026-11-18 (authoritative current)
+
+- **Current phase:** AIPC 2.0 Milestone C.6 — Containerized Inner Self-Correction Loop (`CISL01`–`CISL03`), attempt `01`.
+- **Status:** `AWAITING_REVIEW`
+- **Phase-gate state:** `PENDING` (no worker or supervisor self-approval; final exact-SHA GitHub Actions CI, single fresh read-only cross-provider Independent Review, and Human Commander `K.TRITOD` merge authorization govern release).
+- **Last stable checkpoint:** `a66d19f2dbf3fe806317472c5599b2e0a381175e` at `H:/AIPC_Workspace/stable_c` (promoted via guarded fast-forward `git merge --ff-only` from `4b0d19e3fd3ee30d06f9731ae90564581204f2be` after confirming PR #8 merged into `master` and post-merge GitHub Actions CI run `44275785536` succeeded on Python 3.12 & 3.13; recorded in `H:/AIPC_Workspace/runtime_c/audit/c6_stable_promotion_pass.json` + `.sha256` `6bee58a19766f7908b980f2301dc4aeeb9bd8be4e73175b1268da7a1103829eb`). `stable_c` remains clean and untouched.
+- **Current branch / worktree:** `gemini/aipc-2.0-milestone-c6` in `H:/000ProjectCode/AI_Project_Controller`.
+- **Last commit (pre-CISL03 final freeze):** `c260bb605df4f477f789b1c113b38ee0c4c2c954` (`CISL02`), following `36e1d8bc63dcd1b244c57c173734015d0c7ce561` (`CISL01`) and `2f21d0ffa5d362535dbca9fc9128782f4f8bc185` (Section 2 scope bootstrap). Exact final frozen `CISL03` commit SHA is recorded externally in `H:/AIPC_Workspace/runtime_c/audit/c6_final_frozen_manifest.json`.
+- **Completed phases / milestones:** Phases 00–24, AIPC 2.0 Milestone A (`A01`–`A04`, PR #5 `ff1fa4a`), Milestone B (`B01`–`B03`, PR #6 `849c866`), Milestone C (`C01`–`C03`, PR #7 `4b0d19e`), Milestone C.5 (`RG01`–`RG04`, PR #8 `a66d19f`).
+- **Current work (Milestone C.6 `CISL01`–`CISL03`):**
+  - **Section 2 Scope Bootstrap (`2f21d0ff`, worker `df524db0-0b3e-4835-998a-6679473ab826`):** Authorized `milestone-c6` (`c.6`, `cisl01`–`cisl03`) while keeping `milestone-c7` (`rce01`–`rce03`) and `milestone-d` (`d01`–`d03`) strictly blocked (`15 passed`).
+  - **`CISL01` (`36e1d8bc`, worker `58b05be0-4cf4-4538-a58f-d7c9078b398e`):** Implemented controller-owned pre/post SHA-256 snapshot immutability verification, host-side `git diff --check`, and copy-to-`/tmp/work` `tmpfs` execution inside `--network none --read-only --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges` Linux Docker (`aipc-cisl-verify:py313-v1`, digest `sha256:4dec47c948a82485a3c940ff6a8bd48f79f3cf550b388ed2310a4bda703762d9`) with fail-closed `CONTAINER_VERIFIER_UNAVAILABLE` (`7 passed`).
+  - **`CISL02` (`c260bb60`, worker `5281efa0-a8e0-4a72-806d-1776bfd1e653`):** Implemented `inner_correction_governance` in `src/aipc/controller/repair_budget.py` and `src/aipc/adapters/subscription_worker.py` (max `2` inner self-corrections per outer attempt, independent from `2` outer repairs, every real worker invocation reserved and consumed in `c5_central_governance_ledger`, prompt-injection-safe diagnostic wrapping, forensic scope rollback, anti-thrashing early stop, and mid-loop quota/restart checkpoint recovery; `8 passed`).
+  - **`CISL03` (worker `0fbd20b8-4ea3-479a-997d-b08d53cdd4d2`):** Implemented all 8 mandatory security, prompt-injection, out-of-scope touch, mid-loop quota/restart recovery, inner/aggregate budget exhaustion, C03/PhaseGate veto, source-hash immutability, and measured A/B Supervisor Intervention Reduction (`1` outer attempt / `0` supervisor interventions with CISL enabled vs. `2` outer attempts / `1` supervisor intervention with CISL disabled) tests in `tests/unit/test_c6_cisl03_acceptance_ab.py` (`8 passed`) plus Milestone C.6 documentation.
+- **Tests & static verification (all executed via `.venv\Scripts\python.exe -B -m tools.sanitized_exec` with `PYTHONDONTWRITEBYTECODE=1`):**
+  - Full C.6 + C.5 (`RG01`–`RG04`) + Legacy `B01`/`B02`/`B03`/`C01`/`C02`/`C03` + Gemini Transport + Domain Schema Suite: **`384 passed, 1 skipped, 4 warnings in 608.24s (0:10:08)`**, exit code `0`.
+  - Domain & Project Schema Contracts (`test_domain_schemas.py`, `test_project_schemas.py`): **`44 passed in 6.55s`**, exit code `0`.
+  - Whole-repository `ruff check .`: `All checks passed!`, exit code `0`.
+  - Whole-repository `ruff format --check .`: `331 files already formatted`, exit code `0`.
+  - Offline wheel build (`pip wheel --no-index --no-deps --no-build-isolation`): `ai_project_controller-0.0.1-py3-none-any.whl` (`sha256=162e310b17c384ee7b98b1731286098c4ab9555b15d2102287d57188240ba032`), exit code `0`.
+  - `git diff --check`: clean, exit code `0`.
+- **Supervisor repair usage & governance ledger:** `H:/AIPC_Workspace/runtime_c/milestone_c6/supervised_repair_usage.json` records `3/18` Tier-1 repairs consumed (`task-cisl01-verifier = 1/6`, `task-cisl02-inner-loop = 1/6`, `task-cisl03-acceptance = 1/6`), `0/2` Tier-2 cycles, zero counter reset.
+- **Remaining work / next action:** Commit & freeze final `CISL03` Candidate HEAD SHA, push `gemini/aipc-2.0-milestone-c6`, confirm exact-SHA GitHub Actions CI (`SUCCESS` on Python 3.12 & 3.13), execute **exactly ONE** fresh `--ephemeral` `--sandbox read-only` cross-provider Independent Review, and open the Milestone C.6 Pull Request targeting `master` without merging.
+- **Known issues / required fixes:** None in local verification. Milestone C.7 (`RCE01`–`RCE03`) and Milestone D (`D01`–`D03`) remain strictly blocked and unauthorized. Release classification remains `EXPERIMENTAL / SUPERVISED` (unattended production `NO-GO`).
+- **Recovery notes:** Canonical queue state is persisted in `H:/AIPC_Workspace/runtime_c/milestone_c6/canonical_queue.json` (`DEFERRED` pending final exact-SHA independent review). Post-freeze CI, review, and PR receipts are stored externally in `H:/AIPC_Workspace/runtime_c/audit/`.
+- **Timestamp:** `2026-11-18T18:22:00+07:00` (`Asia/Bangkok`).
+
+## Historical snapshots (retained; superseded by the section above)
+
+## Tier-2 remediation02 final verification — 2026-11-18 (superseded)
 
 - Phase: Milestone C.5 RG01–RG04, supervised attempt01 / Tier-2 Cycle2/2. Status: AWAITING_REVIEW. Phase Gate: PENDING. No worker self-approval or stable promotion.
 - Authority: audit/c5_commander_tier2_remediation_grant_02.json + SHA256 unfreezes only RG03-01-REMAINING from 08dfa738d3100e1e64bceb081ed4ad3973b72e75; exact five source/test paths plus prefreeze docs. Original grant01 and authorized B03 amendment retained unchanged.
