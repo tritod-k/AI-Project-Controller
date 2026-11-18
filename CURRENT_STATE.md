@@ -1,3 +1,16 @@
+## C.7 verified scope bootstrap checkpoint — 2026-11-18T20:26:16.6624393+07:00 (authoritative current)
+
+- Current phase: Milestone C.7 bootstrap completed locally; RCE01 next. Status: IN_PROGRESS. Phase Gate: PENDING. No worker self-approval or C.7 release acceptance.
+- Commander restart/bridge grant: audit/c7_commander_bootstrap_restart_and_bridge_grant.json + SHA256. Candidate branch gemini/aipc-2.0-milestone-c7; Stable remains clean f98846e8639b3ab846afe49454a6f79f6b236c36. Agent policy348d53f and restart-statefe3e250 committed before worker dispatch.
+- Fresh verification:44 passed in2.28s (bootstrap_local3_tests.log); Ruff check exit0; Ruff format --check4 files formatted exit0; git diff --check exit0. The three authorized bootstrap defects are corrected. Original legacy tests unchanged.
+- Worker provenance: genuine Stable-managed Hydrogen session593ebe1d-1b9e-411b-8ef7-cd4504dc4dd0 raw SUCCESS; receipt serialization blocked by scanner matching the harmless typed dummy fixture name blocked_token. Local repair renamed it blocked_scope and shortened one101-column comment; scanner unchanged. No fabricated WorkerAutomationReceipt; raw output and host verification retained separately.
+- Counters: Tier1 4/18 (task-rce011; dedicated bootstrap-c7=3/6), Tier2 0/2; logical grant label bootstrap_c7 maps to canonical Identifier bootstrap-c7, no reset. Source/test partials recovered rather than restarted.
+- Candidate canonical queue and C.5 ledger initialized and validated by a separate Candidate interpreter; imports resolve inside Candidate. Imported total4/18 exactly. Stable dispatch receives no C.7 queue/policy flags under explicit bridge grant.
+- Docker execution smoke PASS (Python3.13.18, --rm --network none, c7_docker_smoke.json+SHA256). Full C.6 verifier on checkout rejected .env.example as ENV_FILE_VIOLATION (receipt retained); source file remains untouched. Next verify a manifest-bound external source snapshot excluding environment templates, without modifying guard or original checkout.
+- Completed historical work remains in earlier sections. Current source commit is this bootstrap checkpoint (exact SHA recorded in external progress after commit); last Stable checkpoint f98846e. RCE01/RCE02/RCE03, full regressions/schema/wheel/exact-SHA C.7 CI/review/PR remain pending. Milestone D blocked.
+- Next action: manifest-bound Docker verification; bounded RCE01 then RCE02 then RCE03; fresh quota checks at each boundary. Automation ACTIVE for reset safety. Timestamp:2026-11-18T20:26:16.6624393+07:00 (Asia/Bangkok).
+
+---
 ## Milestone C.7 Commander-authorized bootstrap restart — 2026-11-18T20:19:04.5842121+07:00 (authoritative current)
 
 - Current phase: Milestone C.7 bootstrap before RCE01–RCE03. Status: IN_PROGRESS. Phase Gate: PENDING. Attempt01, dedicated bootstrap_c7 local verification1/6; cumulative Tier1 2/18, Tier2 0/2; no counter reset.
