@@ -264,6 +264,28 @@ def _contract_scope_digest(contract: ApprovedTaskContract) -> Digest:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _criterion_verification_evidence_refs(
+    context: ReviewContext,
+    criterion_id: str,
+) -> list[str]:
+    """Select collected evidence IDs linked to a criterion via trusted context rules."""
+    from aipc.review.governance_triage import _trusted_criterion_evidence_refs
+
+    rules_by_criterion = {rule.criterion_id: rule for rule in context.rules}
+    trusted_refs = _trusted_criterion_evidence_refs(context, rules_by_criterion, criterion_id)
+    if not trusted_refs:
+        return []
+    return [
+        item.evidence_id
+        for item in context.evidence.items
+        if item.status == "collected"
+        and (
+            item.evidence_id in trusted_refs
+            or (item.path is not None and item.path in trusted_refs)
+        )
+    ]
+
+
 class MilestoneBRepairAndRecoveryOrchestrator:
     """Integrates B01/B02 with BoundedRepairCoordinator, RoleRegistry, and Handoff Recovery."""
 
@@ -792,6 +814,13 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         contract.task_id,
                         worker_id=selected_worker_binding.binding_id,
                         provider=selected_worker_binding.provider_id,
+                        repair_reservation_id=(
+                            current_repair_plan.repair_reservation_id
+                            if current_repair_plan is not None
+                            else None
+                        ),
+                        budget_ledger_path=self.repair_coordinator.budget_ledger_path,
+                        policy_trust_context=self.repair_coordinator.policy_trust_context,
                     )
                 attempt_num = task_rec.current_attempt
 
@@ -932,6 +961,11 @@ class MilestoneBRepairAndRecoveryOrchestrator:
 
             if not worker_outcome.verification_passed:
                 # Verification failure converts directly into bounded repair (or retry exhaustion)
+                eff_project = worker_outcome.review_context.project
+                eff_phase = next(
+                    (p for p in eff_project.phases if p.id == phase.id),
+                    eff_project.phases[0],
+                )
                 ver_fixes = worker_outcome.verification_failure_fixes or (
                     "Fix failing isolated verification tests before independent review.",
                 )
@@ -945,12 +979,15 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         CriterionResult(
                             criterion_id=c.id,
                             status="FAIL",
-                            evidence=[],
+                            evidence=_criterion_verification_evidence_refs(
+                                worker_outcome.review_context,
+                                c.id,
+                            ),
                             notes="Isolated verification failed prior to reviewer gate.",
                         )
-                        for c in phase.acceptance_criteria
+                        for c in eff_phase.acceptance_criteria
                     ],
-                    failed_criteria=[c.id for c in phase.acceptance_criteria],
+                    failed_criteria=[c.id for c in eff_phase.acceptance_criteria],
                     required_fixes=list(ver_fixes),
                     risks=["Isolated verification failed; repair required before review."],
                     next_phase_allowed=False,
@@ -1010,11 +1047,147 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                         reason=eval_res.reason,
                     )
 
-                eff_project = worker_outcome.review_context.project
-                eff_phase = next(
-                    (p for p in eff_project.phases if p.id == phase.id),
-                    eff_project.phases[0],
+                from aipc.controller.repair_coordinator import _is_c5_contract
+
+                is_governed = (
+                    _is_c5_contract(contract)
+                    or self.repair_coordinator.policy_trust_context is not None
+                    or self.repair_coordinator.budget_ledger_path is not None
+                    or self.repair_coordinator.enforce_repair_budget
                 )
+                bound_synth = None
+                triage_dec = None
+                verif_reservation_id: str | None = None
+                if is_governed:
+                    if self.repair_coordinator.policy_trust_context is None:
+                        raise ControllerError(
+                            "Governed verification-failure repair requires PolicyTrustContext"
+                        )
+                    from aipc.review import bind_review
+                    from aipc.review.context import review_provenance
+                    from aipc.review.governance_triage import (
+                        GovernanceTriageError,
+                        evaluate_review_triage,
+                    )
+
+                    bound_synth = bind_review(
+                        worker_outcome.review_context,
+                        synth_review,
+                        authority="controller-local-verification",
+                        reviewed=review_provenance(worker_outcome.review_context),
+                    )
+                    try:
+                        triage_dec = evaluate_review_triage(
+                            trust_context=self.repair_coordinator.policy_trust_context,
+                            contract=updated_rec.contract,
+                            context=worker_outcome.review_context,
+                            review=synth_review,
+                            bound_review=bound_synth,
+                        )
+                    except GovernanceTriageError as exc:
+                        raise ControllerError(
+                            f"Verification-failure governance triage failed: {exc}"
+                        ) from exc
+                    if not triage_dec.authorize_repair:
+                        held_rec = self.task_queue.hold_for_human_triage(
+                            contract.task_id,
+                            reason=triage_dec.reason,
+                        )
+                        eval_res = RepairCycleEvaluation(
+                            task_id=contract.task_id,
+                            attempt=attempt_num,
+                            candidate_sha=last_sha,
+                            checkpoint_id=worker_outcome.review_context.checkpoint.checkpoint_id,
+                            action="HOLD_FOR_HUMAN_TRIAGE",
+                            queue_status=held_rec.status,
+                            triage_decision=triage_dec,
+                            reason=triage_dec.reason,
+                        )
+                        repair_evals.append(eval_res)
+                        hoff = self.record_handoff_package(
+                            contract=contract,
+                            project_id=proj_id,
+                            attempt_number=attempt_num,
+                            candidate_sha=last_sha,
+                            worktree=worktree,
+                            binding=selected_worker_binding,
+                            role="worker",
+                            session_identity=worker_outcome.worker_session_id,
+                            boundary_stage="POST_VERIFICATION",
+                            next_authorized_action="HUMAN_MERGE_REVIEW",
+                            review_status="HUMAN_REVIEW_REQUIRED",
+                            test_receipts=worker_outcome.test_receipts,
+                            unresolved_findings=ver_fixes,
+                            model_actual_if_known=worker_outcome.model_actual,
+                        )
+                        handoffs.append(hoff)
+                        return MilestoneBOrchestrationResult(
+                            final_status="HUMAN_REVIEW_REQUIRED",
+                            task_id=contract.task_id,
+                            attempts_completed=attempt_num,
+                            final_candidate_sha=last_sha,
+                            latest_handoff=hoff,
+                            handoff_history=tuple(handoffs),
+                            role_failover_events=tuple(failover_events),
+                            repair_evaluations=tuple(repair_evals),
+                            reviewer_decisions=tuple(reviewer_decisions),
+                            reason=triage_dec.reason,
+                        )
+
+                    budget_dec = self.repair_coordinator.reserve_repair_budget_if_configured(
+                        task_rec=updated_rec,
+                        candidate_sha=last_sha,
+                        review_id=synth_review.review_id,
+                        route="VERIFICATION_FAILURE",
+                    )
+                    if budget_dec is not None and not budget_dec.allowed:
+                        halted_rec = self.task_queue.halt_on_budget_exhaustion(
+                            contract.task_id,
+                            reason=budget_dec.reason,
+                        )
+                        eval_res = RepairCycleEvaluation(
+                            task_id=contract.task_id,
+                            attempt=attempt_num,
+                            candidate_sha=last_sha,
+                            checkpoint_id=worker_outcome.review_context.checkpoint.checkpoint_id,
+                            action="HALT_ON_RETRY_EXHAUSTION",
+                            queue_status=halted_rec.status,
+                            triage_decision=triage_dec,
+                            reason=budget_dec.reason,
+                        )
+                        repair_evals.append(eval_res)
+                        hoff = self.record_handoff_package(
+                            contract=contract,
+                            project_id=proj_id,
+                            attempt_number=attempt_num,
+                            candidate_sha=last_sha,
+                            worktree=worktree,
+                            binding=selected_worker_binding,
+                            role="worker",
+                            session_identity=worker_outcome.worker_session_id,
+                            boundary_stage="POST_VERIFICATION",
+                            next_authorized_action="HALT_ON_RETRY_EXHAUSTION",
+                            review_status="REVISE",
+                            test_receipts=worker_outcome.test_receipts,
+                            unresolved_findings=ver_fixes,
+                            model_actual_if_known=worker_outcome.model_actual,
+                        )
+                        handoffs.append(hoff)
+                        return MilestoneBOrchestrationResult(
+                            final_status="HALT_ON_RETRY_EXHAUSTION",
+                            task_id=contract.task_id,
+                            attempts_completed=attempt_num,
+                            final_candidate_sha=last_sha,
+                            latest_handoff=hoff,
+                            handoff_history=tuple(handoffs),
+                            role_failover_events=tuple(failover_events),
+                            repair_evaluations=tuple(repair_evals),
+                            reviewer_decisions=tuple(reviewer_decisions),
+                            reason=budget_dec.reason,
+                        )
+                    if budget_dec is not None and budget_dec.reservation is not None:
+                        verif_reservation_id = budget_dec.reservation.reservation_id
+
                 current_repair_plan = self.repair_coordinator._build_repair_plan(
                     task_rec=updated_rec,
                     project=eff_project,
@@ -1023,6 +1196,10 @@ class MilestoneBRepairAndRecoveryOrchestrator:
                     review=synth_review,
                     previous_task_id=worker_outcome.review_context.task.task_id,
                     candidate_sha=last_sha,
+                    triage_decision=triage_dec,
+                    context=worker_outcome.review_context if is_governed else None,
+                    bound_review=bound_synth,
+                    repair_reservation_id=verif_reservation_id,
                 )
                 eval_res = RepairCycleEvaluation(
                     task_id=contract.task_id,

@@ -9,6 +9,7 @@ import hmac
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,10 @@ from aipc.controller.self_dev_runner import (
     CandidateVerificationReceipt,
     StableCandidateConfig,
     _write_candidate_isolation_bootstrap,
+)
+from aipc.controller.task_queue import (
+    load_milestone_authorization_evidence,
+    verify_milestone_authorization_scope,
 )
 from aipc.domain.enums import ChangeType, CriterionStatus, ReviewVerdict
 from aipc.domain.models import (
@@ -62,6 +67,23 @@ UNAUTHORIZED_MILESTONE_PREFIXES: tuple[str, ...] = (
     "d02",
     "d03",
 )
+_MILESTONE_C5_IDS: frozenset[str] = frozenset(
+    {"milestone-c5", "milestone_c5", "milestone-c.5", "milestone_c.5", "c.5"}
+)
+_MILESTONE_C5_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]c\.?5|workstream[-_]c\.?5|c\.5|rg0[1-4])(?![0-9])"
+)
+_UNAUTHORIZED_FUTURE_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)|"
+    r"rg(?:00|0[5-9]|[1-9]\d)|phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
+    r"milestone[-_][d-z](?![a-z]))(?![0-9])"
+)
+_UNAUTHORIZED_FUTURE_TASK_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:d(?:0[1-9]|[1-9]\d)|"
+    r"rg(?:00|0[5-9]|[1-9]\d)|phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
+    r"milestone[-_][d-z](?![a-z]))(?![0-9])"
+)
+_LEGACY_MILESTONE_C_TASK_LABEL_RE = re.compile(r"^task[-_]c\d{2}[-_][a-z][a-z0-9_-]*$")
 
 _DEFAULT_PROTECTED_HARNESS_GLOBS: tuple[NonBlank, ...] = (
     "tests/acceptance/**",
@@ -120,21 +142,32 @@ def _normalize_criterion_test_nodes(
     return normalized
 
 
-def _contains_unauthorized_prefix(value: str) -> bool:
+def _contains_unauthorized_prefix(
+    value: str,
+    *,
+    allow_legacy_c_task_label: bool = False,
+) -> bool:
     norm = value.strip().lower()
-    return any(prefix in norm for prefix in UNAUTHORIZED_MILESTONE_PREFIXES)
+    if any(prefix in norm for prefix in UNAUTHORIZED_MILESTONE_PREFIXES):
+        return True
+    if allow_legacy_c_task_label and _LEGACY_MILESTONE_C_TASK_LABEL_RE.fullmatch(norm):
+        return bool(_UNAUTHORIZED_FUTURE_TASK_TOKEN_RE.search(norm))
+    return bool(_UNAUTHORIZED_FUTURE_TOKEN_RE.search(norm))
 
 
 def assert_milestone_c_scope_authorized(
     milestone_id: str,
     phase_id: str | None = None,
     task_id: str | None = None,
+    *,
+    approval_id: str | None = None,
+    approval_evidence_path: Path | str | None = None,
+    project_id: str | None = None,
+    in_scope_paths: Sequence[str] | None = None,
 ) -> None:
     """Fail closed if Milestone D or any unauthorized milestone scope is referenced."""
     norm_milestone = milestone_id.strip().lower()
-    if _contains_unauthorized_prefix(norm_milestone) or (
-        norm_milestone not in AUTHORIZED_MILESTONE_IDS
-    ):
+    if _contains_unauthorized_prefix(norm_milestone):
         raise ValueError(
             f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' is not authorized"
         )
@@ -143,10 +176,58 @@ def assert_milestone_c_scope_authorized(
             f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: phase_id '{phase_id}' references "
             "unauthorized Milestone D scope"
         )
-    if task_id is not None and _contains_unauthorized_prefix(task_id):
+    if task_id is not None and _contains_unauthorized_prefix(
+        task_id,
+        allow_legacy_c_task_label=norm_milestone == "milestone-c",
+    ):
         raise ValueError(
             f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
             "unauthorized Milestone D scope"
+        )
+
+    if norm_milestone in _MILESTONE_C5_IDS:
+        if approval_evidence_path is None or not str(approval_evidence_path).strip():
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' requires "
+                "persisted C.5 approval evidence"
+            )
+        effective_phase = phase_id
+        if effective_phase is None and task_id is not None:
+            m = re.search(r"(?<![a-z0-9])(rg0[1-4])(?![0-9])", task_id.strip().lower())
+            if m is not None:
+                effective_phase = m.group(1)
+        try:
+            evidence = load_milestone_authorization_evidence(
+                Path(str(approval_evidence_path).strip())
+            )
+            verify_milestone_authorization_scope(
+                evidence,
+                project_id=project_id or evidence.project_id,
+                milestone_id=milestone_id,
+                phase_id=effective_phase or evidence.authorized_workstreams[0],
+                in_scope_paths=in_scope_paths or (),
+                expected_approval_id=approval_id,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' "
+                f"authorization failed ({exc})"
+            ) from exc
+        return
+
+    if norm_milestone not in AUTHORIZED_MILESTONE_IDS:
+        raise ValueError(
+            f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' is not authorized"
+        )
+    if phase_id is not None and _MILESTONE_C5_TOKEN_RE.search(phase_id.strip().lower()):
+        raise ValueError(
+            f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: phase_id '{phase_id}' references "
+            "Milestone C.5 scope under non-C.5 milestone"
+        )
+    if task_id is not None and _MILESTONE_C5_TOKEN_RE.search(task_id.strip().lower()):
+        raise ValueError(
+            f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
+            "Milestone C.5 scope under non-C.5 milestone"
         )
 
 
@@ -161,6 +242,8 @@ def _compute_manifest_digest(
     require_behavioral_assertions: bool = True,
     forbid_test_deletion: bool = True,
     criterion_test_nodes: Mapping[str, Sequence[str] | str] | None = None,
+    approval_id: str | None = None,
+    approval_evidence_path: str | None = None,
 ) -> str:
     """Compute canonical SHA-256 digest over TrustedHarnessManifest policy fields."""
     norm_nodes = _normalize_criterion_test_nodes(criterion_test_nodes)
@@ -180,6 +263,8 @@ def _compute_manifest_digest(
             *payload,
             {k: list(v) for k, v in sorted(norm_nodes.items())},
         )
+    if approval_id is not None or approval_evidence_path is not None:
+        payload = (*payload, approval_id, approval_evidence_path)
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -198,6 +283,8 @@ class TrustedHarnessManifest(CanonicalRecord):
     manifest_authority: Literal["trusted_operator", "stable_controller"] = "trusted_operator"
     manifest_digest: Digest | None = None
     trusted_manifest_path: str | None = None
+    approval_id: str | None = None
+    approval_evidence_path: str | None = None
     protected_harness_globs: tuple[NonBlank, ...] = _DEFAULT_PROTECTED_HARNESS_GLOBS
     pinned_file_sha256: dict[str, Digest] = Field(default_factory=dict)
     pre_workspace_snapshot: dict[str, Digest] = Field(default_factory=dict)
@@ -230,7 +317,12 @@ class TrustedHarnessManifest(CanonicalRecord):
 
     @model_validator(mode="after")
     def validate_manifest(self) -> Self:
-        assert_milestone_c_scope_authorized(self.milestone_id)
+        assert_milestone_c_scope_authorized(
+            self.milestone_id,
+            approval_id=self.approval_id,
+            approval_evidence_path=self.approval_evidence_path,
+            project_id=self.project_id,
+        )
         if not self.pinned_file_sha256:
             raise ValueError(
                 "TrustedHarnessManifest requires at least one pinned_file_sha256 entry"
@@ -247,6 +339,8 @@ class TrustedHarnessManifest(CanonicalRecord):
                 self.require_behavioral_assertions,
                 self.forbid_test_deletion,
                 self.criterion_test_nodes,
+                self.approval_id,
+                self.approval_evidence_path,
             )
             if self.manifest_digest != expected_digest:
                 raise ValueError(f"{TRUSTED_HARNESS_TAMPER_DETECTED}: manifest_digest mismatch")
@@ -420,10 +514,26 @@ def build_trusted_harness_manifest(
     forbid_test_deletion: bool = True,
     trusted_manifest_file: Path | None = None,
     trusted_manifest_dir: Path | None = None,
+    approval_id: str | None = None,
+    approval_evidence_path: Path | str | None = None,
 ) -> TrustedHarnessManifest:
     """Build a TrustedHarnessManifest with SHA-256 digests of protected files in workspace."""
-    assert_milestone_c_scope_authorized(milestone_id)
     workspace_root = Path(workspace).resolve()
+    approval_path_str: str | None = None
+    if approval_evidence_path is not None:
+        resolved_approval = Path(approval_evidence_path).resolve()
+        if resolved_approval == workspace_root or resolved_approval.is_relative_to(workspace_root):
+            raise ValueError(
+                f"{TRUSTED_HARNESS_TAMPER_DETECTED}: approval_evidence_path "
+                "must not reside inside candidate workspace"
+            )
+        approval_path_str = str(resolved_approval)
+    assert_milestone_c_scope_authorized(
+        milestone_id,
+        approval_id=approval_id,
+        approval_evidence_path=approval_path_str,
+        project_id=project_id,
+    )
     pinned: dict[str, str] = {}
     operator_tests: dict[str, bytes] = {}
     for rel_path in protected_rel_paths:
@@ -478,6 +588,8 @@ def build_trusted_harness_manifest(
         require_behavioral_assertions,
         forbid_test_deletion,
         norm_criterion_nodes,
+        approval_id,
+        approval_path_str,
     )
     manifest = TrustedHarnessManifest(
         manifest_id=resolved_manifest_id,
@@ -486,6 +598,8 @@ def build_trusted_harness_manifest(
         manifest_authority=manifest_authority,
         manifest_digest=manifest_digest_val,
         trusted_manifest_path=trusted_path_str,
+        approval_id=approval_id,
+        approval_evidence_path=approval_path_str,
         protected_harness_globs=protected_harness_globs,
         pinned_file_sha256=pinned,
         pre_workspace_snapshot=pre_snap,
@@ -550,6 +664,8 @@ def _verify_manifest_integrity(
         manifest.require_behavioral_assertions,
         manifest.forbid_test_deletion,
         manifest.criterion_test_nodes,
+        manifest.approval_id,
+        manifest.approval_evidence_path,
     )
     if manifest.manifest_digest is None or manifest.manifest_digest != expected_digest:
         findings.append(
@@ -3067,8 +3183,24 @@ class TrustedAcceptanceHarnessValidator:
         require_source_bound_receipts: bool = False,
     ) -> TrustedAcceptanceEvaluation:
         """Evaluate candidate changes and test evidence against TrustedHarnessManifest."""
-        assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
+        assert_milestone_c_scope_authorized(
+            manifest.milestone_id,
+            phase_id=review_context.task.phase_id if review_context is not None else None,
+            task_id=task_id,
+            approval_id=manifest.approval_id,
+            approval_evidence_path=manifest.approval_evidence_path,
+            project_id=manifest.project_id,
+        )
         workspace_root = Path(workspace).resolve()
+        if manifest.approval_evidence_path is not None:
+            resolved_approval = Path(manifest.approval_evidence_path).resolve()
+            if resolved_approval == workspace_root or resolved_approval.is_relative_to(
+                workspace_root
+            ):
+                raise ValueError(
+                    f"{TRUSTED_HARNESS_TAMPER_DETECTED}: approval_evidence_path "
+                    "must not reside inside candidate workspace"
+                )
         findings: list[RewardHackingFinding] = []
         tamper_detected = False
         reward_hacking_detected = False
@@ -3865,7 +3997,14 @@ class SelfDevelopmentDogfoodingCoordinator:
         criterion_test_nodes: Mapping[str, str | Sequence[str]] | None = None,
     ) -> DogfoodingAuditBundle:
         """Run trusted acceptance & isolation audit for a self-development candidate."""
-        assert_milestone_c_scope_authorized(manifest.milestone_id, task_id=task_id)
+        assert_milestone_c_scope_authorized(
+            manifest.milestone_id,
+            phase_id=review_context.task.phase_id if review_context is not None else None,
+            task_id=task_id,
+            approval_id=manifest.approval_id,
+            approval_evidence_path=manifest.approval_evidence_path,
+            project_id=manifest.project_id,
+        )
         s_root = Path(stable_candidate_config.stable_root).resolve()
         c_root = Path(stable_candidate_config.candidate_worktree_root).resolve()
         if s_root == c_root or s_root.is_relative_to(c_root) or c_root.is_relative_to(s_root):
