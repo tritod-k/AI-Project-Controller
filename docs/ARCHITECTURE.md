@@ -269,3 +269,26 @@ C03 `TrustedAcceptanceHarnessValidator`, and canonical domain models untouched:
   (`format_untrusted_cisl_diagnostic_feed`). Scope violations write external forensic SHA-256
   evidence before reverting unauthorized edits, and durable pass checkpoints prevent duplicate
   worker invocations or double-charging across mid-loop quota interruptions and process restarts.
+
+## Milestone C.7 — Runbook Compaction & Enforcement (`RCE01`–`RCE03`)
+
+Milestone C.7 strengthens operational isolation, external authority binding, and per-project
+runtime scaffolding while keeping `PhaseGate`, canonical domain models, and Stable (`stable_c`)
+unchanged:
+
+- **Decoupled Bridge & External Controller Authority (`aipc.controller.milestone_authorization`,
+  `RCE01`–`RCE02`):** `ControllerMilestoneAuthorizationRecord` and
+  `MilestoneAuthorizationTrustContext` bind `project_id`, `milestone_id`, `approved_scope`,
+  `approval_digest`, `commander_id`, expiry, and excluded roots to an external JSON record under
+  a Controller-owned trusted root. YAML files alone can never authorize a milestone. Provider-neutral
+  `model_states` and adapter `model_eligibility` prevent a rate-limited model from disabling
+  qualified siblings. Stable executes single-pass (`enable_cisl_inner_loop=false`) without C.7
+  policy flags, while a separate Candidate queue bridge manages the C.7 queue/ledger and
+  Candidate `--network none --read-only` Docker snapshot verifier (`aipc-cisl-verify:py313-v1`).
+- **Per-Project Scaffolding & Starter Templates (`aipc.project.scaffolding`, `templates/`,
+  `RCE03`):** Validates `PROJECT.yaml` (`ProjectDefinition` + canonical `Identifier`) and
+  `review_governance.yaml` (`ReviewGovernancePolicy`) while rejecting YAML milestone grants and
+  Milestone D scope. Deterministically and idempotently initializes external
+  `projects/<project_id>/runtime/{state,audit,worktrees}`, enforcing disjointness against
+  Candidate, Stable, candidate workspaces, and sibling project roots (rejecting traversal and
+  symlinks) and preserving all existing state, queue, ledger, receipt, lock, and unknown files.

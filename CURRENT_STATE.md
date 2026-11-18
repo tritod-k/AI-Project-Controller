@@ -1,3 +1,33 @@
+## C.7 RCE03 verified checkpoint — authoritative current
+
+- Current phase Milestone C.7, all RCE01/RCE02/RCE03 implementations verified locally. Status IN_PROGRESS; Phase Gate PENDING final exact-SHA independent review. Full regressions/static/schema/offline wheel next; CI/review/PR not started. No merge, auto-merge or Milestone D.
+- RCE03 genuine Stable-managed Hydrogen session3b9db1bd-7669-4042-adc4-06c9679e2cfa, valid scoped receipt, no noop/forbidden paths. Minimal external runtime layout, template validators, idempotency and project1/project2 state/queue/ledger/receipt isolation delivered. No registry database or UI/usage analytics.
+- One bounded local formatter repair local-rce03-format1 consumed own root1/6, preserving worker receipt and recording input/output/receipt hashes separately; no additional worker invocation or functional edits. Fresh Windows26 passed3.03s, Candidate Docker7 passed1.59s, Docker codes[0,0,0], immutable=true and bindings verified, Ruff check/format/diff0. Actual repository and H:/AIPC_Workspace/templates copies both validated; copied bytes/hash manifest retained, any prior bytes backed up.
+- Counters ZERO reset: Tier1=17/24; rce01=10/10, bootstrap3/6, rce02=3/6, rce03=1/6; Tier2=0/2. Seventeen actual historical worker invocations (central13 + historical bootstrap4), prior actual inner correction1; current explicitly authorized single-pass stages0 inner passes. Savings NOT_MEASURED.
+- Candidate gemini/aipc-2.0-milestone-c7; prior RCE01 commit68afc4c and RCE02 commit3056a103c3d367873dc68a2e9676b5c3e0022433. This RCE03 checkpoint SHA recorded externally after commit. Stable unchanged f98846e8639b3ab846afe49454a6f79f6b236c36. Original approvals, extension, restart, receipts/partials and repair history preserved.
+- External Controller record/trust context remains pinned outside Candidate/Stable and is used by Candidate queue bridge; PROJECT.yaml is never authorization. Native automation ACTIVE for02:30 Bangkok reset safety; stop threshold12%. Next action: full required verification, finalize docs BEFORE freezing, exact-SHA CI3.12/3.13, one fresh ephemeral read-only cross-provider RCE01 CLI review, PASS/zero blockers -> PR master, then pause automation.
+- Timestamp: 2026-11-18T23:37:27.1568497+07:00 (Asia/Bangkok).
+
+---
+## C.7 RCE03 pre-freeze implementation checkpoint — authoritative current
+
+- Current phase: Milestone C.7 (`RCE01`–`RCE03`); `RCE01` (`68afc4c946ed498754f5d01d3fd29251adf0bf0f`) and `RCE02` (`3056a103c3d367873dc68a2e9676b5c3e0022433`) verified, `RCE03` scaffolding/templates/docs authored. Status `IN_PROGRESS`; Phase Gate `PENDING`. No C.7 freeze, push, CI, live review, PR, merge, auto-merge, or Milestone D.
+- RCE03 implemented (in-scope 9 paths only, zero `__init__.py` edits):
+  - `src/aipc/project/scaffolding.py`: canonical `Identifier`, C01 `ProjectDefinition`, and `ReviewGovernancePolicy` template validators rejecting YAML-embedded milestone grants and Milestone D scope; deterministic, idempotent initializer for external `projects/<project_id>/runtime/{state,audit,worktrees}` enforcing disjointness against Candidate, Stable, candidate workspaces, and sibling project roots (rejecting traversal and symlinks) while preserving existing state, queue, budget-ledger, receipt, lock, and unknown files; narrow module CLI (`validate-templates`, `init`).
+  - `templates/PROJECT.yaml` and `templates/review_governance.yaml`: validated starter templates using plain dummy identifiers and zero YAML milestone grants (pending Supervisor copy to `H:/AIPC_Workspace/templates`).
+  - `tests/unit/test_c7_rce03_scaffolding.py`: unit tests for starter templates, `project1`/`project2` state/queue/budget-ledger/receipt/lock sentinel isolation, cross-project/Candidate/Stable/workspace overlap, traversal/symlink rejection, idempotent restart preservation, malformed/YAML-grant rejection, and module CLI.
+  - Pre-freeze docs: `CURRENT_STATE.md`, `docs/AIPC_2_0_MILESTONE_C7_EVIDENCE.md`, `docs/AIPC_2_0_MILESTONE_C7_COMPLETION_REPORT.md`, `docs/ARCHITECTURE.md`, and `docs/roadmaps/AIPC_2_0_UNIVERSAL_SUBSCRIPTION_ORCHESTRATION_ROADMAP.md`.
+- Verified prior stages & external authority:
+  - Bootstrap (`d161adb`): `44` passed (Windows + Docker).
+  - RCE01 (`68afc4c946ed498754f5d01d3fd29251adf0bf0f`): Windows `18` passed / Docker `18` passed.
+  - RCE02 (`3056a103c3d367873dc68a2e9676b5c3e0022433`): Windows `108` passed (`1` POSIX-only skip) / Docker `7` passed, Ruff + scanner + diff `0`, fresh import origins verified.
+  - External Controller record: `runtime_c/milestone_c7/controller_authority/c7_controller_record.json` (SHA-256 `457d88e08629ede9191f863dcdcf6d978829bc72d8aad157c05aa2a99fb8d0bb`, original Commander approval digest `cbec5cb98ca6d9c8176c86563bbe3d339e65a551c33a88bf2f2464e4577a4287`); separate Candidate queue bridge uses pinned external context; Stable (`H:/AIPC_Workspace/stable_c` at `f98846e8639b3ab846afe49454a6f79f6b236c36`) stays unchanged.
+- Bridge, CISL & recovery continuity: Stable executes single-pass (`enable_cisl_inner_loop=false`) without C.7-only policy flags, followed by Candidate `--network none --read-only` Docker snapshot verification (`aipc-cisl-verify:py313-v1`, image `b7b6ffb860ad`, excluding only `.env.example` from staging). Original `503 UNAVAILABLE` provider outage, guard/scope/scanner recoveries, and zero-reset counters are preserved.
+- Counters entering RCE03: Tier-1 `16/24` (`rce01=10/10` exhausted, `bootstrap-c7=3/6`, `rce02=3/6`, `rce03=0/6`); Tier-2 `0/2`; `16` historical actual workers prior to RCE03; `1` historical actual inner correction (RCE01 attempt 4), `0` inner passes in current decoupled stages.
+- Pending gates: `RCE03` Windows + Candidate Docker snapshot verification, full C7/C6/C5/B01–C03 regressions, schemas, offline wheel, exact-SHA CI (Python 3.12/3.13), single fresh ephemeral read-only cross-provider CLI review, and PR to `master` remain `PENDING`. Milestone D remains deferred.
+- Timestamp: `2026-11-18T23:29:00+07:00` (`Asia/Bangkok`).
+
+---
 ## C.7 RCE02 verified checkpoint — authoritative current
 
 - Current phase: Milestone C.7; RCE01/RCE02 local implementations complete, RCE03 next. Status IN_PROGRESS; Phase Gate PENDING final independent review. No C7 push/CI/review/PR, merge, auto-merge or Milestone D.

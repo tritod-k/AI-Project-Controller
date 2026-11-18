@@ -1,0 +1,33 @@
+schema_version: "1.0"
+project:
+  id: sample-python-app
+  name: Sample Python Application
+  workspace: .
+controller:
+  max_phase_retries: 2
+  stop_on_blocked: true
+agents:
+  planner: codex-planner
+  worker: gemini-worker
+  reviewer: codex-reviewer
+phases:
+  - id: phase-01
+    name: Bootstrap and Baseline Checks
+    objective: Validate repository layout, project contracts, and baseline unit tests.
+    depends_on: []
+    acceptance_criteria:
+      - id: ac-01-layout
+        statement: Repository structure and starter configuration pass schema validation.
+        required: true
+      - id: ac-01-tests
+        statement: Baseline unit tests pass inside isolated verification.
+        required: true
+  - id: phase-02
+    name: Feature Implementation
+    objective: Implement bounded feature changes within approved phase scope.
+    depends_on:
+      - phase-01
+    acceptance_criteria:
+      - id: ac-02-impl
+        statement: Feature implementation satisfies phase objective with zero secret exposure.
+        required: true
