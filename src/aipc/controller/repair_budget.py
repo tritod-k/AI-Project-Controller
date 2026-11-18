@@ -442,27 +442,7 @@ class RepairBudgetLedgerState(CanonicalRecord):
             payload = self.model_dump(mode="json", exclude={"state_digest"})
             expected_digest = _compute_ledger_state_digest(payload)
             if not hmac.compare_digest(self.state_digest, expected_digest):
-                no_c6_invocations = (
-                    self.milestone_worker_invocations_consumed == 0
-                    and self.global_worker_invocations_consumed == 0
-                    and all(
-                        c.worker_invocations_consumed == 0 and not c.inner_corrections_by_attempt
-                        for c in self.registered_roots.values()
-                    )
-                    and all(
-                        r.bucket == "OUTER_REPAIR"
-                        and r.inner_pass_index == 0
-                        and r.dispatch_claim_id is None
-                        for r in self.reservations.values()
-                    )
-                )
-                legacy_expected = (
-                    _compute_legacy_c5_ledger_state_digest(payload) if no_c6_invocations else None
-                )
-                if legacy_expected is None or not hmac.compare_digest(
-                    self.state_digest, legacy_expected
-                ):
-                    raise ValueError("repair budget ledger state_digest mismatch")
+                raise ValueError("repair budget ledger state_digest mismatch")
         _assert_no_secrets_local(self.model_dump(mode="json"))
         return self
 
@@ -494,9 +474,8 @@ def _compute_ledger_state_digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json_bytes(body)).hexdigest()
 
 
-def _compute_legacy_c5_ledger_state_digest(payload: Mapping[str, Any]) -> str:
-    c6_top_keys = {
-        "state_digest",
+_C6_LEDGER_TOP_KEYS = frozenset(
+    {
         "ledger_id",
         "max_inner_corrections_per_outer_attempt",
         "milestone_worker_invocations_consumed",
@@ -504,36 +483,32 @@ def _compute_legacy_c5_ledger_state_digest(payload: Mapping[str, Any]) -> str:
         "global_worker_invocations_consumed",
         "global_worker_invocations_limit",
     }
-    c6_root_keys = {
+)
+_C6_ROOT_COUNTER_KEYS = frozenset(
+    {
         "max_inner_corrections_per_outer_attempt",
         "inner_corrections_by_attempt",
         "worker_invocations_consumed",
         "worker_invocations_limit",
     }
-    c6_res_keys = {"bucket", "inner_pass_index", "dispatch_claim_id"}
+)
+_C6_RESERVATION_KEYS = frozenset({"bucket", "inner_pass_index", "dispatch_claim_id"})
 
-    legacy: dict[str, Any] = {k: v for k, v in payload.items() if k not in c6_top_keys}
-    raw_roots = legacy.get("registered_roots")
-    if isinstance(raw_roots, Mapping):
-        legacy["registered_roots"] = {
-            rk: (
-                {k: v for k, v in rv.items() if k not in c6_root_keys}
-                if isinstance(rv, Mapping)
-                else rv
-            )
-            for rk, rv in raw_roots.items()
-        }
-    raw_reservations = legacy.get("reservations")
-    if isinstance(raw_reservations, Mapping):
-        legacy["reservations"] = {
-            res_k: (
-                {k: v for k, v in res_v.items() if k not in c6_res_keys}
-                if isinstance(res_v, Mapping)
-                else res_v
-            )
-            for res_k, res_v in raw_reservations.items()
-        }
-    return hashlib.sha256(_canonical_json_bytes(legacy)).hexdigest()
+
+def _is_pure_legacy_c5_ledger_dict(raw: Mapping[str, Any]) -> bool:
+    if any(key in raw for key in _C6_LEDGER_TOP_KEYS):
+        return False
+    roots = raw.get("registered_roots")
+    if isinstance(roots, Mapping):
+        for rv in roots.values():
+            if isinstance(rv, Mapping) and any(key in rv for key in _C6_ROOT_COUNTER_KEYS):
+                return False
+    reservations = raw.get("reservations")
+    if isinstance(reservations, Mapping):
+        for rv in reservations.values():
+            if isinstance(rv, Mapping) and any(key in rv for key in _C6_RESERVATION_KEYS):
+                return False
+    return True
 
 
 def _compute_state_digest(state: RepairBudgetLedgerState) -> str:
@@ -939,14 +914,31 @@ class DurableRepairBudgetLedger:
             _assert_no_secrets_local(raw)
             if isinstance(raw, dict):
                 raw_digest = raw.get("state_digest")
-                if not raw_digest:
+                if not isinstance(raw_digest, str) or not raw_digest:
                     raise RepairBudgetError("Repair budget ledger missing required state_digest")
-                if "ledger_id" not in raw:
-                    if not isinstance(raw_digest, str) or not hmac.compare_digest(
-                        raw_digest, _compute_ledger_state_digest(raw)
-                    ):
+                if _is_pure_legacy_c5_ledger_dict(raw):
+                    if not hmac.compare_digest(raw_digest, _compute_ledger_state_digest(raw)):
                         raise RepairBudgetError("Repair budget ledger state_digest mismatch")
-                    state = RepairBudgetLedgerState.model_validate({**raw, "state_digest": None})
+                    raw_roots = raw.get("registered_roots", {})
+                    if isinstance(raw_roots, Mapping):
+                        migrated_roots: Any = {}
+                        for rk, rv in raw_roots.items():
+                            if isinstance(rv, Mapping):
+                                eff_limit = int(rv.get("effective_limit", rv.get("base_limit", 2)))
+                                migrated_roots[rk] = {
+                                    **rv,
+                                    "max_inner_corrections_per_outer_attempt": 2,
+                                    "inner_corrections_by_attempt": {},
+                                    "worker_invocations_consumed": 0,
+                                    "worker_invocations_limit": (eff_limit + 1) * 3,
+                                }
+                            else:
+                                migrated_roots[rk] = rv
+                    else:
+                        migrated_roots = raw_roots
+                    state = RepairBudgetLedgerState.model_validate(
+                        {**raw, "registered_roots": migrated_roots, "state_digest": None}
+                    )
                     state = _with_digest(state)
                 else:
                     state = RepairBudgetLedgerState.model_validate(raw)
@@ -990,6 +982,23 @@ class DurableRepairBudgetLedger:
             != loaded_policy.policy.repair_budget.total_auto_code_repairs_per_milestone
         ):
             raise RepairBudgetError("Ledger base_milestone_limit drift detected")
+        if state.max_inner_corrections_per_outer_attempt > 2:
+            raise RepairBudgetError(
+                "Ledger max_inner_corrections_per_outer_attempt exceeds policy cap of 2"
+            )
+        for root_key, counter in state.registered_roots.items():
+            if counter.max_inner_corrections_per_outer_attempt > 2:
+                raise RepairBudgetError(
+                    f"Root '{root_key}' max_inner_corrections_per_outer_attempt exceeds policy cap"
+                )
+            expected_inv_limit = (counter.effective_limit + 1) * (
+                counter.max_inner_corrections_per_outer_attempt + 1
+            )
+            if counter.worker_invocations_limit != expected_inv_limit:
+                raise RepairBudgetError(
+                    f"Root '{root_key}' worker_invocations_limit "
+                    f"{counter.worker_invocations_limit} mismatches expected {expected_inv_limit}"
+                )
 
     def resolve_root_task(
         self,

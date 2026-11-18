@@ -739,8 +739,35 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
         == 3
     )
 
-    # Missing checkpoint for CONSUMED pass 0 must fail closed without invoking worker
+    # Missing, null, or mismatched checkpoint metadata for CONSUMED pass 0 must fail closed
     ckpt_0 = Path(cfg.evidence_output_dir) / "task-cisl02" / "cisl_pass_00_checkpoint.json"
+    orig_ckpt_0 = json.loads(ckpt_0.read_text(encoding="utf-8"))
+    assert orig_ckpt_0["outer_attempt"] == 1
+    assert isinstance(orig_ckpt_0["reservation_id"], str) and orig_ckpt_0["reservation_id"]
+    assert isinstance(orig_ckpt_0["dispatch_claim_id"], str) and orig_ckpt_0["dispatch_claim_id"]
+
+    tampered_variants: list[dict[str, Any]] = []
+    for key in ("reservation_id", "dispatch_claim_id", "outer_attempt"):
+        absent = dict(orig_ckpt_0)
+        absent.pop(key, None)
+        tampered_variants.append(absent)
+        null_val = dict(orig_ckpt_0)
+        null_val[key] = None
+        tampered_variants.append(null_val)
+    tampered_variants.append({**orig_ckpt_0, "reservation_id": "res-stale-mismatch"})
+    tampered_variants.append({**orig_ckpt_0, "dispatch_claim_id": "claim-stale-mismatch"})
+    tampered_variants.append({**orig_ckpt_0, "outer_attempt": 99})
+
+    for bad_payload in tampered_variants:
+        ckpt_0.write_text(json.dumps(bad_payload, indent=2), encoding="utf-8")
+        outcome_bad = asyncio.run(auto_3.execute_worker_task(task))
+        assert outcome_bad.agent_result.status == AgentStatus.FAILED
+        assert (
+            outcome_bad.agent_result.metadata["error_code"]
+            == "AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED"
+        )
+        assert third_calls == 0
+
     ckpt_0.unlink()
     outcome_missing_ckpt = asyncio.run(auto_3.execute_worker_task(task))
     assert outcome_missing_ckpt.agent_result.status == AgentStatus.FAILED
@@ -750,7 +777,7 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
     )
     assert third_calls == 0
 
-    # In-flight RESERVED reservation without checkpoint must fail closed without invoking worker
+    # In-flight RESERVED reservation without or with invalid checkpoint must fail closed
     trust_b, ledger_path_b, _ = _create_trust_env(tmp_path / "reserved_case")
     policy_b = load_policy_trust_context(trust_b)
     ledger_b = DurableRepairBudgetLedger(ledger_path_b, clock=lambda: _FIXED_NOW)
@@ -759,7 +786,7 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
         registered_roots=["task-cisl02"],
         trust_context=trust_b,
     )
-    ledger_b.reserve_worker_invocation(
+    res_b = ledger_b.reserve_worker_invocation(
         loaded_policy=policy_b,
         trust_context=trust_b,
         event_id="cisl-inv-task-cisl02-att-01-pass-00",
@@ -768,6 +795,7 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
         inner_pass_index=0,
         candidate_sha=_C6_BASELINE_SHA,
     )
+    assert res_b.reservation is not None
     cfg_b = cfg.model_copy(
         update={
             "evidence_output_dir": str(tmp_path / "reserved_case" / "ev"),
@@ -788,6 +816,38 @@ def test_cisl_mid_loop_restart_idempotency_no_double_charge(tmp_path: Path) -> N
         == "AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED"
     )
     assert third_calls == 0
+
+    ckpt_b = Path(cfg_b.evidence_output_dir) / "task-cisl02" / "cisl_pass_00_checkpoint.json"
+    ckpt_b.parent.mkdir(parents=True, exist_ok=True)
+    base_b_ckpt: dict[str, Any] = {
+        "pass_index": 0,
+        "outer_attempt": 1,
+        "reservation_id": res_b.reservation.reservation_id,
+        "dispatch_claim_id": res_b.reservation.dispatch_claim_id,
+        "invocation_response": {"session_id": "s-b", "model_used": "gemini-3.8-flash-medium"},
+        "saved_files": {},
+    }
+    reserved_tampered: list[dict[str, Any]] = []
+    for key in ("reservation_id", "dispatch_claim_id", "outer_attempt"):
+        absent = dict(base_b_ckpt)
+        absent.pop(key, None)
+        reserved_tampered.append(absent)
+        null_val = dict(base_b_ckpt)
+        null_val[key] = None
+        reserved_tampered.append(null_val)
+    reserved_tampered.append({**base_b_ckpt, "reservation_id": "res-wrong"})
+    reserved_tampered.append({**base_b_ckpt, "dispatch_claim_id": "claim-wrong"})
+    reserved_tampered.append({**base_b_ckpt, "outer_attempt": 2})
+
+    for bad_payload in reserved_tampered:
+        ckpt_b.write_text(json.dumps(bad_payload, indent=2), encoding="utf-8")
+        outcome_res_bad = asyncio.run(auto_reserved.execute_worker_task(task))
+        assert outcome_res_bad.agent_result.status == AgentStatus.FAILED
+        assert (
+            outcome_res_bad.agent_result.metadata["error_code"]
+            == "AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED"
+        )
+        assert third_calls == 0
 
 
 def test_legacy_c5_signed_ledger_backward_compatible_load_and_migration(tmp_path: Path) -> None:
@@ -852,9 +912,26 @@ def test_legacy_c5_signed_ledger_backward_compatible_load_and_migration(tmp_path
         "updated_at": _FIXED_NOW.isoformat().replace("+00:00", "Z"),
     }
     raw_c5["state_digest"] = _compute_ledger_state_digest(raw_c5)
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: _FIXED_NOW)
+
+    # Mixed C.5/C.6 payloads keeping legacy C.5 digest while injecting C.6 limit fields fail closed
+    mixed_top = {
+        **raw_c5,
+        "milestone_worker_invocations_limit": 999,
+        "global_worker_invocations_limit": 999,
+    }
+    ledger_path.write_text(json.dumps(mixed_top, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="state_digest mismatch"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    mixed_root = json.loads(json.dumps(raw_c5))
+    mixed_root["registered_roots"]["task-c5-legacy"]["worker_invocations_limit"] = 99
+    ledger_path.write_text(json.dumps(mixed_root, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="state_digest mismatch"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
     ledger_path.write_text(json.dumps(raw_c5, indent=2), encoding="utf-8")
 
-    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: _FIXED_NOW)
     loaded = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
     assert loaded.milestone_consumed == 1
     assert loaded.registered_roots["task-c5-legacy"].consumed == 1
@@ -883,6 +960,18 @@ def test_legacy_c5_signed_ledger_backward_compatible_load_and_migration(tmp_path
     migrated = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
     assert migrated.registered_roots["task-c5-legacy"].worker_invocations_consumed == 1
     assert migrated.registered_roots["task-c5-legacy"].consumed == 1
+
+    # C.6 payload with altered worker_invocations_limit fails closed
+    c6_tampered = json.loads(ledger_path.read_text(encoding="utf-8"))
+    c6_tampered["registered_roots"]["task-c5-legacy"]["worker_invocations_limit"] = 99
+    ledger_path.write_text(json.dumps(c6_tampered, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="state_digest mismatch"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    c6_tampered["state_digest"] = _compute_ledger_state_digest(c6_tampered)
+    ledger_path.write_text(json.dumps(c6_tampered, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="mismatches expected"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
 
 
 def test_cisl_execute_worker_task_enforces_build_config_guard(tmp_path: Path) -> None:

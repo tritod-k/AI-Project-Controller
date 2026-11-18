@@ -39,6 +39,7 @@ from aipc.controller import (
 from aipc.controller.repair_budget import (
     DurableRepairBudgetLedger,
     RepairBudgetError,
+    _compute_ledger_state_digest,
     load_policy_trust_context,
 )
 from aipc.domain.enums import AgentStatus, CriterionStatus, ReviewVerdict
@@ -612,8 +613,31 @@ def test_cisl03_04_mid_inner_loop_quota_exhaustion_and_restart_recovery_no_doubl
         == 3
     )
 
-    # Missing checkpoint for CONSUMED pass 0 fails closed
+    # Missing, null, or mismatched checkpoint metadata for CONSUMED pass 0 fails closed
     ckpt_0 = Path(cfg.evidence_output_dir) / "task-cisl03" / "cisl_pass_00_checkpoint.json"
+    orig_ckpt_0 = json.loads(ckpt_0.read_text(encoding="utf-8"))
+    tampered_variants: list[dict[str, Any]] = []
+    for key in ("reservation_id", "dispatch_claim_id", "outer_attempt"):
+        absent = dict(orig_ckpt_0)
+        absent.pop(key, None)
+        tampered_variants.append(absent)
+        null_val = dict(orig_ckpt_0)
+        null_val[key] = None
+        tampered_variants.append(null_val)
+    tampered_variants.append({**orig_ckpt_0, "reservation_id": "res-stale-mismatch"})
+    tampered_variants.append({**orig_ckpt_0, "dispatch_claim_id": "claim-stale-mismatch"})
+    tampered_variants.append({**orig_ckpt_0, "outer_attempt": 99})
+
+    for bad_payload in tampered_variants:
+        ckpt_0.write_text(json.dumps(bad_payload, indent=2), encoding="utf-8")
+        outcome_bad = asyncio.run(auto_3.execute_worker_task(task))
+        assert outcome_bad.agent_result.status == AgentStatus.FAILED
+        assert (
+            outcome_bad.agent_result.metadata["error_code"]
+            == "AMBIGUOUS_INVOCATION_RECOVERY_BLOCKED"
+        )
+        assert third_calls == 0
+
     ckpt_0.unlink()
     outcome_missing = asyncio.run(auto_3.execute_worker_task(task))
     assert outcome_missing.agent_result.status == AgentStatus.FAILED
@@ -623,10 +647,10 @@ def test_cisl03_04_mid_inner_loop_quota_exhaustion_and_restart_recovery_no_doubl
     )
     assert third_calls == 0
 
-    # In-flight RESERVED reservation without checkpoint fails closed
+    # In-flight RESERVED reservation without or with invalid checkpoint fails closed
     trust_b, ledger_path_b, ledger_b = _init_ledger(tmp_path / "reserved_case")
     policy_b = load_policy_trust_context(trust_b)
-    ledger_b.reserve_worker_invocation(
+    res_b = ledger_b.reserve_worker_invocation(
         loaded_policy=policy_b,
         trust_context=trust_b,
         event_id="cisl-inv-task-cisl03-att-01-pass-00",
@@ -635,6 +659,7 @@ def test_cisl03_04_mid_inner_loop_quota_exhaustion_and_restart_recovery_no_doubl
         inner_pass_index=0,
         candidate_sha=_C6_BASELINE_SHA,
     )
+    assert res_b.reservation is not None
     cfg_b = cfg.model_copy(
         update={
             "evidence_output_dir": str(tmp_path / "reserved_case" / "ev"),
@@ -655,6 +680,38 @@ def test_cisl03_04_mid_inner_loop_quota_exhaustion_and_restart_recovery_no_doubl
         == "AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED"
     )
     assert third_calls == 0
+
+    ckpt_b = Path(cfg_b.evidence_output_dir) / "task-cisl03" / "cisl_pass_00_checkpoint.json"
+    ckpt_b.parent.mkdir(parents=True, exist_ok=True)
+    base_b_ckpt: dict[str, Any] = {
+        "pass_index": 0,
+        "outer_attempt": 1,
+        "reservation_id": res_b.reservation.reservation_id,
+        "dispatch_claim_id": res_b.reservation.dispatch_claim_id,
+        "invocation_response": {"session_id": "s-b", "model_used": "gemini-3.8-flash-medium"},
+        "saved_files": {},
+    }
+    reserved_tampered: list[dict[str, Any]] = []
+    for key in ("reservation_id", "dispatch_claim_id", "outer_attempt"):
+        absent = dict(base_b_ckpt)
+        absent.pop(key, None)
+        reserved_tampered.append(absent)
+        null_val = dict(base_b_ckpt)
+        null_val[key] = None
+        reserved_tampered.append(null_val)
+    reserved_tampered.append({**base_b_ckpt, "reservation_id": "res-wrong"})
+    reserved_tampered.append({**base_b_ckpt, "dispatch_claim_id": "claim-wrong"})
+    reserved_tampered.append({**base_b_ckpt, "outer_attempt": 2})
+
+    for bad_payload in reserved_tampered:
+        ckpt_b.write_text(json.dumps(bad_payload, indent=2), encoding="utf-8")
+        outcome_res_bad = asyncio.run(auto_reserved.execute_worker_task(task))
+        assert outcome_res_bad.agent_result.status == AgentStatus.FAILED
+        assert (
+            outcome_res_bad.agent_result.metadata["error_code"]
+            == "AMBIGUOUS_IN_FLIGHT_RESERVATION_BLOCKED"
+        )
+        assert third_calls == 0
 
 
 def test_cisl03_05_inner_or_aggregate_c5_budget_exhaustion_halts_deterministically(
@@ -1094,3 +1151,77 @@ def test_cisl03_08_ab_supervisor_intervention_reduction_proof(tmp_path: Path) ->
     assert counter_b.worker_invocations_consumed == 2
     assert counter_b.inner_corrections_by_attempt == {"1": 1}
     assert counter_b.consumed == 0
+
+
+def test_cisl03_09_mixed_c5_c6_ledger_and_tampered_invocation_limits_fail_closed(
+    tmp_path: Path,
+) -> None:
+    trust_ctx, ledger_path, _ = _create_trust_env(tmp_path)
+    policy = load_policy_trust_context(trust_ctx)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_c5: dict[str, Any] = {
+        "schema_version": "1.0",
+        "project_id": "aipc",
+        "milestone_id": "milestone-c6",
+        "policy_id": policy.policy.policy_id,
+        "policy_sha256": policy.policy_sha256,
+        "approval_id": policy.approval_id,
+        "authorized_by": policy.authorized_by,
+        "counter_reset_allowed": False,
+        "base_per_root_limit": 2,
+        "base_milestone_limit": 8,
+        "milestone_limit": 8,
+        "milestone_consumed": 0,
+        "imported_milestone_consumed": 0,
+        "registered_roots": {
+            "task-cisl03": {
+                "root_task": "task-cisl03",
+                "consumed": 0,
+                "base_limit": 2,
+                "base_consumed": 0,
+                "extension_allowance": 0,
+                "effective_limit": 2,
+                "extension_approval_ids": [],
+                "imported_consumed": 0,
+            }
+        },
+        "child_to_root": {},
+        "reservations": {},
+        "event_to_reservation": {},
+        "applied_grants": [],
+        "imported_receipts": [],
+        "updated_at": _FIXED_NOW.isoformat().replace("+00:00", "Z"),
+    }
+    raw_c5["state_digest"] = _compute_ledger_state_digest(raw_c5)
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=lambda: _FIXED_NOW)
+
+    mixed_top = {
+        **raw_c5,
+        "milestone_worker_invocations_limit": 999,
+        "global_worker_invocations_limit": 999,
+    }
+    ledger_path.write_text(json.dumps(mixed_top, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="state_digest mismatch"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    mixed_root = json.loads(json.dumps(raw_c5))
+    mixed_root["registered_roots"]["task-cisl03"]["worker_invocations_limit"] = 99
+    ledger_path.write_text(json.dumps(mixed_root, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="state_digest mismatch"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    # Pure C.5 migrates cleanly, then C.6 altered worker_invocations_limit fails closed
+    ledger_path.write_text(json.dumps(raw_c5, indent=2), encoding="utf-8")
+    migrated = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    assert migrated.registered_roots["task-cisl03"].worker_invocations_limit == 9
+
+    c6_tampered = migrated.model_dump(mode="json")
+    c6_tampered["registered_roots"]["task-cisl03"]["worker_invocations_limit"] = 99
+    ledger_path.write_text(json.dumps(c6_tampered, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="state_digest mismatch"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    c6_tampered["state_digest"] = _compute_ledger_state_digest(c6_tampered)
+    ledger_path.write_text(json.dumps(c6_tampered, indent=2), encoding="utf-8")
+    with pytest.raises(RepairBudgetError, match="mismatches expected"):
+        ledger.load(loaded_policy=policy, trust_context=trust_ctx)

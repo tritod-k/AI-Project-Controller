@@ -23,8 +23,8 @@ Implemented and verified AIPC 2.0 Milestone C.6 (`CISL01`–`CISL03`) on branch 
 - Unit & Acceptance Test Suites:
   - `tests/unit/test_c5_section3a_scope_bootstrap.py` (`15 passed`)
   - `tests/unit/test_c6_cisl01_container_verifier.py` (`7 passed`)
-  - `tests/unit/test_c6_cisl02_inner_correction.py` (`10 passed`, including Tier-2 Cycle 1 `C6-01`, `C6-02`, and `C6-03` tests)
-  - `tests/unit/test_c6_cisl03_acceptance_ab.py` (`8 passed`, including 1-for-1 invocation accounting across interrupted/restarted passes and fail-closed missing-checkpoint/in-flight-RESERVED checks)
+  - `tests/unit/test_c6_cisl02_inner_correction.py` (`10 passed`, including Tier-2 Cycles 1–2 `C6-01`, `C6-01-REMAINING`, `C6-02`, `C6-03`, and `C6-03-REMAINING` tests)
+  - `tests/unit/test_c6_cisl03_acceptance_ab.py` (`9 passed`, including 1-for-1 invocation accounting, strict non-null checkpoint ownership binding, and mixed C.5/C.6 altered-limit rejection)
 
 ## Files Changed
 - `.agents/agents/aipc-implementation-worker.md`

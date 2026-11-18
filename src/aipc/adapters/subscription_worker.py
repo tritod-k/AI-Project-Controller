@@ -1444,9 +1444,14 @@ class AntigravitySubscriptionWorkerAutomation:
         pass_idx: int,
         inv_res: WorkerInvocationResponse,
         files_changed: list[FileChange],
-        reservation_id: str | None = None,
-        dispatch_claim_id: str | None = None,
+        reservation_id: str,
+        dispatch_claim_id: str,
+        outer_attempt: int = 1,
     ) -> None:
+        if not isinstance(reservation_id, str) or not reservation_id.strip():
+            raise ValueError("CISL pass checkpoint requires non-empty reservation_id")
+        if not isinstance(dispatch_claim_id, str) or not dispatch_claim_id.strip():
+            raise ValueError("CISL pass checkpoint requires non-empty dispatch_claim_id")
         ev_task_dir = Path(self._config.evidence_output_dir).resolve() / task_id
         ev_task_dir.mkdir(parents=True, exist_ok=True)
         ckpt_file = ev_task_dir / f"cisl_pass_{pass_idx:02d}_checkpoint.json"
@@ -1468,6 +1473,7 @@ class AntigravitySubscriptionWorkerAutomation:
                 saved_files[rel_posix] = None
         payload = {
             "pass_index": pass_idx,
+            "outer_attempt": outer_attempt,
             "reservation_id": reservation_id,
             "dispatch_claim_id": dispatch_claim_id,
             "invocation_response": inv_res.model_dump(mode="json"),
@@ -1481,21 +1487,41 @@ class AntigravitySubscriptionWorkerAutomation:
         worktree: Path,
         task_id: str,
         pass_idx: int,
+        expected_outer_attempt: int | None = None,
         expected_reservation_id: str | None = None,
         expected_claim_id: str | None = None,
     ) -> WorkerInvocationResponse | None:
+        if (
+            not isinstance(expected_reservation_id, str)
+            or not expected_reservation_id.strip()
+            or not isinstance(expected_claim_id, str)
+            or not expected_claim_id.strip()
+        ):
+            return None
         ev_task_dir = Path(self._config.evidence_output_dir).resolve() / task_id
         ckpt_file = ev_task_dir / f"cisl_pass_{pass_idx:02d}_checkpoint.json"
         if not ckpt_file.is_file():
             return None
         payload = json.loads(ckpt_file.read_text(encoding="utf-8"))
-        if expected_reservation_id is not None:
-            ckpt_res_id = payload.get("reservation_id")
-            if ckpt_res_id is not None and ckpt_res_id != expected_reservation_id:
-                return None
-        if expected_claim_id is not None:
-            ckpt_claim_id = payload.get("dispatch_claim_id")
-            if ckpt_claim_id is not None and ckpt_claim_id != expected_claim_id:
+        if not isinstance(payload, dict):
+            return None
+        ckpt_res_id = payload.get("reservation_id")
+        ckpt_claim_id = payload.get("dispatch_claim_id")
+        if (
+            not isinstance(ckpt_res_id, str)
+            or not ckpt_res_id.strip()
+            or ckpt_res_id != expected_reservation_id
+        ):
+            return None
+        if (
+            not isinstance(ckpt_claim_id, str)
+            or not ckpt_claim_id.strip()
+            or ckpt_claim_id != expected_claim_id
+        ):
+            return None
+        if expected_outer_attempt is not None:
+            ckpt_outer_attempt = payload.get("outer_attempt")
+            if type(ckpt_outer_attempt) is not int or ckpt_outer_attempt != expected_outer_attempt:
                 return None
         inv_res = WorkerInvocationResponse.model_validate(payload["invocation_response"])
         resolved_wt = worktree.resolve()
@@ -1929,6 +1955,7 @@ class AntigravitySubscriptionWorkerAutomation:
                         worktree=worktree,
                         task_id=task.task_id,
                         pass_idx=pass_idx,
+                        expected_outer_attempt=task.attempt,
                         expected_reservation_id=decision.reservation.reservation_id,
                         expected_claim_id=decision.reservation.dispatch_claim_id,
                     )
@@ -2054,6 +2081,7 @@ class AntigravitySubscriptionWorkerAutomation:
                             worktree=worktree,
                             task_id=task.task_id,
                             pass_idx=pass_idx,
+                            expected_outer_attempt=task.attempt,
                             expected_reservation_id=decision.reservation.reservation_id,
                             expected_claim_id=decision.reservation.dispatch_claim_id,
                         )
@@ -2159,12 +2187,14 @@ class AntigravitySubscriptionWorkerAutomation:
                             base_sha=base_sha,
                             pre_snap=pre_snap,
                         )
+                        assert decision.reservation.dispatch_claim_id is not None
                         self._save_cisl_pass_checkpoint(
                             worktree=worktree,
                             task_id=task.task_id,
                             pass_idx=pass_idx,
                             inv_res=inv_res,
                             files_changed=pass_files,
+                            outer_attempt=task.attempt,
                             reservation_id=decision.reservation.reservation_id,
                             dispatch_claim_id=decision.reservation.dispatch_claim_id,
                         )
