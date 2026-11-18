@@ -65,6 +65,15 @@ _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS: tuple[str, ...] = (
     "milestone-d",
     "milestone_d",
     "workstream-d",
+    "milestone-c7",
+    "milestone_c7",
+    "milestone-c.7",
+    "milestone_c.7",
+    "workstream-c7",
+    "workstream-c.7",
+    "rce01",
+    "rce02",
+    "rce03",
 )
 _APPROVED_MILESTONE_C_TOKENS: tuple[str, ...] = (
     "milestone-c",
@@ -78,9 +87,16 @@ _MILESTONE_C5_IDS: frozenset[str] = frozenset(
 _MILESTONE_C5_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]c\.?5|workstream[-_]c\.?5|c\.5|rg0[1-4])(?![0-9])"
 )
+_MILESTONE_C6_IDS: frozenset[str] = frozenset(
+    {"milestone-c6", "milestone_c6", "milestone-c.6", "milestone_c.6", "c.6"}
+)
+_MILESTONE_C6_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]c\.?6|workstream[-_]c\.?6|c\.6|cisl0[1-3])(?![0-9])"
+)
 _AUTHORIZED_GOAL_MILESTONE_RE = re.compile(
     r"^(?:phase-(?:0[1-9]|1\d|2[0-4])|milestone[-_]a|workstream[-_]a|aipc-2\.0-milestone-a|"
-    r"milestone[-_]c|aipc-2\.0-milestone-c|milestone[-_]c\.?5|c\.5)$"
+    r"milestone[-_]c|aipc-2\.0-milestone-c|milestone[-_]c\.?5|c\.5|"
+    r"milestone[-_]c\.?6|c\.6)$"
 )
 
 
@@ -95,9 +111,16 @@ def _references_milestone_c5(text: str) -> bool:
     return bool(_MILESTONE_C5_TOKEN_RE.search(lowered))
 
 
+def _references_milestone_c6(text: str) -> bool:
+    lowered = text.strip().lower()
+    if lowered in _MILESTONE_C6_IDS:
+        return True
+    return bool(_MILESTONE_C6_TOKEN_RE.search(lowered))
+
+
 def _references_milestone_c(text: str) -> bool:
     lowered = text.strip().lower()
-    if _references_milestone_c5(lowered):
+    if _references_milestone_c5(lowered) or _references_milestone_c6(lowered):
         return False
     if _MILESTONE_C_TOKEN_RE.search(lowered):
         return True
@@ -108,13 +131,19 @@ def _references_milestone_c(text: str) -> bool:
 
 
 def _references_unauthorized_milestone(
-    text: str, *, allow_milestone_c: bool = False, allow_milestone_c5: bool = False
+    text: str,
+    *,
+    allow_milestone_c: bool = False,
+    allow_milestone_c5: bool = False,
+    allow_milestone_c6: bool = False,
 ) -> bool:
     lowered = text.strip().lower()
     if any(tok in lowered for tok in _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS):
         return True
     if _references_milestone_c5(lowered):
         return not allow_milestone_c5
+    if _references_milestone_c6(lowered):
+        return not allow_milestone_c6
     tokens = (
         tuple(t for t in _UNAUTHORIZED_MILESTONE_TOKENS if t not in _APPROVED_MILESTONE_C_TOKENS)
         if allow_milestone_c
@@ -158,11 +187,15 @@ class HumanGoalSpec(CanonicalRecord):
             _references_milestone_c5(val)
             for val in (self.milestone_id, self.phase_id, self.phase_name)
         )
+        refs_c6 = any(
+            _references_milestone_c6(val)
+            for val in (self.milestone_id, self.phase_id, self.phase_name)
+        )
         refs_c = any(
             _references_milestone_c(val)
             for val in (self.milestone_id, self.phase_id, self.phase_name)
         )
-        if refs_c5 or refs_c:
+        if refs_c6 or refs_c5 or refs_c:
             if (
                 self.approval_granted is not True
                 or not (self.approval_id and self.approval_id.strip())
@@ -178,7 +211,7 @@ class HumanGoalSpec(CanonicalRecord):
                 )
                 verifier = (
                     verify_milestone_authorization_scope
-                    if refs_c5
+                    if (refs_c5 or refs_c6)
                     else verify_milestone_c_authorization_scope
                 )
                 verifier(
@@ -201,8 +234,9 @@ class HumanGoalSpec(CanonicalRecord):
         ):
             if _references_unauthorized_milestone(
                 val,
-                allow_milestone_c=self.approval_granted and refs_c and not refs_c5,
+                allow_milestone_c=self.approval_granted and refs_c and not refs_c5 and not refs_c6,
                 allow_milestone_c5=self.approval_granted and refs_c5,
+                allow_milestone_c6=self.approval_granted and refs_c6,
             ):
                 raise ValueError(f"{label} references unauthorized future milestone scope: '{val}'")
         overlap = set(self.in_scope_paths) & set(self.out_of_scope_paths)

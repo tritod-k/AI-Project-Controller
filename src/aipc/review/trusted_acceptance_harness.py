@@ -73,14 +73,24 @@ _MILESTONE_C5_IDS: frozenset[str] = frozenset(
 _MILESTONE_C5_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]c\.?5|workstream[-_]c\.?5|c\.5|rg0[1-4])(?![0-9])"
 )
+_MILESTONE_C6_IDS: frozenset[str] = frozenset(
+    {"milestone-c6", "milestone_c6", "milestone-c.6", "milestone_c.6", "c.6"}
+)
+_MILESTONE_C6_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]c\.?6|workstream[-_]c\.?6|c\.6|cisl0[1-3])(?![0-9])"
+)
 _UNAUTHORIZED_FUTURE_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)|"
-    r"rg(?:00|0[5-9]|[1-9]\d)|phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
+    r"rg(?:00|0[5-9]|[1-9]\d)|cisl(?:00|0[4-9]|[1-9]\d)|rce\d+|"
+    r"milestone[-_]c\.?7|workstream[-_]c\.?7|c\.7|"
+    r"phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
     r"milestone[-_][d-z](?![a-z]))(?![0-9])"
 )
 _UNAUTHORIZED_FUTURE_TASK_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:d(?:0[1-9]|[1-9]\d)|"
-    r"rg(?:00|0[5-9]|[1-9]\d)|phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
+    r"rg(?:00|0[5-9]|[1-9]\d)|cisl(?:00|0[4-9]|[1-9]\d)|rce\d+|"
+    r"milestone[-_]c\.?7|workstream[-_]c\.?7|c\.7|"
+    r"phase[-_](?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
     r"milestone[-_][d-z](?![a-z]))(?![0-9])"
 )
 _LEGACY_MILESTONE_C_TASK_LABEL_RE = re.compile(r"^task[-_]c\d{2}[-_][a-z][a-z0-9_-]*$")
@@ -185,15 +195,34 @@ def assert_milestone_c_scope_authorized(
             "unauthorized Milestone D scope"
         )
 
-    if norm_milestone in _MILESTONE_C5_IDS:
+    is_c5 = norm_milestone in _MILESTONE_C5_IDS
+    is_c6 = norm_milestone in _MILESTONE_C6_IDS
+    if is_c5 or is_c6:
+        label = "C.6" if is_c6 else "C.5"
         if approval_evidence_path is None or not str(approval_evidence_path).strip():
             raise ValueError(
                 f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' requires "
-                "persisted C.5 approval evidence"
+                f"persisted {label} approval evidence"
+            )
+        cross_re = _MILESTONE_C5_TOKEN_RE if is_c6 else _MILESTONE_C6_TOKEN_RE
+        if phase_id is not None and cross_re.search(phase_id.strip().lower()):
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: phase_id '{phase_id}' references "
+                f"wrong milestone scope under {label}"
+            )
+        if task_id is not None and cross_re.search(task_id.strip().lower()):
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
+                f"wrong milestone scope under {label}"
             )
         effective_phase = phase_id
         if effective_phase is None and task_id is not None:
-            m = re.search(r"(?<![a-z0-9])(rg0[1-4])(?![0-9])", task_id.strip().lower())
+            pattern = (
+                r"(?<![a-z0-9])(cisl0[1-3])(?![0-9])"
+                if is_c6
+                else r"(?<![a-z0-9])(rg0[1-4])(?![0-9])"
+            )
+            m = re.search(pattern, task_id.strip().lower())
             if m is not None:
                 effective_phase = m.group(1)
         try:
@@ -228,6 +257,16 @@ def assert_milestone_c_scope_authorized(
         raise ValueError(
             f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
             "Milestone C.5 scope under non-C.5 milestone"
+        )
+    if phase_id is not None and _MILESTONE_C6_TOKEN_RE.search(phase_id.strip().lower()):
+        raise ValueError(
+            f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: phase_id '{phase_id}' references "
+            "Milestone C.6 scope under non-C.6 milestone"
+        )
+    if task_id is not None and _MILESTONE_C6_TOKEN_RE.search(task_id.strip().lower()):
+        raise ValueError(
+            f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
+            "Milestone C.6 scope under non-C.6 milestone"
         )
 
 
