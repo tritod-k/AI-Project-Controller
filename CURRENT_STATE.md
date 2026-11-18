@@ -1,3 +1,38 @@
+## Milestone C.7 Commander-authorized bootstrap restart — 2026-11-18T20:19:04.5842121+07:00 (authoritative current)
+
+- Current phase: Milestone C.7 bootstrap before RCE01–RCE03. Status: IN_PROGRESS. Phase Gate: PENDING. Attempt01, dedicated bootstrap_c7 local verification1/6; cumulative Tier1 2/18, Tier2 0/2; no counter reset.
+- Authority: audit/c7_commander_bootstrap_restart_and_bridge_grant.json + SHA256 explicitly lifts previous circuit breaker; source is Commander restart request of 2026-11-18.
+- Stable / last stable checkpoint: f98846e8639b3ab846afe49454a6f79f6b236c36, clean pinned H:/AIPC_Workspace/stable_c. Rollback a66d19f2dbf3fe806317472c5599b2e0a381175e retained. PR9 merge and CI44306391744 Python3.12/3.13 verified previously.
+- Candidate: gemini/aipc-2.0-milestone-c7, H:/000ProjectCode/AI_Project_Controller. Last commit348d53f613e3302bd4d4e28711eefb2534b59c7f commits only authorized worker policy; .agents clean.
+- Completed: immutable restart grant, native automation ACTIVE, Docker smoke PASS (Python3.13.18 under --rm --network none; audit/c7_docker_smoke.json + sidecar), agent policy clean checkpoint.
+- Bridge: Stable qualified Hydrogen dispatches without C.7 queue/policy flags. Separate Candidate process manages C.7 canonical queue/ledger and C.6 Docker verifier. No Stable patches, Candidate imports into Stable, or C.6 identity impersonation. Queue/ledger remain PREPARED_NOT_INITIALIZED until passing bootstrap.
+- Current work / verification: four preserved source/test partials. Restart worker efef5c64-6da0-4e59-aa54-8c525ce981a5 transport SUCCESS but guard rejected preexisting CURRENT_STATE.md outside four-file scope; source changes reverted to preserved partials. Fresh suite remains30 passed/14 failed (bootstrap_restart1_tests.log). This is first guard error under restart grant, distinct from previous .agents error. Prior artifacts retained.
+- Required fixes: canonical Identifier fixture normalization; mandatory persisted C.7 contract evidence; explicit cross-milestone harness rejection before legacy fallback. Full regressions/static/schema/wheel/C.7 review/PR NOT_RUN.
+- Recovery: captured restart1_guard_index.patch, restored only known index entries while preserving working bytes. Current status is committed separately before another Worker invocation. All dirty paths must match the four-file bootstrap allowlist at pre-dispatch. This prevents another known scope collision without changing Stable guards.
+- Tests: targeted scope suite exit1,30 passed/14 failed. Python children sanitized with PYTHONDONTWRITEBYTECODE=1. No accepted source checkpoint yet. RCE01/RCE02/RCE03 not started, no PhaseGate PASS.
+- Remaining / next action: bounded restart repair2, verify all bootstrap tests/static checks, commit verified bootstrap; then initialize canonical queue/ledger preserving imported2/18 and proceed RCE01→RCE02→RCE03. No Milestone D or merge.
+- Review status: NOT_STARTED. Counters and pending Candidate tests remain authoritative; no previous halt is silently treated as a current grant.
+- Timestamp: 2026-11-18T20:19:04.5842121+07:00 (Asia/Bangkok).
+
+---
+## Milestone C.7 bootstrap circuit-breaker halt — 2026-11-18T20:07:54.9269093+07:00 (authoritative current)
+
+- Current phase: AIPC 2.0 Milestone C.7 RCE01–RCE03, attempt 01 / bootstrap repair 1.
+- Status: BLOCKED. Phase Gate: PENDING. No C.7 PASS, freeze, CI, independent review, or PR.
+- Authority: explicit Commander K.TRITOD C.7 start request; external milestone_c7/c7_commander_start_grant.json + SHA256, and AIPC_C7_RCE_SUPERVISOR_RUNBOOK.md. Milestone D remains blocked.
+- Last stable checkpoint / Stable: f98846e8639b3ab846afe49454a6f79f6b236c36 in H:/AIPC_Workspace/stable_c, guarded fast-forward from rollback a66d19f2dbf3fe806317472c5599b2e0a381175e. Dedicated venv preserved; import origin, both subscription runtimes, and Docker image presence verified. Receipt: audit/c7_stable_promotion_pass.json + SHA256.
+- Current branch/worktree: gemini/aipc-2.0-milestone-c7 / H:/000ProjectCode/AI_Project_Controller. Last commit: f98846e8639b3ab846afe49454a6f79f6b236c36 (post-PR-9 master baseline). No new commit: partial source is not passing.
+- Completed: PR #9 merge verified, exact post-merge master CI44306391744 successful on Python3.12/3.13; quota checked (75% initially, 60% latest observation); native new-chat local automation prearmed and now PAUSED; Stable promotion; Candidate branch; external grant, policy, impact note; bounded bootstrap dispatch and repair.
+- Current work: five bootstrap partial files retained. Initial Hydrogen session c2090d64-15f2-47d8-93d5-a50d0c50a543 returned 503 UNAVAILABLE after writes; provider outage is not an implementation defect. Repair session 0cdd5b14-35db-49d2-8bca-83d892ea1199 reported transport SUCCESS but AIPC rejected FORBIDDEN_PATH_VIOLATION for .agents/agents/aipc-implementation-worker.md, which the supervisor had changed before dispatch but omitted from the job scope. Worker transport success is not semantic acceptance.
+- Tests: fresh bootstrap + legacy scope suite twice: 30 passed / 14 failed. Diagnostic subsets: 1 passed / 2 failed (maxfail2), and cross-scope test 1 failed. Logs: milestone_c7/bootstrap_tests_r1.log, bootstrap_cross_scope.log, bootstrap_tests_r2.log. All Python/test children used PYTHONDONTWRITEBYTECODE=1 and tools.sanitized_exec. git diff --check passed. Full regressions/static/schema/wheel NOT_RUN.
+- Required fixes: canonical Identifier aliases in new fixtures; mandatory persisted C.7 evidence in ApprovedTaskContract; reject explicitly supplied cross-milestone C.7 evidence on legacy-C harness path; correct bounded bootstrap job scope. First repair was not accepted, and the same 14-failure signature persisted, so mandatory 2-strike identical-error/no-progress circuit breaker STOP applies. No automatic redispatch.
+- Repair usage: Tier1 1/18 (task-rce01 1/6), Tier2 0/2; zero reset. Two real worker invocations, zero CISL inner passes/savings. Stable C.6 does not understand C.7 authorization for policy/CISL loading; do not impersonate C.6, patch Stable, or import Candidate into Stable. Resolve a supported path before RCE dispatch.
+- Recovery: guard left four staged deletions with same-path working files. Captured index patch and source partial copies externally; restored only these four index entries to HEAD using git restore --staged, preserving every working file. Partial snapshots/hashes: audit/c7_bootstrap_circuit_breaker_20261118/. No canonical C.7 queue/ledger initialized; prepared contracts/queue bridge/RCE01 job are NOT_EXECUTED, not verified runtime evidence.
+- Review status: NOT_STARTED. RCE01 implementation, RCE02, RCE03, Candidate CI, dogfood review, templates export and PR remain NOT_STARTED. Completed historical Phases00–24 / A / B / C / C.5 / C.6 history retained below; C.6 PR9 merge verified this session.
+- Next action: Human/controller reviews halt evidence and explicitly authorizes a bounded circuit-breaker restart with corrected scope; recover existing partials and preserve counters. Automation aipc-c-7-quota-reset-resume is PAUSED under the explicit C.7 halt instruction. Do not self-advance or merge.
+- Timestamp: 2026-11-18T20:07:54.9269093+07:00 (Asia/Bangkok).
+
+---
 ## Milestone C.6 (`CISL01`–`CISL03`) Tier-2 Cycle 2 Pre-Freeze Verification Handoff — 2026-11-18 (authoritative current)
 
 - **Current phase:** AIPC 2.0 Milestone C.6 — Containerized Inner Self-Correction Loop (`CISL01`–`CISL03`), attempt `01` / Tier-2 Cycle `2` of `2`.
