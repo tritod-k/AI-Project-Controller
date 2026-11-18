@@ -26,6 +26,7 @@ from aipc.storage.json_store import load_json, write_json_atomic
 from aipc.version.models import Commit, Identifier
 
 if TYPE_CHECKING:
+    from aipc.controller.milestone_authorization import MilestoneAuthorizationTrustContext
     from aipc.review.governance_policy import PolicyTrustContext
 
 NonEmptyStr = NonBlank
@@ -817,6 +818,7 @@ class PersistentTaskQueue:
         clock=_utc_now,
         repair_budget_path: Path | None = None,
         policy_trust_context: PolicyTrustContext | None = None,
+        milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
     ) -> None:
         self._path = Path(queue_path).resolve()
         self._clock = clock
@@ -824,6 +826,7 @@ class PersistentTaskQueue:
             Path(repair_budget_path).resolve() if repair_budget_path is not None else None
         )
         self._policy_trust_context = policy_trust_context
+        self._milestone_trust_context = milestone_trust_context
 
     @property
     def path(self) -> Path:
@@ -836,6 +839,60 @@ class PersistentTaskQueue:
     @property
     def policy_trust_context(self) -> PolicyTrustContext | None:
         return self._policy_trust_context
+
+    @property
+    def milestone_trust_context(self) -> MilestoneAuthorizationTrustContext | None:
+        return self._milestone_trust_context
+
+    def _verify_external_milestone_trust_context(
+        self,
+        *,
+        project_id: str,
+        milestone_id: str,
+        phase_id: str,
+        in_scope_paths: Sequence[str],
+        override_trust_ctx: MilestoneAuthorizationTrustContext | None = None,
+    ) -> None:
+        if (
+            self._milestone_trust_context is not None
+            and override_trust_ctx is not None
+            and override_trust_ctx != self._milestone_trust_context
+        ):
+            raise ControllerError("Mismatched MilestoneAuthorizationTrustContext rejected")
+        effective_ctx = (
+            override_trust_ctx if override_trust_ctx is not None else self._milestone_trust_context
+        )
+        if effective_ctx is None:
+            return
+        from aipc.controller.milestone_authorization import (
+            _normalize_milestone_id,
+            load_and_verify_milestone_authorization,
+        )
+
+        try:
+            verified = load_and_verify_milestone_authorization(
+                effective_ctx,
+                phase_id=phase_id,
+                in_scope_paths=in_scope_paths,
+            )
+            if verified.project_id != project_id:
+                raise ControllerError(
+                    f"External milestone grant project_id {verified.project_id!r} "
+                    f"does not match queue project_id {project_id!r}"
+                )
+            if _normalize_milestone_id(verified.milestone_id) != _normalize_milestone_id(
+                milestone_id
+            ):
+                raise ControllerError(
+                    f"External milestone grant milestone_id {verified.milestone_id!r} "
+                    f"does not match queue milestone_id {milestone_id!r}"
+                )
+        except ControllerError:
+            raise
+        except Exception as exc:
+            raise ControllerError(
+                f"External milestone authorization verification failed: {exc}"
+            ) from exc
 
     def _verify_milestone_c_authorization(
         self,
@@ -919,6 +976,7 @@ class PersistentTaskQueue:
         contracts: tuple[ApprovedTaskContract, ...] | list[ApprovedTaskContract],
         approval_id: str | None = None,
         approval_evidence_path: Path | str | None = None,
+        milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
     ) -> TaskQueueSnapshot:
         """Create and persist a validated milestone task queue from approved contracts."""
         if _is_unapproved_future_scope(milestone_id):
@@ -938,6 +996,13 @@ class PersistentTaskQueue:
                 milestone_id=milestone_id,
                 contract=contract,
                 approval_evidence_path=approval_evidence_path,
+            )
+            self._verify_external_milestone_trust_context(
+                project_id=project_id,
+                milestone_id=milestone_id,
+                phase_id=contract.phase_id,
+                in_scope_paths=contract.in_scope,
+                override_trust_ctx=milestone_trust_context,
             )
 
         records = tuple(QueuedTaskRecord(contract=c) for c in contracts)
@@ -1042,6 +1107,7 @@ class PersistentTaskQueue:
         repair_reservation_id: str | None = None,
         budget_ledger_path: Path | None = None,
         policy_trust_context: PolicyTrustContext | None = None,
+        milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
     ) -> QueuedTaskRecord:
         """Record dispatch intent for an eligible task and return the updated record."""
         snap = self._refresh_eligibility(self.load())
@@ -1066,6 +1132,13 @@ class PersistentTaskQueue:
             contract=target.contract,
             snapshot_evidence_path=snap.approval_evidence_path,
             extra_paths=target_paths or (),
+        )
+        self._verify_external_milestone_trust_context(
+            project_id=snap.project_id,
+            milestone_id=snap.milestone_id,
+            phase_id=target.contract.phase_id,
+            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
+            override_trust_ctx=milestone_trust_context,
         )
         if target.status not in (QueuedTaskStatus.ELIGIBLE, QueuedTaskStatus.REPAIR_REQUIRED):
             raise ControllerError(
@@ -1446,6 +1519,13 @@ class PersistentTaskQueue:
             contract=target.contract,
             snapshot_evidence_path=snap.approval_evidence_path,
             extra_paths=target_paths or (),
+        )
+        self._verify_external_milestone_trust_context(
+            project_id=snap.project_id,
+            milestone_id=snap.milestone_id,
+            phase_id=target.contract.phase_id,
+            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
+            override_trust_ctx=None,
         )
         if self._repair_budget_path is None:
             raise ControllerError(

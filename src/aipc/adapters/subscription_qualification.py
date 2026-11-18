@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import StrictBool, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 from aipc.adapters.codex.transport import RUNTIME_VERSIONS as CODEX_QUALIFIED_RUNTIME_VERSIONS
 from aipc.adapters.codex.transport import SDK_VERSION as CODEX_PINNED_SDK_VERSION
@@ -42,6 +42,9 @@ from aipc.hardening.secrets import assert_no_secrets
 
 OperatingProfile = Literal["subscription_only"]
 RuntimeEligibilityState = Literal["QUALIFIED", "BLOCKED", "UNAVAILABLE"]
+ModelEligibilityState = Literal[
+    "QUALIFIED", "BLOCKED", "UNAVAILABLE", "RATE_LIMITED", "QUOTA_EXHAUSTED"
+]
 SubscriptionAuthMode = Literal["codex_subscription", "antigravity_subscription"]
 ProviderFamily = Literal["openai_codex", "google_antigravity"]
 OrchestrationRole = Literal["planner", "worker", "reviewer"]
@@ -131,6 +134,7 @@ class ProviderRuntimeQualificationReport(CanonicalRecord):
     subscription_auth_present: StrictBool
     supported_model_ids: tuple[str, ...] = ()
     unverified_or_unavailable_model_ids: tuple[str, ...] = ()
+    model_eligibility: dict[str, ModelEligibilityState] = Field(default_factory=dict)
     account_independent_metadata: dict[str, str | bool | int] = {}
     surfaces: SurfaceCapabilitySummary
     sandbox_constraints: SandboxConstraintSummary
@@ -275,6 +279,23 @@ def evaluate_runtime_eligibility(
                     f"{list(report.supported_model_ids)} for '{report.provider_id}'."
                 ),
             )
+        model_state = report.model_eligibility.get(normalized_req)
+        if model_state is not None and model_state != "QUALIFIED":
+            decision_state: RuntimeEligibilityState = (
+                "BLOCKED" if model_state == "BLOCKED" else "UNAVAILABLE"
+            )
+            return RoleModelEligibilityDecision(
+                provider_id=report.provider_id,
+                role=role,
+                requested_model=normalized_req,
+                resolved_model=None,
+                eligibility_state=decision_state,
+                eligible=False,
+                reason=(
+                    f"Model '{normalized_req}' is {model_state} on subscription "
+                    f"runtime '{report.provider_id}'."
+                ),
+            )
         resolved = normalized_req
     else:
         if not report.supported_model_ids:
@@ -287,7 +308,28 @@ def evaluate_runtime_eligibility(
                 eligible=False,
                 reason=f"No qualified models available on provider '{report.provider_id}'.",
             )
-        resolved = report.supported_model_ids[0]
+        resolved_candidate = next(
+            (
+                model_id
+                for model_id in report.supported_model_ids
+                if report.model_eligibility.get(model_id, "QUALIFIED") == "QUALIFIED"
+            ),
+            None,
+        )
+        if resolved_candidate is None:
+            return RoleModelEligibilityDecision(
+                provider_id=report.provider_id,
+                role=role,
+                requested_model=None,
+                resolved_model=None,
+                eligibility_state="UNAVAILABLE",
+                eligible=False,
+                reason=(
+                    f"All supported models on provider '{report.provider_id}' are "
+                    "unavailable or rate-limited."
+                ),
+            )
+        resolved = resolved_candidate
 
     return RoleModelEligibilityDecision(
         provider_id=report.provider_id,
@@ -747,10 +789,70 @@ def qualify_all_subscription_runtimes(
     )
 
 
+def to_runtime_observation(report: ProviderRuntimeQualificationReport):
+    """Normalize a ProviderRuntimeQualificationReport into a provider-neutral observation."""
+    from aipc.agents.role_registry import ProviderRuntimeObservation, RoleExecutionMode
+    from aipc.agents.routing_models import Capability, CapabilityStatus
+
+    modes: list[RoleExecutionMode] = []
+    if (
+        report.surfaces.headless_planner_supported
+        and report.role_eligibility.get("planner") == "QUALIFIED"
+    ):
+        modes.append("plan")
+    if (
+        report.surfaces.headless_worker_supported
+        and report.role_eligibility.get("worker") == "QUALIFIED"
+    ):
+        modes.append("worker")
+    if (
+        report.surfaces.headless_reviewer_supported
+        and report.role_eligibility.get("reviewer") == "QUALIFIED"
+    ):
+        modes.append("reviewer")
+
+    cap_map: dict[Capability, CapabilityStatus] = {}
+    status_lookup: dict[CapabilityState, CapabilityStatus] = {
+        "AVAILABLE": CapabilityStatus.AVAILABLE,
+        "BLOCKED": CapabilityStatus.BLOCKED,
+        "UNVERIFIED": CapabilityStatus.UNVERIFIED,
+        "SANDBOXED": CapabilityStatus.AVAILABLE,
+    }
+    for cap_name, cap_state in report.capability_evidence.items():
+        cap_map[cap_name] = status_lookup[cap_state]
+
+    fs_read = cap_map.get("filesystem_read")
+    fs_write = cap_map.get("filesystem_write")
+    if fs_read == CapabilityStatus.AVAILABLE and fs_write == CapabilityStatus.AVAILABLE:
+        cap_map["filesystem"] = CapabilityStatus.AVAILABLE
+    elif fs_read is not None or fs_write is not None:
+        cap_map["filesystem"] = CapabilityStatus.BLOCKED
+
+    if (
+        cap_map.get("readonly_plan_mode") == CapabilityStatus.AVAILABLE
+        or cap_map.get("readonly_review_mode") == CapabilityStatus.AVAILABLE
+    ):
+        cap_map["read_only_review"] = CapabilityStatus.AVAILABLE
+
+    return ProviderRuntimeObservation(
+        provider_id=report.provider_id,
+        provider_family=report.provider_family,
+        auth_mode=report.auth_mode,
+        operating_profile=report.operating_profile,
+        runtime_state=report.eligibility_state,
+        supported_models=report.supported_model_ids,
+        unverified_models=report.unverified_or_unavailable_model_ids,
+        model_states=dict(report.model_eligibility),
+        supported_modes=tuple(modes),
+        capabilities=cap_map,
+    )
+
+
 __all__ = [
     "CapabilityState",
     "ChildEnvironmentIsolationError",
     "FALLBACK_ANTIGRAVITY_WORKER_MODEL",
+    "ModelEligibilityState",
     "OperatingProfile",
     "OrchestrationRole",
     "PRIMARY_ANTIGRAVITY_WORKER_MODEL",
@@ -771,4 +873,5 @@ __all__ = [
     "qualify_antigravity_subscription_runtime",
     "qualify_codex_subscription_runtime",
     "qualify_desktop_only_surface",
+    "to_runtime_observation",
 ]

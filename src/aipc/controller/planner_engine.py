@@ -24,6 +24,11 @@ from aipc.agents.role_registry import (
     RoleSelectionRequest,
 )
 from aipc.controller.errors import ControllerError
+from aipc.controller.milestone_authorization import (
+    MilestoneAuthorizationTrustContext,
+    _normalize_milestone_id,
+    load_and_verify_milestone_authorization,
+)
 from aipc.controller.task_queue import (
     MilestoneAuthorizationEvidence,
     load_milestone_authorization_evidence,
@@ -189,6 +194,7 @@ class HumanGoalSpec(CanonicalRecord):
     approval_granted: StrictBool = False
     approval_id: str | None = None
     approval_evidence_path: str | None = None
+    milestone_trust_context: MilestoneAuthorizationTrustContext | None = None
 
     @model_validator(mode="after")
     def validate_goal_spec(self) -> Self:
@@ -213,38 +219,90 @@ class HumanGoalSpec(CanonicalRecord):
             _references_milestone_c(val)
             for val in (self.milestone_id, self.phase_id, self.phase_name)
         )
-        if refs_c7 or refs_c6 or refs_c5 or refs_c:
-            if (
-                self.approval_granted is not True
-                or not (self.approval_id and self.approval_id.strip())
-                or not (self.approval_evidence_path and self.approval_evidence_path.strip())
-            ):
-                raise ValueError(
-                    "milestone_id references unauthorized future milestone scope: "
-                    f"{self.milestone_id!r}"
-                )
+        if self.milestone_trust_context is not None:
             try:
-                evidence = load_milestone_authorization_evidence(
-                    Path(self.approval_evidence_path.strip())
-                )
-                verifier = (
-                    verify_milestone_authorization_scope
-                    if (refs_c5 or refs_c6 or refs_c7)
-                    else verify_milestone_c_authorization_scope
-                )
-                verifier(
-                    evidence,
-                    project_id=self.project_id,
-                    milestone_id=self.milestone_id,
+                verified_auth = load_and_verify_milestone_authorization(
+                    self.milestone_trust_context,
                     phase_id=self.phase_id,
                     in_scope_paths=self.in_scope_paths,
-                    expected_approval_id=self.approval_id.strip(),
+                    now=datetime.now(UTC),
                 )
+                if verified_auth.project_id != self.project_id:
+                    raise ValueError(
+                        f"project_id mismatch: {verified_auth.project_id!r} != {self.project_id!r}"
+                    )
+                if _normalize_milestone_id(verified_auth.milestone_id) != _normalize_milestone_id(
+                    self.milestone_id
+                ):
+                    raise ValueError(
+                        f"milestone_id mismatch: {verified_auth.milestone_id!r} != "
+                        f"{self.milestone_id!r}"
+                    )
             except Exception as exc:
-                raise ValueError(
-                    "milestone_id references unauthorized future milestone scope: "
-                    f"{self.milestone_id!r}"
-                ) from exc
+                raise ValueError(f"milestone_trust_context verification failed: {exc}") from exc
+
+        if refs_c7 or refs_c6 or refs_c5 or refs_c:
+            has_legacy_evidence = bool(
+                self.approval_evidence_path and self.approval_evidence_path.strip()
+            )
+            if self.milestone_trust_context is not None and self.approval_granted is True:
+                if has_legacy_evidence:
+                    try:
+                        evidence = load_milestone_authorization_evidence(
+                            Path(self.approval_evidence_path.strip())  # type: ignore[union-attr]
+                        )
+                        verifier = (
+                            verify_milestone_authorization_scope
+                            if (refs_c5 or refs_c6 or refs_c7)
+                            else verify_milestone_c_authorization_scope
+                        )
+                        verifier(
+                            evidence,
+                            project_id=self.project_id,
+                            milestone_id=self.milestone_id,
+                            phase_id=self.phase_id,
+                            in_scope_paths=self.in_scope_paths,
+                            expected_approval_id=(
+                                self.approval_id.strip() if self.approval_id else None
+                            ),
+                        )
+                    except Exception as exc:
+                        raise ValueError(
+                            "milestone_id references unauthorized future milestone scope: "
+                            f"{self.milestone_id!r}"
+                        ) from exc
+            else:
+                if (
+                    self.approval_granted is not True
+                    or not (self.approval_id and self.approval_id.strip())
+                    or not has_legacy_evidence
+                ):
+                    raise ValueError(
+                        "milestone_id references unauthorized future milestone scope: "
+                        f"{self.milestone_id!r}"
+                    )
+                try:
+                    evidence = load_milestone_authorization_evidence(
+                        Path(self.approval_evidence_path.strip())  # type: ignore[union-attr]
+                    )
+                    verifier = (
+                        verify_milestone_authorization_scope
+                        if (refs_c5 or refs_c6 or refs_c7)
+                        else verify_milestone_c_authorization_scope
+                    )
+                    verifier(
+                        evidence,
+                        project_id=self.project_id,
+                        milestone_id=self.milestone_id,
+                        phase_id=self.phase_id,
+                        in_scope_paths=self.in_scope_paths,
+                        expected_approval_id=self.approval_id.strip(),
+                    )
+                except Exception as exc:
+                    raise ValueError(
+                        "milestone_id references unauthorized future milestone scope: "
+                        f"{self.milestone_id!r}"
+                    ) from exc
         for label, val in (
             ("milestone_id", self.milestone_id),
             ("phase_id", self.phase_id),
@@ -732,6 +790,19 @@ class PlannerOrchestrationEngine:
                     final_outcome="BLOCKED",
                     final_project_state=blocked_state,
                 )
+
+            if goal.milestone_trust_context is not None:
+                verified_auth = load_and_verify_milestone_authorization(
+                    goal.milestone_trust_context,
+                    phase_id=goal.phase_id,
+                    in_scope_paths=goal.in_scope_paths,
+                    now=self.clock(),
+                )
+                if verified_auth.project_id != goal.project_id:
+                    raise ControllerError(
+                        f"External milestone grant project_id {verified_auth.project_id!r} "
+                        f"does not match goal project_id {goal.project_id!r}"
+                    )
 
             worker_binding = worker_dec.selected_binding
             agent_res = AgentResult.model_validate(worker_fn(task_req, worker_binding))
