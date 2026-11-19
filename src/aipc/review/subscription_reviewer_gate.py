@@ -163,7 +163,7 @@ from aipc.review.llm.subscription_transports import (
 from aipc.review.llm.transport import LLMReviewerTransport
 from aipc.review.models import BoundReview, Digest, PhaseGateDecision, ReviewContext
 from aipc.review.reviewer import DeterministicReviewer, bind_review
-from aipc.storage.json_store import load_json
+from aipc.storage.json_store import load_json, write_json_atomic
 from aipc.version.models import Commit
 
 
@@ -828,6 +828,7 @@ class IndependentSubscriptionReviewerGate:
         phase_gate: PhaseGate | None = None,
         deterministic_reviewer: DeterministicReviewer | None = None,
         transport_factory: TransportFactoryCallable | None = None,
+        exclusive_receipt_creation: bool = False,
     ) -> None:
         self.config = SubscriptionReviewerGateConfig.model_validate(config)
         self.role_registry = role_registry
@@ -836,6 +837,7 @@ class IndependentSubscriptionReviewerGate:
         self.transport_factory = (
             transport_factory or default_subscription_reviewer_transport_factory
         )
+        self._exclusive_receipt_creation = exclusive_receipt_creation
 
     def evaluate(
         self,
@@ -1687,7 +1689,10 @@ class IndependentSubscriptionReviewerGate:
             receipt_path=rel_or_abs,
             reasons=tuple(sanitize_text(r) for r in reasons if r),
         )
-        _write_json_exclusive_immutable(receipt_file, decision.model_dump(mode="json"))
+        if self._exclusive_receipt_creation:
+            _write_json_exclusive_immutable(receipt_file, decision.model_dump(mode="json"))
+        else:
+            write_json_atomic(receipt_file, decision.model_dump(mode="json"))
         return decision
 
 
@@ -2209,6 +2214,7 @@ def run_subscription_reviewer_job(
             config=job.gate_config,
             role_registry=registry,
             transport_factory=effective_transport_factory,
+            exclusive_receipt_creation=True,
         )
         decision = gate.evaluate(
             job.review_context,
