@@ -1,3 +1,20 @@
+## C.7 final local verification checkpoint (authoritative; supersedes older pending items below)
+
+Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: Milestone C.7 RCE01-RCE03; attempt history and counters remain in the canonical queue/ledger. All three implementations are committed and locally verified. Freeze/push, exact-SHA CI, exactly one independent CLI review and PR remain pending. No merge, auto-merge or Milestone D is authorized.
+
+Candidate: H:/000ProjectCode/AI_Project_Controller, branch gemini/aipc-2.0-milestone-c7. Source checkpoints: RCE01 68afc4c946ed498754f5d01d3fd29251adf0bf0f; RCE02 3056a103c3d367873dc68a2e9676b5c3e0022433; RCE03 0e4ea401f6db4a28fbd1efe33f7dae5a84cca397. Last Stable remains f98846e8639b3ab846afe49454a6f79f6b236c36. The subsequent documentation freeze SHA is recorded externally, avoiding a self-referential commit identifier.
+
+Fresh local evidence: RCE01 Windows18/Docker18; RCE02 Windows108 passed,1 POSIX-only skip / Docker7; RCE03 Windows26/Docker7, installed external templates validated and hash bound. Full regression invocation produced 1209 passed,1 skipped,1 failed in816.76s. The sole failure was Supervisor invocation of the trusted C03 isolation probe without its required flags, not a source failure. A separate sanitized invocation with --noconftest -p no:cacheprovider -o filterwarnings=default passed1/1 in0.17s. Both original and corrected evidence are retained; no test or implementation was edited to obtain this result. Ruff check/format (337 files), domain4/project2 schemas, offline wheel and git diff --check all exited0. Wheel SHA256: 28ebe64ed1839059df3757309a724415240a71385fdedfbb28c8f05112ea9993.
+
+Evidence root: H:/AIPC_Workspace/runtime_c/milestone_c7. Full run: full_verification_96d9e22377d94a83ae3492c449825173/verification_summary.json (original all_passed=false retained); full_verification_corrected_invocation_receipt.json + .sha256 records the diagnosis and focused correction. RCE03: rce03_final_host_codes.json, rce03_final_docker_receipt.json + .sha256, rce03_installed_template_manifest.json. Genuine RCE03 Hydrogen session3b9db1bd-7669-4042-adc4-06c9679e2cfa; one separately recorded formatter repair, no extra worker call. Source imports were checked against Candidate; Stable is never patched or imported from Candidate.
+
+Repair usage ZERO reset: Tier1=17/24; task-rce01=10/10, bootstrap-c7=3/6, task-rce02=3/6, task-rce03=1/6; Tier2=0/2. Historical actual worker invocations17 (central13 plus historical bootstrap4); historical actual inner correction1, current authorized decoupled single-pass stages0 inner corrections. Savings NOT_MEASURED. Canonical tasks remain DEFERRED for final independent review; local receipts are not independent LLM approvals.
+
+RCE01 provides the actual module CLI for fresh subscription review, canonical gate/triage and immutable receipts. RCE02 provides model-granular eligibility and external Controller-owned grants binding identity/scope/digest/Commander, with pinned external trust and legacy compatibility. RCE03 provides validated templates and isolated, idempotent per-project runtime paths. PROJECT.yaml cannot grant milestone authority. Controller-owned C7 record SHA256457d88e08629ede9191f863dcdcf6d978829bc72d8aad157c05aa2a99fb8d0bb remains external. D02 registry/dashboard/usage graphs remain future considerations.
+
+Next action: freeze this documentation checkpoint, push the authorized branch, verify Python3.12 and3.13 CI on that exact SHA, then exactly ONE fresh ephemeral read-only cross-provider review through python -m aipc.review.subscription_reviewer_gate. Only PASS with zero release blockers permits the C7 PR targeting master. Pause native automation on PR completion or hard blocker; keep it ACTIVE for quota handoff, stop at remaining quota<=12%. Timestamp: 2026-11-18 (Asia/Bangkok); precise command timestamps are retained in external receipts.
+
+---
 # Current architecture
 
 Phase 10 adds `aipc.controller`: a library-level, injected single-phase lifecycle
@@ -269,3 +286,26 @@ C03 `TrustedAcceptanceHarnessValidator`, and canonical domain models untouched:
   (`format_untrusted_cisl_diagnostic_feed`). Scope violations write external forensic SHA-256
   evidence before reverting unauthorized edits, and durable pass checkpoints prevent duplicate
   worker invocations or double-charging across mid-loop quota interruptions and process restarts.
+
+## Milestone C.7 — Runbook Compaction & Enforcement (`RCE01`–`RCE03`)
+
+Milestone C.7 strengthens operational isolation, external authority binding, and per-project
+runtime scaffolding while keeping `PhaseGate`, canonical domain models, and Stable (`stable_c`)
+unchanged:
+
+- **Decoupled Bridge & External Controller Authority (`aipc.controller.milestone_authorization`,
+  `RCE01`–`RCE02`):** `ControllerMilestoneAuthorizationRecord` and
+  `MilestoneAuthorizationTrustContext` bind `project_id`, `milestone_id`, `approved_scope`,
+  `approval_digest`, `commander_id`, expiry, and excluded roots to an external JSON record under
+  a Controller-owned trusted root. YAML files alone can never authorize a milestone. Provider-neutral
+  `model_states` and adapter `model_eligibility` prevent a rate-limited model from disabling
+  qualified siblings. Stable executes single-pass (`enable_cisl_inner_loop=false`) without C.7
+  policy flags, while a separate Candidate queue bridge manages the C.7 queue/ledger and
+  Candidate `--network none --read-only` Docker snapshot verifier (`aipc-cisl-verify:py313-v1`).
+- **Per-Project Scaffolding & Starter Templates (`aipc.project.scaffolding`, `templates/`,
+  `RCE03`):** Validates `PROJECT.yaml` (`ProjectDefinition` + canonical `Identifier`) and
+  `review_governance.yaml` (`ReviewGovernancePolicy`) while rejecting YAML milestone grants and
+  Milestone D scope. Deterministically and idempotently initializes external
+  `projects/<project_id>/runtime/{state,audit,worktrees}`, enforcing disjointness against
+  Candidate, Stable, candidate workspaces, and sibling project roots (rejecting traversal and
+  symlinks) and preserving all existing state, queue, ledger, receipt, lock, and unknown files.

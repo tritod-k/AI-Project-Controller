@@ -1,0 +1,42 @@
+policy_version: "1.0"
+policy_id: sample-project-governance-v1
+operating_profile: subscription_only
+owner: project-owner-placeholder
+source_authority: operator_owned_external_policy
+review:
+  preserve_raw_review: true
+  preserve_canonical_verdict: true
+  require_exact_candidate_sha: true
+  default_independence: prefer_cross_provider
+  require_objective_evidence_for_blockers: true
+  unsupported_or_unverifiable_critical_finding: NEEDS_TRIAGE_HUMAN
+  advisory:
+    auto_dispatch: false
+    action: AUDIT_BACKLOG_ONLY
+  release_blocker:
+    allow_release: false
+    auto_dispatch_only_if_authorized_and_within_budget: true
+  needs_triage:
+    allow_release_if_credible_unresolved: false
+    action: HUMAN_REVIEW_REQUIRED
+repair_budget:
+  default_auto_code_repairs_per_task: 2
+  total_auto_code_repairs_per_milestone: 8
+  budget_exhausted_action: HALT_ON_RETRY_EXHAUSTION
+  preserve_unresolved_blockers: true
+  counter_scope: approved_milestone_and_root_task_lineage
+  persist_across_restarts: true
+  persist_across_provider_fallback: true
+  reject_counter_reset_by_task_splitting: true
+  extension:
+    human_commander_approval_required: true
+    requires_explicit_task_and_scope: true
+    requires_max_additional_attempts: true
+    auditable_and_expiring: true
+change_scope:
+  cannot_expand_milestone_from_review: true
+  prohibit_speculative_security_hardening: true
+  no_second_phase_gate: true
+  no_auto_merge: true
+  no_auto_deploy: true
+  no_milestone_d: true

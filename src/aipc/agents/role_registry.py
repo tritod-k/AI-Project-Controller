@@ -23,6 +23,9 @@ RoleName = Literal["planner", "worker", "reviewer"]
 ModelTier = Literal["reasoning_high", "balanced", "fast_worker", "review_strict"]
 RoleExecutionMode = Literal["plan", "worker", "reviewer"]
 RuntimeQualificationState = Literal["QUALIFIED", "BLOCKED", "UNAVAILABLE"]
+ModelRuntimeState = Literal[
+    "QUALIFIED", "BLOCKED", "UNAVAILABLE", "RATE_LIMITED", "QUOTA_EXHAUSTED"
+]
 ReviewerIndependencePreference = Literal[
     "prefer_cross_provider",
     "cross_provider_required",
@@ -37,6 +40,10 @@ RejectionCode = Literal[
     "RUNTIME_NOT_QUALIFIED",
     "MODEL_UNVERIFIED",
     "MODEL_UNSUPPORTED",
+    "MODEL_RATE_LIMITED",
+    "MODEL_QUOTA_EXHAUSTED",
+    "MODEL_UNAVAILABLE",
+    "MODEL_BLOCKED",
     "MODE_UNSUPPORTED",
     "CAPABILITY_MISSING",
     "SAME_PROVIDER_REJECTED",
@@ -61,6 +68,7 @@ class ProviderRuntimeObservation(CanonicalRecord):
     runtime_state: RuntimeQualificationState
     supported_models: tuple[NonBlank, ...] = ()
     unverified_models: tuple[NonBlank, ...] = ()
+    model_states: dict[NonBlank, ModelRuntimeState] = Field(default_factory=dict)
     supported_modes: tuple[RoleExecutionMode, ...] = ()
     capabilities: dict[Capability, CapabilityStatus] = Field(default_factory=dict)
 
@@ -300,6 +308,28 @@ class RoleBasedModelRegistry:
                 )
                 continue
 
+            model_state = obs.model_states.get(binding.model_id)
+            if model_state is not None and model_state != "QUALIFIED":
+                state_to_code: dict[ModelRuntimeState, RejectionCode] = {
+                    "RATE_LIMITED": "MODEL_RATE_LIMITED",
+                    "QUOTA_EXHAUSTED": "MODEL_QUOTA_EXHAUSTED",
+                    "BLOCKED": "MODEL_BLOCKED",
+                    "UNAVAILABLE": "MODEL_UNAVAILABLE",
+                }
+                rejected.append(
+                    RejectedBindingReason(
+                        binding_id=binding.binding_id,
+                        provider_id=binding.provider_id,
+                        model_id=binding.model_id,
+                        code=state_to_code[model_state],
+                        detail=(
+                            f"Model '{binding.model_id}' state is '{model_state}' "
+                            f"on provider '{binding.provider_id}'."
+                        ),
+                    )
+                )
+                continue
+
             if binding.execution_mode not in obs.supported_modes:
                 rejected.append(
                     RejectedBindingReason(
@@ -517,6 +547,7 @@ def build_default_subscription_role_registry(
 
 __all__ = [
     "IndependenceClassification",
+    "ModelRuntimeState",
     "ModelTier",
     "ProviderRuntimeObservation",
     "RejectedBindingReason",

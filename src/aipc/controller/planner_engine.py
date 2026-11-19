@@ -24,6 +24,13 @@ from aipc.agents.role_registry import (
     RoleSelectionRequest,
 )
 from aipc.controller.errors import ControllerError
+from aipc.controller.milestone_authorization import (
+    MilestoneAuthorizationTrustContext,
+    _contains_forbidden_milestone_d,
+    _normalize_milestone_id,
+    load_and_verify_milestone_authorization,
+    requires_external_milestone_trust,
+)
 from aipc.controller.task_queue import (
     MilestoneAuthorizationEvidence,
     load_milestone_authorization_evidence,
@@ -65,16 +72,8 @@ _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS: tuple[str, ...] = (
     "milestone-d",
     "milestone_d",
     "workstream-d",
-    "milestone-c7",
-    "milestone_c7",
-    "milestone-c.7",
-    "milestone_c.7",
-    "workstream-c7",
-    "workstream-c.7",
-    "rce01",
-    "rce02",
-    "rce03",
 )
+_MILESTONE_D_TOKEN_RE = re.compile(r"(?<![a-z0-9])d(?:0[1-9]|[1-9]\d)(?![0-9])")
 _APPROVED_MILESTONE_C_TOKENS: tuple[str, ...] = (
     "milestone-c",
     "milestone_c",
@@ -93,10 +92,16 @@ _MILESTONE_C6_IDS: frozenset[str] = frozenset(
 _MILESTONE_C6_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]c\.?6|workstream[-_]c\.?6|c\.6|cisl0[1-3])(?![0-9])"
 )
+_MILESTONE_C7_IDS: frozenset[str] = frozenset(
+    {"milestone-c7", "milestone_c7", "milestone-c.7", "milestone_c.7", "c.7"}
+)
+_MILESTONE_C7_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]c\.?7|workstream[-_]c\.?7|c\.7|rce0[1-3])(?![0-9])"
+)
 _AUTHORIZED_GOAL_MILESTONE_RE = re.compile(
     r"^(?:phase-(?:0[1-9]|1\d|2[0-4])|milestone[-_]a|workstream[-_]a|aipc-2\.0-milestone-a|"
     r"milestone[-_]c|aipc-2\.0-milestone-c|milestone[-_]c\.?5|c\.5|"
-    r"milestone[-_]c\.?6|c\.6)$"
+    r"milestone[-_]c\.?6|c\.6|milestone[-_]c\.?7|c\.7)$"
 )
 
 
@@ -118,9 +123,20 @@ def _references_milestone_c6(text: str) -> bool:
     return bool(_MILESTONE_C6_TOKEN_RE.search(lowered))
 
 
+def _references_milestone_c7(text: str) -> bool:
+    lowered = text.strip().lower()
+    if lowered in _MILESTONE_C7_IDS:
+        return True
+    return bool(_MILESTONE_C7_TOKEN_RE.search(lowered))
+
+
 def _references_milestone_c(text: str) -> bool:
     lowered = text.strip().lower()
-    if _references_milestone_c5(lowered) or _references_milestone_c6(lowered):
+    if (
+        _references_milestone_c5(lowered)
+        or _references_milestone_c6(lowered)
+        or _references_milestone_c7(lowered)
+    ):
         return False
     if _MILESTONE_C_TOKEN_RE.search(lowered):
         return True
@@ -136,14 +152,19 @@ def _references_unauthorized_milestone(
     allow_milestone_c: bool = False,
     allow_milestone_c5: bool = False,
     allow_milestone_c6: bool = False,
+    allow_milestone_c7: bool = False,
 ) -> bool:
     lowered = text.strip().lower()
     if any(tok in lowered for tok in _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS):
+        return True
+    if _MILESTONE_D_TOKEN_RE.search(lowered):
         return True
     if _references_milestone_c5(lowered):
         return not allow_milestone_c5
     if _references_milestone_c6(lowered):
         return not allow_milestone_c6
+    if _references_milestone_c7(lowered):
+        return not allow_milestone_c7
     tokens = (
         tuple(t for t in _UNAUTHORIZED_MILESTONE_TOKENS if t not in _APPROVED_MILESTONE_C_TOKENS)
         if allow_milestone_c
@@ -175,10 +196,30 @@ class HumanGoalSpec(CanonicalRecord):
     approval_granted: StrictBool = False
     approval_id: str | None = None
     approval_evidence_path: str | None = None
+    milestone_trust_context: MilestoneAuthorizationTrustContext | None = None
 
     @model_validator(mode="after")
     def validate_goal_spec(self) -> Self:
-        if not _AUTHORIZED_GOAL_MILESTONE_RE.match(self.milestone_id.strip().lower()):
+        for val in (self.milestone_id, self.phase_id, self.phase_name):
+            if _contains_forbidden_milestone_d(val):
+                raise ValueError(
+                    "milestone_id references unauthorized future milestone scope: "
+                    f"{self.milestone_id!r}"
+                )
+        needs_external_trust = requires_external_milestone_trust(
+            milestone_id=self.milestone_id,
+            phase_id=self.phase_id,
+            phase_name=self.phase_name,
+        )
+        if needs_external_trust and self.milestone_trust_context is None:
+            raise ValueError(
+                "milestone_id references unauthorized future milestone scope: "
+                f"{self.milestone_id!r} (phase {self.phase_id!r}); requires "
+                "Controller-owned milestone_trust_context"
+            )
+        if self.milestone_trust_context is None and not _AUTHORIZED_GOAL_MILESTONE_RE.match(
+            self.milestone_id.strip().lower()
+        ):
             raise ValueError(
                 "milestone_id references unauthorized future milestone scope: "
                 f"{self.milestone_id!r}"
@@ -191,42 +232,109 @@ class HumanGoalSpec(CanonicalRecord):
             _references_milestone_c6(val)
             for val in (self.milestone_id, self.phase_id, self.phase_name)
         )
+        refs_c7 = any(
+            _references_milestone_c7(val)
+            for val in (self.milestone_id, self.phase_id, self.phase_name)
+        )
         refs_c = any(
             _references_milestone_c(val)
             for val in (self.milestone_id, self.phase_id, self.phase_name)
         )
-        if refs_c6 or refs_c5 or refs_c:
-            if (
-                self.approval_granted is not True
-                or not (self.approval_id and self.approval_id.strip())
-                or not (self.approval_evidence_path and self.approval_evidence_path.strip())
-            ):
-                raise ValueError(
-                    "milestone_id references unauthorized future milestone scope: "
-                    f"{self.milestone_id!r}"
-                )
+        if self.milestone_trust_context is not None:
             try:
-                evidence = load_milestone_authorization_evidence(
-                    Path(self.approval_evidence_path.strip())
-                )
-                verifier = (
-                    verify_milestone_authorization_scope
-                    if (refs_c5 or refs_c6)
-                    else verify_milestone_c_authorization_scope
-                )
-                verifier(
-                    evidence,
-                    project_id=self.project_id,
-                    milestone_id=self.milestone_id,
+                verified_auth = load_and_verify_milestone_authorization(
+                    self.milestone_trust_context,
                     phase_id=self.phase_id,
                     in_scope_paths=self.in_scope_paths,
-                    expected_approval_id=self.approval_id.strip(),
+                    now=datetime.now(UTC),
                 )
+                if verified_auth.project_id != self.project_id:
+                    raise ValueError(
+                        f"project_id mismatch: {verified_auth.project_id!r} != {self.project_id!r}"
+                    )
+                if _normalize_milestone_id(verified_auth.milestone_id) != _normalize_milestone_id(
+                    self.milestone_id
+                ):
+                    raise ValueError(
+                        f"milestone_id mismatch: {verified_auth.milestone_id!r} != "
+                        f"{self.milestone_id!r}"
+                    )
             except Exception as exc:
-                raise ValueError(
-                    "milestone_id references unauthorized future milestone scope: "
-                    f"{self.milestone_id!r}"
-                ) from exc
+                raise ValueError(f"milestone_trust_context verification failed: {exc}") from exc
+
+        if needs_external_trust and self.approval_granted is not True:
+            raise ValueError(
+                "milestone_id references unauthorized future milestone scope: "
+                f"{self.milestone_id!r}"
+            )
+        if refs_c7 or refs_c6 or refs_c5 or refs_c:
+            has_legacy_evidence = bool(
+                self.approval_evidence_path and self.approval_evidence_path.strip()
+            )
+            if self.milestone_trust_context is not None and self.approval_granted is True:
+                if has_legacy_evidence:
+                    try:
+                        evidence = load_milestone_authorization_evidence(
+                            Path(self.approval_evidence_path.strip())  # type: ignore[union-attr]
+                        )
+                        verifier = (
+                            verify_milestone_authorization_scope
+                            if (refs_c5 or refs_c6 or refs_c7)
+                            else verify_milestone_c_authorization_scope
+                        )
+                        verifier(
+                            evidence,
+                            project_id=self.project_id,
+                            milestone_id=self.milestone_id,
+                            phase_id=self.phase_id,
+                            in_scope_paths=self.in_scope_paths,
+                            expected_approval_id=(
+                                self.approval_id.strip() if self.approval_id else None
+                            ),
+                        )
+                    except Exception as exc:
+                        raise ValueError(
+                            "milestone_id references unauthorized future milestone scope: "
+                            f"{self.milestone_id!r}"
+                        ) from exc
+            else:
+                if refs_c7 or self.milestone_trust_context is None and needs_external_trust:
+                    raise ValueError(
+                        "milestone_id references unauthorized future milestone scope: "
+                        f"{self.milestone_id!r}; requires Controller-owned "
+                        "milestone_trust_context"
+                    )
+                if (
+                    self.approval_granted is not True
+                    or not (self.approval_id and self.approval_id.strip())
+                    or not has_legacy_evidence
+                ):
+                    raise ValueError(
+                        "milestone_id references unauthorized future milestone scope: "
+                        f"{self.milestone_id!r}"
+                    )
+                try:
+                    evidence = load_milestone_authorization_evidence(
+                        Path(self.approval_evidence_path.strip())  # type: ignore[union-attr]
+                    )
+                    verifier = (
+                        verify_milestone_authorization_scope
+                        if (refs_c5 or refs_c6 or refs_c7)
+                        else verify_milestone_c_authorization_scope
+                    )
+                    verifier(
+                        evidence,
+                        project_id=self.project_id,
+                        milestone_id=self.milestone_id,
+                        phase_id=self.phase_id,
+                        in_scope_paths=self.in_scope_paths,
+                        expected_approval_id=self.approval_id.strip(),
+                    )
+                except Exception as exc:
+                    raise ValueError(
+                        "milestone_id references unauthorized future milestone scope: "
+                        f"{self.milestone_id!r}"
+                    ) from exc
         for label, val in (
             ("milestone_id", self.milestone_id),
             ("phase_id", self.phase_id),
@@ -234,9 +342,12 @@ class HumanGoalSpec(CanonicalRecord):
         ):
             if _references_unauthorized_milestone(
                 val,
-                allow_milestone_c=self.approval_granted and refs_c and not refs_c5 and not refs_c6,
+                allow_milestone_c=(
+                    self.approval_granted and refs_c and not refs_c5 and not refs_c6 and not refs_c7
+                ),
                 allow_milestone_c5=self.approval_granted and refs_c5,
                 allow_milestone_c6=self.approval_granted and refs_c6,
+                allow_milestone_c7=self.approval_granted and refs_c7,
             ):
                 raise ValueError(f"{label} references unauthorized future milestone scope: '{val}'")
         overlap = set(self.in_scope_paths) & set(self.out_of_scope_paths)
@@ -711,6 +822,31 @@ class PlannerOrchestrationEngine:
                     final_outcome="BLOCKED",
                     final_project_state=blocked_state,
                 )
+
+            if (
+                requires_external_milestone_trust(
+                    milestone_id=goal.milestone_id,
+                    phase_id=goal.phase_id,
+                    phase_name=goal.phase_name,
+                )
+                and goal.milestone_trust_context is None
+            ):
+                raise ControllerError(
+                    f"External milestone_trust_context is required for "
+                    f"milestone {goal.milestone_id!r} (phase {goal.phase_id!r})"
+                )
+            if goal.milestone_trust_context is not None:
+                verified_auth = load_and_verify_milestone_authorization(
+                    goal.milestone_trust_context,
+                    phase_id=goal.phase_id,
+                    in_scope_paths=goal.in_scope_paths,
+                    now=self.clock(),
+                )
+                if verified_auth.project_id != goal.project_id:
+                    raise ControllerError(
+                        f"External milestone grant project_id {verified_auth.project_id!r} "
+                        f"does not match goal project_id {goal.project_id!r}"
+                    )
 
             worker_binding = worker_dec.selected_binding
             agent_res = AgentResult.model_validate(worker_fn(task_req, worker_binding))

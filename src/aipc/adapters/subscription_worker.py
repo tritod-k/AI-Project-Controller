@@ -54,6 +54,14 @@ from aipc.adapters.subscription_qualification import (
     qualify_codex_subscription_runtime,
 )
 from aipc.controller.errors import ControllerError, ProviderInterruption
+from aipc.controller.milestone_authorization import (
+    MilestoneAuthorizationError,
+    MilestoneAuthorizationTrustContext,
+    _contains_forbidden_milestone_d,
+    _normalize_milestone_id,
+    load_and_verify_milestone_authorization,
+    requires_external_milestone_trust,
+)
 from aipc.controller.repair_budget import (
     DurableRepairBudgetLedger,
     RepairBudgetError,
@@ -333,6 +341,7 @@ class SubscriptionWorkerConfig(CanonicalRecord):
     cisl_verifier_commands: tuple[str, ...] = ()
     budget_ledger_path: str | None = None
     policy_trust_context: dict[str, Any] | None = None
+    milestone_trust_context: MilestoneAuthorizationTrustContext | None = None
     explicit_root_task: str | None = None
 
     @model_validator(mode="after")
@@ -1091,8 +1100,16 @@ class AntigravitySubscriptionWorkerAutomation:
             requested_model=req_model,
         )
         if not decision.eligible or decision.resolved_model is None:
+            model_state = report.model_eligibility.get(req_model)
+            condition = (
+                ProviderCondition.RATE_LIMITED
+                if model_state == "RATE_LIMITED"
+                else ProviderCondition.QUOTA_EXHAUSTED
+                if model_state == "QUOTA_EXHAUSTED"
+                else ProviderCondition.UNAVAILABLE
+            )
             raise ProviderInterruption(
-                ProviderCondition.UNAVAILABLE,
+                condition,
                 pre_start_clean=worktree_is_clean,
                 ambiguous_side_effects=not worktree_is_clean,
             )
@@ -1607,6 +1624,42 @@ class AntigravitySubscriptionWorkerAutomation:
             raise AgentError(
                 "TaskRequest.workspace must match SubscriptionWorkerConfig.candidate_worktree."
             )
+
+        raw_ms = task.metadata.get("milestone_id") if isinstance(task.metadata, Mapping) else None
+        task_milestone_id = raw_ms.strip() if isinstance(raw_ms, str) and raw_ms.strip() else None
+        for val in (task_milestone_id, task.phase_id, task.task_id):
+            if val is not None and _contains_forbidden_milestone_d(val):
+                raise MilestoneAuthorizationError(
+                    f"Milestone D / forbidden future scope rejected: {val!r}"
+                )
+        needs_external_trust = requires_external_milestone_trust(
+            milestone_id=task_milestone_id,
+            phase_id=task.phase_id,
+            task_id=task.task_id,
+        )
+        if self._config.milestone_trust_context is None:
+            if needs_external_trust:
+                raise MilestoneAuthorizationError(
+                    f"External milestone_trust_context is required for phase {task.phase_id!r}"
+                )
+        else:
+            verified_auth = load_and_verify_milestone_authorization(
+                self._config.milestone_trust_context,
+                phase_id=task.phase_id,
+                in_scope_paths=self._config.in_scope_paths,
+            )
+            if verified_auth.project_id != task.project_id:
+                raise MilestoneAuthorizationError(
+                    f"External milestone grant project_id {verified_auth.project_id!r} "
+                    f"does not match TaskRequest.project_id {task.project_id!r}"
+                )
+            if task_milestone_id is not None and _normalize_milestone_id(
+                verified_auth.milestone_id
+            ) != _normalize_milestone_id(task_milestone_id):
+                raise MilestoneAuthorizationError(
+                    f"External milestone grant milestone_id {verified_auth.milestone_id!r} "
+                    f"does not match TaskRequest milestone_id {task_milestone_id!r}"
+                )
 
         pre_changes, _ = self._collect_git_changes_and_diff(worktree, sanitized_env)
         worktree_is_clean = not bool(pre_changes)
