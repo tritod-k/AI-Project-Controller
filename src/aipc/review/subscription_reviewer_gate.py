@@ -82,6 +82,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -162,8 +163,13 @@ from aipc.review.llm.subscription_transports import (
 from aipc.review.llm.transport import LLMReviewerTransport
 from aipc.review.models import BoundReview, Digest, PhaseGateDecision, ReviewContext
 from aipc.review.reviewer import DeterministicReviewer, bind_review
-from aipc.storage.json_store import load_json, write_json_atomic
+from aipc.storage.json_store import load_json
 from aipc.version.models import Commit
+
+
+class SubscriptionReviewerGateError(StateError):
+    """Fail-closed error on receipt path collision, symlink hazard, or overwrite."""
+
 
 ReviewerGateOutcome = Literal[
     "PASS",
@@ -1666,7 +1672,6 @@ class IndependentSubscriptionReviewerGate:
         reasons: tuple[str, ...],
     ) -> SubscriptionReviewerGateDecision:
         out_dir = Path(self.config.evidence_output_dir).resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
         receipt_file = out_dir / f"b02_reviewer_gate_{task_id}_att_{attempt:02d}.json"
         rel_or_abs = str(receipt_file.as_posix())
         decision = SubscriptionReviewerGateDecision(
@@ -1682,7 +1687,7 @@ class IndependentSubscriptionReviewerGate:
             receipt_path=rel_or_abs,
             reasons=tuple(sanitize_text(r) for r in reasons if r),
         )
-        write_json_atomic(receipt_file, decision.model_dump(mode="json"))
+        _write_json_exclusive_immutable(receipt_file, decision.model_dump(mode="json"))
         return decision
 
 
@@ -1890,42 +1895,126 @@ def qualify_subscription_reviewer_runtimes() -> tuple[ProviderRuntimeObservation
     return tuple(observations)
 
 
-def _write_sha256_sidecar_atomic(target_file: Path) -> Path:
-    sidecar = Path(f"{target_file}.sha256")
-    digest_hex = hashlib.sha256(target_file.read_bytes()).hexdigest()
-    payload = f"{digest_hex}  {target_file.name}\n"
-    temporary: Path | None = None
+def _assert_no_symlink_in_path(target: Path) -> None:
+    """Reject symlinks on the target path and every existing ancestor in its parent chain."""
+    for candidate in (target, *target.parents):
+        try:
+            st = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise SubscriptionReviewerGateError(
+                f"Cannot lstat receipt path component '{candidate}': {exc}"
+            ) from exc
+        if stat.S_ISLNK(st.st_mode):
+            raise SubscriptionReviewerGateError(
+                f"Symlink rejected in immutable receipt path: '{candidate}'."
+            )
+
+
+def _write_text_exclusive_no_symlink(target: Path, content: str) -> Path:
+    """Create a UTF-8 LF file exclusively via O_CREAT | O_EXCL, rejecting symlinks."""
+    _assert_no_symlink_in_path(target)
     try:
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            dir=sidecar.parent,
-            prefix=f".{sidecar.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(payload)
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SubscriptionReviewerGateError(
+            f"Cannot create parent directory for '{target}': {exc}"
+        ) from exc
+    _assert_no_symlink_in_path(target)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(target, flags, 0o600)
+    except FileExistsError as exc:
+        raise SubscriptionReviewerGateError(
+            f"Refusing to overwrite existing immutable receipt '{target}'."
+        ) from exc
+    except OSError as exc:
+        raise SubscriptionReviewerGateError(
+            f"Cannot exclusively create immutable receipt '{target}': {exc}"
+        ) from exc
+    fd_closed = False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            fd_closed = True
+            stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, sidecar)
     except OSError as exc:
-        raise StateError(f"Cannot atomically save sha256 sidecar: {sidecar}") from exc
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return sidecar
+        if not fd_closed:
+            os.close(fd)
+        raise SubscriptionReviewerGateError(
+            f"Cannot write immutable receipt '{target}': {exc}"
+        ) from exc
+    return target
+
+
+def _write_json_exclusive_immutable(target: Path, data: Mapping[str, Any]) -> Path:
+    """Persist immutable UTF-8 LF JSON exclusively via O_CREAT | O_EXCL."""
+    try:
+        serialized = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    except (ValueError, TypeError) as exc:
+        raise SubscriptionReviewerGateError(
+            f"Cannot serialize immutable receipt '{target}': {exc}"
+        ) from exc
+    return _write_text_exclusive_no_symlink(target, serialized)
+
+
+def _write_sha256_sidecar_exclusive(target_file: Path) -> Path:
+    """Persist immutable UTF-8 LF .sha256 sidecar exclusively via O_CREAT | O_EXCL."""
+    sidecar = Path(f"{target_file}.sha256")
+    try:
+        digest_hex = hashlib.sha256(target_file.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise SubscriptionReviewerGateError(
+            f"Cannot read receipt for sha256 sidecar '{target_file}': {exc}"
+        ) from exc
+    payload = f"{digest_hex}  {target_file.name}\n"
+    return _write_text_exclusive_no_symlink(sidecar, payload)
 
 
 def _persist_cli_receipt(
     receipt_path: Path,
     receipt: C7ReviewerCliReceipt,
 ) -> tuple[Path, Path]:
-    write_json_atomic(receipt_path, receipt.model_dump(mode="json"))
-    sidecar = _write_sha256_sidecar_atomic(receipt_path)
+    _write_json_exclusive_immutable(receipt_path, receipt.model_dump(mode="json"))
+    sidecar = _write_sha256_sidecar_exclusive(receipt_path)
     return receipt_path, sidecar
+
+
+def _assert_distinct_output_paths(named_paths: Sequence[tuple[str, Path]]) -> None:
+    """Fail closed if any two output paths alias lexically, canonically, or via inode/stat."""
+    records: list[tuple[str, Path, str, Path, os.stat_result | None]] = []
+    for label, path in named_paths:
+        _assert_no_symlink_in_path(path)
+        lexical = os.path.normcase(os.path.normpath(os.fspath(path)))
+        canonical = path.resolve(strict=False)
+        try:
+            st: os.stat_result | None = os.lstat(path)
+        except FileNotFoundError:
+            st = None
+        except OSError as exc:
+            raise SubscriptionReviewerGateError(
+                f"Cannot inspect output path '{label}' ({path}): {exc}"
+            ) from exc
+        records.append((label, path, lexical, canonical, st))
+
+    for idx, (label_a, _, lex_a, can_a, st_a) in enumerate(records):
+        for label_b, _, lex_b, can_b, st_b in records[idx + 1 :]:
+            lex_same = lex_a == lex_b
+            can_same = os.path.normcase(os.fspath(can_a)) == os.path.normcase(os.fspath(can_b))
+            stat_same = st_a is not None and st_b is not None and os.path.samestat(st_a, st_b)
+            if lex_same or can_same or stat_same:
+                raise SubscriptionReviewerGateError(
+                    f"Output path collision detected between '{label_a}' and '{label_b}': "
+                    f"'{can_a}' aliases '{can_b}'."
+                )
+
+    for label, path, _, _, st in records:
+        if st is not None:
+            raise SubscriptionReviewerGateError(f"Output path '{label}' already exists: '{path}'.")
 
 
 def _forbidden_output_roots(job: C7ReviewJob) -> tuple[Path, ...]:
@@ -1982,6 +2071,14 @@ def run_subscription_reviewer_job(
     ).hexdigest()
 
     forbidden = _forbidden_output_roots(job)
+    task_id = job.review_context.task.task_id
+    attempt = job.review_context.task.attempt
+    raw_cli_receipt_path = Path(job.cli_receipt_path)
+    raw_sidecar_path = Path(f"{job.cli_receipt_path}.sha256")
+    raw_gate_receipt_path = (
+        Path(job.gate_config.evidence_output_dir)
+        / f"b02_reviewer_gate_{task_id}_att_{attempt:02d}.json"
+    )
     try:
         cli_receipt_path = _assert_safe_output_path(
             job.cli_receipt_path,
@@ -1995,15 +2092,23 @@ def run_subscription_reviewer_job(
             label="gate_config.evidence_output_dir",
             is_dir=True,
         )
-    except ValueError:
-        return EXIT_MALFORMED_JOB, None
-
-    sidecar_path = Path(f"{cli_receipt_path}.sha256")
-    gate_receipt_path = (
-        evidence_out_dir / f"b02_reviewer_gate_{job.review_context.task.task_id}_att_"
-        f"{job.review_context.task.attempt:02d}.json"
-    )
-    if cli_receipt_path.exists() or sidecar_path.exists() or gate_receipt_path.exists():
+        sidecar_path = Path(f"{cli_receipt_path}.sha256")
+        gate_receipt_path = evidence_out_dir / f"b02_reviewer_gate_{task_id}_att_{attempt:02d}.json"
+        _assert_distinct_output_paths(
+            (
+                ("cli_receipt_path", raw_cli_receipt_path),
+                ("cli_receipt_sidecar_path", raw_sidecar_path),
+                ("gate_receipt_path", raw_gate_receipt_path),
+            )
+        )
+        _assert_distinct_output_paths(
+            (
+                ("cli_receipt_path", cli_receipt_path),
+                ("cli_receipt_sidecar_path", sidecar_path),
+                ("gate_receipt_path", gate_receipt_path),
+            )
+        )
+    except (ValueError, SubscriptionReviewerGateError):
         return EXIT_MALFORMED_JOB, None
 
     def _emit_and_return(
@@ -2050,131 +2155,140 @@ def run_subscription_reviewer_job(
         return exit_code, receipt
 
     try:
-        sanitized_env = build_sanitized_child_env()
-        assert_child_env_isolated(sanitized_env)
-    except ChildEnvironmentIsolationError as exc:
-        return _emit_and_return(
-            exit_code=EXIT_REVISE_OR_BLOCKED,
-            gate_outcome="BLOCKED",
-            reasons=(f"Sanitized child environment check failed: {sanitize_text(str(exc))}",),
+        try:
+            sanitized_env = build_sanitized_child_env()
+            assert_child_env_isolated(sanitized_env)
+        except ChildEnvironmentIsolationError as exc:
+            return _emit_and_return(
+                exit_code=EXIT_REVISE_OR_BLOCKED,
+                gate_outcome="BLOCKED",
+                reasons=(f"Sanitized child environment check failed: {sanitize_text(str(exc))}",),
+            )
+
+        try:
+            loaded_policy = load_review_governance_policy(job.trust_context)
+            if loaded_policy.project_id != job.review_context.project.project.id:
+                raise ReviewGovernancePolicyError("policy project_id does not match review_context")
+            if _normalize_c5_milestone_id(loaded_policy.milestone_id) != _normalize_c5_milestone_id(
+                job.task_contract.milestone_id
+            ):
+                raise ReviewGovernancePolicyError(
+                    "policy milestone_id does not match task_contract"
+                )
+        except (ReviewGovernancePolicyError, ValidationError, ValueError) as exc:
+            return _emit_and_return(
+                exit_code=EXIT_MALFORMED_JOB,
+                gate_outcome="MALFORMED_JOB",
+                reasons=(
+                    f"Trusted governance policy validation failed: {sanitize_text(str(exc))}",
+                ),
+            )
+
+        c_root = Path(job.gate_config.candidate_worktree).resolve()
+        pre_hash = _hash_snapshot(snapshot_candidate_workspace(c_root))
+
+        observations = (
+            runtime_probe()
+            if runtime_probe is not None
+            else qualify_subscription_reviewer_runtimes()
+        )
+        if job.role_bindings:
+            registry = RoleBasedModelRegistry(observations=lambda: observations)
+            for binding in job.role_bindings:
+                registry.register(binding)
+        else:
+            registry = build_default_subscription_role_registry(observations)
+
+        effective_transport_factory = (
+            transport_factory
+            or build_cli_subscription_reviewer_transport_factory(
+                additional_read_dirs=(Path(job.review_context.evidence_root).resolve(),),
+            )
+        )
+        gate = IndependentSubscriptionReviewerGate(
+            config=job.gate_config,
+            role_registry=registry,
+            transport_factory=effective_transport_factory,
+        )
+        decision = gate.evaluate(
+            job.review_context,
+            expected_candidate_sha=job.expected_candidate_sha,
+            worker_agent_id=job.worker_agent_id,
+            worker_provider_family=job.worker_provider_family,
+            worker_session_id=job.worker_session_id,
+            planner_provider_family=job.planner_provider_family,
+            planner_session_id=job.planner_session_id,
+            proposed_reviewer_session_id=job.proposed_reviewer_session_id,
+            inherited_chat_history=False,
+            read_only_sandbox=True,
+            attempted_binding_ids=job.attempted_binding_ids,
+            explicit_binding_id=job.explicit_binding_id,
         )
 
-    try:
-        loaded_policy = load_review_governance_policy(job.trust_context)
-        if loaded_policy.project_id != job.review_context.project.project.id:
-            raise ReviewGovernancePolicyError("policy project_id does not match review_context")
-        if _normalize_c5_milestone_id(loaded_policy.milestone_id) != _normalize_c5_milestone_id(
-            job.task_contract.milestone_id
-        ):
-            raise ReviewGovernancePolicyError("policy milestone_id does not match task_contract")
-    except (ReviewGovernancePolicyError, ValidationError, ValueError) as exc:
+        post_hash = _hash_snapshot(snapshot_candidate_workspace(c_root))
+        tree_mutated = pre_hash != post_hash
+        if tree_mutated and decision.gate_outcome == "PASS":
+            return _emit_and_return(
+                exit_code=EXIT_REVISE_OR_BLOCKED,
+                gate_outcome="BLOCKED",
+                reviewed_sha=decision.reviewed_commit_sha,
+                pre_hash=pre_hash,
+                post_hash=post_hash,
+                review_result=decision.review_result,
+                phase_gate_decision=decision.phase_gate_decision,
+                session_audit=decision.session_audit,
+                extra_refs=(decision.receipt_path,),
+                reasons=("Candidate workspace mutated during reviewer gate execution.",),
+            )
+
+        triage_decision: ReviewTriageDecision | None = None
+        triage_error: str | None = None
+        if decision.bound_review is not None:
+            try:
+                triage_decision = evaluate_review_triage(
+                    trust_context=job.trust_context,
+                    contract=job.task_contract,
+                    context=job.review_context,
+                    review=decision.review_result,
+                    bound_review=decision.bound_review,
+                    finding_descriptors=job.finding_descriptors,
+                )
+            except GovernanceTriageError as exc:
+                triage_error = sanitize_text(str(exc))
+
+        if triage_error is not None:
+            exit_code = EXIT_REVISE_OR_BLOCKED
+            cli_outcome: ReviewerGateOutcome = "BLOCKED"
+            reasons = (*decision.reasons, f"Governance triage failed: {triage_error}")
+        elif decision.gate_outcome == "PASS":
+            exit_code = EXIT_PASS
+            cli_outcome = "PASS"
+            reasons = decision.reasons
+        elif decision.gate_outcome == "WAITING_PROVIDER":
+            exit_code = EXIT_PROVIDER_UNAVAILABLE
+            cli_outcome = "WAITING_PROVIDER"
+            reasons = decision.reasons
+        else:
+            exit_code = EXIT_REVISE_OR_BLOCKED
+            cli_outcome = decision.gate_outcome
+            reasons = decision.reasons
+
         return _emit_and_return(
-            exit_code=EXIT_MALFORMED_JOB,
-            gate_outcome="MALFORMED_JOB",
-            reasons=(f"Trusted governance policy validation failed: {sanitize_text(str(exc))}",),
-        )
-
-    c_root = Path(job.gate_config.candidate_worktree).resolve()
-    pre_hash = _hash_snapshot(snapshot_candidate_workspace(c_root))
-
-    observations = (
-        runtime_probe() if runtime_probe is not None else qualify_subscription_reviewer_runtimes()
-    )
-    if job.role_bindings:
-        registry = RoleBasedModelRegistry(observations=lambda: observations)
-        for binding in job.role_bindings:
-            registry.register(binding)
-    else:
-        registry = build_default_subscription_role_registry(observations)
-
-    effective_transport_factory = (
-        transport_factory
-        or build_cli_subscription_reviewer_transport_factory(
-            additional_read_dirs=(Path(job.review_context.evidence_root).resolve(),),
-        )
-    )
-    gate = IndependentSubscriptionReviewerGate(
-        config=job.gate_config,
-        role_registry=registry,
-        transport_factory=effective_transport_factory,
-    )
-    decision = gate.evaluate(
-        job.review_context,
-        expected_candidate_sha=job.expected_candidate_sha,
-        worker_agent_id=job.worker_agent_id,
-        worker_provider_family=job.worker_provider_family,
-        worker_session_id=job.worker_session_id,
-        planner_provider_family=job.planner_provider_family,
-        planner_session_id=job.planner_session_id,
-        proposed_reviewer_session_id=job.proposed_reviewer_session_id,
-        inherited_chat_history=False,
-        read_only_sandbox=True,
-        attempted_binding_ids=job.attempted_binding_ids,
-        explicit_binding_id=job.explicit_binding_id,
-    )
-
-    post_hash = _hash_snapshot(snapshot_candidate_workspace(c_root))
-    tree_mutated = pre_hash != post_hash
-    if tree_mutated and decision.gate_outcome == "PASS":
-        return _emit_and_return(
-            exit_code=EXIT_REVISE_OR_BLOCKED,
-            gate_outcome="BLOCKED",
+            exit_code=exit_code,
+            gate_outcome=cli_outcome,
             reviewed_sha=decision.reviewed_commit_sha,
             pre_hash=pre_hash,
             post_hash=post_hash,
             review_result=decision.review_result,
             phase_gate_decision=decision.phase_gate_decision,
             session_audit=decision.session_audit,
+            triage_decision=triage_decision,
+            triage_error=triage_error,
             extra_refs=(decision.receipt_path,),
-            reasons=("Candidate workspace mutated during reviewer gate execution.",),
+            reasons=reasons,
         )
-
-    triage_decision: ReviewTriageDecision | None = None
-    triage_error: str | None = None
-    if decision.bound_review is not None:
-        try:
-            triage_decision = evaluate_review_triage(
-                trust_context=job.trust_context,
-                contract=job.task_contract,
-                context=job.review_context,
-                review=decision.review_result,
-                bound_review=decision.bound_review,
-                finding_descriptors=job.finding_descriptors,
-            )
-        except GovernanceTriageError as exc:
-            triage_error = sanitize_text(str(exc))
-
-    if triage_error is not None:
-        exit_code = EXIT_REVISE_OR_BLOCKED
-        cli_outcome: ReviewerGateOutcome = "BLOCKED"
-        reasons = (*decision.reasons, f"Governance triage failed: {triage_error}")
-    elif decision.gate_outcome == "PASS":
-        exit_code = EXIT_PASS
-        cli_outcome = "PASS"
-        reasons = decision.reasons
-    elif decision.gate_outcome == "WAITING_PROVIDER":
-        exit_code = EXIT_PROVIDER_UNAVAILABLE
-        cli_outcome = "WAITING_PROVIDER"
-        reasons = decision.reasons
-    else:
-        exit_code = EXIT_REVISE_OR_BLOCKED
-        cli_outcome = decision.gate_outcome
-        reasons = decision.reasons
-
-    return _emit_and_return(
-        exit_code=exit_code,
-        gate_outcome=cli_outcome,
-        reviewed_sha=decision.reviewed_commit_sha,
-        pre_hash=pre_hash,
-        post_hash=post_hash,
-        review_result=decision.review_result,
-        phase_gate_decision=decision.phase_gate_decision,
-        session_audit=decision.session_audit,
-        triage_decision=triage_decision,
-        triage_error=triage_error,
-        extra_refs=(decision.receipt_path,),
-        reasons=reasons,
-    )
+    except SubscriptionReviewerGateError:
+        return EXIT_MALFORMED_JOB, None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2223,6 +2337,7 @@ __all__ = [
     "SubprocessExecCallable",
     "SubscriptionReviewerGateConfig",
     "SubscriptionReviewerGateDecision",
+    "SubscriptionReviewerGateError",
     "TransportFactoryCallable",
     "build_cli_subscription_reviewer_transport_factory",
     "default_subscription_reviewer_transport_factory",

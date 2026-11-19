@@ -55,7 +55,9 @@ from aipc.review.subscription_reviewer_gate import (
     C7ReviewerCliReceipt,
     C7ReviewJob,
     SubscriptionReviewerGateConfig,
+    SubscriptionReviewerGateError,
     _report_to_observation,
+    _write_json_exclusive_immutable,
     build_cli_subscription_reviewer_transport_factory,
     get_c7_review_job_json_schema,
     main,
@@ -1301,3 +1303,100 @@ def test_remediation01_report_to_observation_preserves_model_eligibility_for_sel
         and rej.code == "MODEL_RATE_LIMITED"
         for rej in decision.rejected_bindings
     )
+
+
+@pytest.mark.parametrize("use_dot_segment", [False, True])
+def test_rce01_rejects_aliased_cli_and_gate_receipt_paths_before_reviewer(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+    use_dot_segment: bool,
+) -> None:
+    """Identical or lexically equivalent receipt paths fail closed before reviewer invocation."""
+    out_dir = tmp_path / "aliased_out"
+    job_path, job, _, _ = _build_job_bundle(
+        review_case,
+        tmp_path,
+        evidence_output_dir=out_dir,
+    )
+    task_id = job.review_context.task.task_id
+    attempt = job.review_context.task.attempt
+    gate_name = f"b02_reviewer_gate_{task_id}_att_{attempt:02d}.json"
+    aliased_cli_str = f"{out_dir}/./{gate_name}" if use_dot_segment else str(out_dir / gate_name)
+
+    raw_job = json.loads(job_path.read_text(encoding="utf-8"))
+    raw_job["cli_receipt_path"] = aliased_cli_str
+    job_path.write_text(json.dumps(raw_job, indent=2), encoding="utf-8")
+
+    gate_receipt = out_dir / gate_name
+    assert not out_dir.exists()
+    assert not gate_receipt.exists()
+
+    calls = 0
+
+    async def should_not_run(
+        req: LLMReviewRequest,
+        _env: Mapping[str, str],
+        _session_id: str,
+    ) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return proposal(req, status="PASS")
+
+    code, receipt = run_subscription_reviewer_job(
+        job_path,
+        runtime_probe=lambda: _probe(codex_ok=True, agy_ok=True),
+        transport_factory=_truthful_transport_factory(should_not_run),
+    )
+    assert code == EXIT_MALFORMED_JOB
+    assert receipt is None
+    assert calls == 0
+    assert not gate_receipt.exists()
+    assert not Path(f"{gate_receipt}.sha256").exists()
+
+
+@pytest.mark.parametrize("competing_target", ["gate", "cli"])
+def test_rce01_exclusive_creation_fails_closed_on_concurrent_competing_writer(
+    review_case: dict[str, Any],
+    tmp_path: Path,
+    competing_target: str,
+) -> None:
+    """Concurrent O_EXCL race fails closed and leaves competing writer bytes 100% unchanged."""
+    job_path, job, _, _ = _build_job_bundle(review_case, tmp_path / competing_target)
+    task_id = job.review_context.task.task_id
+    attempt = job.review_context.task.attempt
+    gate_receipt = (
+        Path(job.gate_config.evidence_output_dir)
+        / f"b02_reviewer_gate_{task_id}_att_{attempt:02d}.json"
+    )
+    cli_receipt = Path(job.cli_receipt_path)
+    sentinel = f'{{"competing": "{competing_target}_sentinel"}}\n'
+
+    async def racing_runner(
+        req: LLMReviewRequest,
+        _env: Mapping[str, str],
+        _session_id: str,
+    ) -> dict[str, Any]:
+        target = gate_receipt if competing_target == "gate" else cli_receipt
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(sentinel, encoding="utf-8", newline="\n")
+        return proposal(req, status="PASS")
+
+    code, receipt = run_subscription_reviewer_job(
+        job_path,
+        runtime_probe=lambda: _probe(codex_ok=True, agy_ok=True),
+        transport_factory=_truthful_transport_factory(racing_runner),
+    )
+    assert code == EXIT_MALFORMED_JOB
+    assert receipt is None
+    if competing_target == "gate":
+        assert gate_receipt.read_text(encoding="utf-8") == sentinel
+        assert not cli_receipt.exists()
+    else:
+        assert cli_receipt.read_text(encoding="utf-8") == sentinel
+        assert not Path(f"{cli_receipt}.sha256").exists()
+
+    direct_target = tmp_path / f"direct_{competing_target}.json"
+    direct_target.write_text(sentinel, encoding="utf-8", newline="\n")
+    with pytest.raises(SubscriptionReviewerGateError, match="Refusing to overwrite"):
+        _write_json_exclusive_immutable(direct_target, {"overwrite": "forbidden"})
+    assert direct_target.read_text(encoding="utf-8") == sentinel
