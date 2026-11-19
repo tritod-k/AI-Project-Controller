@@ -1,4 +1,33 @@
-# C.7 Recovery04 final local release checkpoint
+# C.7 Recovery05 final local release checkpoint
+
+This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.
+
+Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: AIPC 2.0 Milestone C.7 RCE01-RCE03 (`recovery05`). Human Commander K.TRITOD reviewed `recovery04` Independent Codex Review Cycle #3 (`ee015ca8f9828f5e29a4e08212be0228ac8a55b4`, CI run `44553280430` SUCCESS) and issued binding C.5 triage grant `c7_commander_tier2_cycle4_rce01_receipt_exclusivity_and_triage_grant.json` (`sha256: 5bd9441e2dc7d1c96d3635a98a726772cb36eb7f9ab5502c728152a5f1a241a1`):
+1. Formally accepted `RCE02`, `RCE03`, and `C7-VALIDATION` (all confirmed zero code defects in Cycle #3) conditioned on 100% byte-identical preservation of all `RCE02`/`RCE03` files and fresh full verification + exact-SHA CI on `frozenSHA_r4`.
+2. Authorized surgical `RCE01` repair (`src/aipc/review/subscription_reviewer_gate.py` + `tests/unit/test_c7_rce01_reviewer_cli.py`) for receipt-path alias rejection and atomic `O_EXCL` exclusive creation, followed by a single `RCE01`-only review (`Job 4A`).
+
+Candidate branch `gemini/aipc-2.0-milestone-c7` at `H:/000ProjectCode/AI_Project_Controller`; verified `tested_source_sha_r4`: `a191f3c2aca4962def12908b64dbd5ca974b2740` (commits `807380d9` + `a191f3c2`, Stable-managed subscription worker sessions `d21fbea3-49ee-46d8-b761-9c34cb8e2b67` and `320652a2-74d4-40c8-b0b0-25d05ab05ed6`; strictly `subscription_reviewer_gate.py` and `test_c7_rce01_reviewer_cli.py` ONLY, zero `RCE02`/`RCE03` edits). Stable Controller `H:/AIPC_Workspace/stable_c` remains clean and pinned at `f98846e8639b3ab846afe49454a6f79f6b236c36`.
+
+Implemented in `recovery05`:
+- Pre-execution & pre-write receipt-path collision guard (`_assert_distinct_output_paths`) rejecting identical or lexically/canonically aliased `cli_receipt_path`, `.sha256` sidecar, and computed `gate_receipt_path` before reviewer invocation.
+- Atomic exclusive file creation (`_write_json_exclusive_immutable` / `O_CREAT | O_EXCL` with pre-open symlink rejection) enforced for CLI receipts, `.sha256` sidecars, and C.7 CLI gate receipts (`exclusive_receipt_creation=True` in `run_subscription_reviewer_job`, defaulting `False` for legacy B02/B03 direct callers).
+- Regression tests in `tests/unit/test_c7_rce01_reviewer_cli.py` covering aliased receipt paths before reviewer invocation and concurrent competing writers (`gate` & `cli`).
+
+Fresh verification at `a191f3c2aca4962def12908b64dbd5ca974b2740`:
+- Standalone `--network none --read-only` Linux Docker `RCE01`+B02/B03: **44 passed, 0 skipped, 0 failed**, Ruff clean (`recovery05_rce01_final_docker_receipt.json`).
+- Full Windows regression suite: **1,561 passed, 1 skipped** (POSIX process groups), **0 failed** (`H:/AIPC_Workspace/runtime_c/milestone_c7/full_verification_r4_3b531ea669a94fd5a436a8451f7dd372`).
+- Trusted C03 isolated (`--noconftest -p no:cacheprovider -o filterwarnings=default`): **1 passed**.
+- Whole-repo `ruff check .` (0 errors), `ruff format --check .` (337 files formatted), domain (4) & project (2) schemas, offline wheel (`sha256: a6f01ff3d3f81c3792545707ccbc4d79a57741d67ce9ad46336131453375b23c`), `git diff --check`: all exit `0`.
+- Full `--network none --read-only` Linux Docker C.7/A04/C.5/C.6/C03 snapshot: **221 passed, 1 skipped** (nested Docker unavailable; 0 symlink skips), C03 **1 passed**, Ruff/schemas exit `0`, `snapshot_immutable: true`.
+
+ZERO-reset accounting: Tier-1 `34/42` (`task-rce01=13/16`, `task-rce02=10/12`, `task-rce03=7/12`, `bootstrap-c7=4/6`); Tier-2 `3/4` logical cycles (`6/7` CLI invocations prior to `Job 4A`); canonical invocation charges `29/42` (preserving 2 audited duplicate charges; 0 resets).
+
+Post-freeze external verification: this docs-only commit establishes exact `frozenSHA_r4`. External `source_equivalence_proof_r4.json`, exact-SHA Python 3.12/3.13 GitHub Actions CI, and single `RCE01`-only `Job 4A` review execute post-freeze against `frozenSHA_r4`. Only verified `Job 4A` `PASS` permits opening one PR targeting `master`. No merge, auto-merge, paid APIs, or Milestone D.
+
+Timestamp: 2026-11-19T23:53:00+07:00 (Asia/Bangkok).
+
+---
+## C.7 Recovery04 final local release checkpoint
 
 This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.
 

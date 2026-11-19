@@ -1,4 +1,25 @@
-# C.7 Recovery04 final local release checkpoint
+# C.7 Recovery05 final local release checkpoint
+
+This section is the authoritative pre-freeze evidence checkpoint; older sections below are preserved historical records and do not override it.
+
+Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: AIPC 2.0 Milestone C.7 RCE01-RCE03 (`recovery05`). Following Cycle #3 (`ee015ca8f9828f5e29a4e08212be0228ac8a55b4`), Human Commander K.TRITOD issued binding triage grant `c7_commander_tier2_cycle4_rce01_receipt_exclusivity_and_triage_grant.json` (`sha256: 5bd9441e2dc7d1c96d3635a98a726772cb36eb7f9ab5502c728152a5f1a241a1`) accepting zero-code-defect `RCE02`/`RCE03`/`C7-VALIDATION` (conditioned on 100% byte-identical `RCE02`/`RCE03` preservation + fresh full verification & CI) and authorizing surgical `RCE01` receipt-alias rejection & `O_EXCL` exclusive creation + single `Job 4A` (`RCE01`-only) review.
+
+Verified `tested_source_sha_r4`: `a191f3c2aca4962def12908b64dbd5ca974b2740` (strictly `src/aipc/review/subscription_reviewer_gate.py` and `tests/unit/test_c7_rce01_reviewer_cli.py`; zero `RCE02`/`RCE03` changes):
+- Standalone `--network none --read-only` Linux Docker `RCE01`+B02/B03: **44 passed, 0 skipped, 0 failed**, Ruff clean.
+- Full Windows regression suite: **1,561 passed, 1 skipped** (POSIX process groups), **0 failed** (`full_verification_r4_3b531ea669a94fd5a436a8451f7dd372`).
+- Trusted C03 isolated (`--noconftest -p no:cacheprovider -o filterwarnings=default`): **1 passed**.
+- Whole-repo Ruff check/format (337 files), domain (4) & project (2) schemas, offline wheel (`sha256: a6f01ff3d3f81c3792545707ccbc4d79a57741d67ce9ad46336131453375b23c`), `git diff --check`: all exit `0`.
+- Full `--network none --read-only` Linux Docker C.7/A04/C.5/C.6/C03 snapshot: **221 passed, 1 skipped** (nested Docker unavailable; 0 symlink skips), C03 **1 passed**, `snapshot_immutable: true`.
+- Stable Controller `H:/AIPC_Workspace/stable_c`: clean and pinned at `f98846e8639b3ab846afe49454a6f79f6b236c36`.
+
+ZERO-reset accounting: Tier-1 `34/42` (`task-rce01=13/16`, `task-rce02=10/12`, `task-rce03=7/12`, `bootstrap-c7=4/6`); Tier-2 `3/4` logical cycles (`6/7` CLI invocations prior to `Job 4A`); canonical invocation charges `29/42` (2 preserved duplicate charges, 0 resets).
+
+Post-freeze external verification: this docs-only commit establishes exact `frozenSHA_r4`. External `source_equivalence_proof_r4.json`, exact-SHA Python 3.12/3.13 GitHub Actions CI, and single `Job 4A` (`RCE01`) execute post-freeze against `frozenSHA_r4`.
+
+Timestamp: 2026-11-19T23:53:00+07:00 (Asia/Bangkok).
+
+---
+## C.7 Recovery04 final local release checkpoint
 
 This section is the authoritative pre-freeze evidence checkpoint; older sections below are preserved historical records and do not override it.
 
