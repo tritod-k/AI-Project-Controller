@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
+import aipc.project.scaffolding as scaffolding_mod
+from aipc.hardening.secrets import assert_no_secrets
 from aipc.project.scaffolding import (
     ProjectScaffoldingError,
     build_project_runtime_layout,
@@ -203,10 +206,7 @@ def test_rejects_symlink_alias_paths(tmp_path: Path) -> None:
         stable_root=stable_root,
     )
     alias_project = projects_root / "project2"
-    try:
-        alias_project.symlink_to(layout1.project_root, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("Symlink creation requires elevated privileges on this host")
+    _create_symlink_or_skip(alias_project, layout1.project_root, target_is_directory=True)
 
     with pytest.raises(ProjectScaffoldingError):
         initialize_project_runtime(
@@ -217,7 +217,7 @@ def test_rejects_symlink_alias_paths(tmp_path: Path) -> None:
         )
 
     escape_link = layout1.state_dir / "escape_dir"
-    escape_link.symlink_to(candidate_root, target_is_directory=True)
+    _create_symlink_or_skip(escape_link, candidate_root, target_is_directory=True)
     with pytest.raises(ProjectScaffoldingError):
         resolve_project_runtime_path(
             layout1,
@@ -330,3 +330,414 @@ def test_module_cli_validate_templates_and_init(
     assert (projects_root / "proj-cli-01" / "runtime" / "state").is_dir()
     assert (projects_root / "proj-cli-01" / "runtime" / "audit").is_dir()
     assert (projects_root / "proj-cli-01" / "runtime" / "worktrees").is_dir()
+
+
+def _create_symlink_or_skip(
+    link_path: Path, target_path: Path, *, target_is_directory: bool = False
+) -> None:
+    try:
+        link_path.symlink_to(target_path, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Symlink creation requires WinError 1314 privilege on Windows")
+        raise
+
+
+def _make_roots(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    projects_root = tmp_path / "projects"
+    candidate_root = tmp_path / "candidate_aipc"
+    stable_root = tmp_path / "stable_aipc"
+    external_dir = tmp_path / "external_target"
+    for path in (projects_root, candidate_root, stable_root, external_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    return projects_root, candidate_root, stable_root, external_dir
+
+
+@pytest.mark.parametrize(
+    ("filename", "sentinel_bytes"),
+    [
+        ("project_state.json", b'{"project_id": "project1", "sentinel": "ext-state"}\n'),
+        ("canonical_queue.json", b'{"project_id": "project1", "sentinel": "ext-queue"}\n'),
+        ("repair_budget_ledger.json", b'{"project_id": "project1", "sentinel": "ext-ledger"}\n'),
+        ("controller.lock", b"external-lock-sentinel\n"),
+    ],
+)
+def test_remediation01_rejects_preexisting_external_state_file_symlinks(
+    tmp_path: Path, filename: str, sentinel_bytes: bytes
+) -> None:
+    projects_root, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    state_dir = projects_root / "project1" / "runtime" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    external_target = external_dir / f"outside_{filename}"
+    external_target.write_bytes(sentinel_bytes)
+    _create_symlink_or_skip(state_dir / filename, external_target, target_is_directory=False)
+
+    with pytest.raises(ProjectScaffoldingError):
+        build_project_runtime_layout(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert external_target.read_bytes() == sentinel_bytes
+
+
+def test_remediation01_rejects_external_manifest_symlink_with_matching_project_id(
+    tmp_path: Path,
+) -> None:
+    projects_root, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    audit_dir = projects_root / "project1" / "runtime" / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    external_manifest = external_dir / "outside_manifest.json"
+    sentinel_bytes = b'{"schema_version": "1.0", "project_id": "project1", "note": "outside"}\n'
+    external_manifest.write_bytes(sentinel_bytes)
+    _create_symlink_or_skip(
+        audit_dir / "scaffold_manifest.json",
+        external_manifest,
+        target_is_directory=False,
+    )
+
+    with pytest.raises(ProjectScaffoldingError):
+        build_project_runtime_layout(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert external_manifest.read_bytes() == sentinel_bytes
+
+
+@pytest.mark.parametrize(
+    ("subdir", "filename", "dangling_name"),
+    [
+        ("state", "project_state.json", "missing_state.json"),
+        ("state", "canonical_queue.json", "missing_queue.json"),
+        ("state", "repair_budget_ledger.json", "missing_ledger.json"),
+        ("state", "controller.lock", "missing_lock.lock"),
+        ("audit", "scaffold_manifest.json", "missing_manifest.json"),
+    ],
+)
+def test_remediation01_rejects_dangling_file_and_manifest_symlinks(
+    tmp_path: Path, subdir: str, filename: str, dangling_name: str
+) -> None:
+    projects_root, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    parent_dir = projects_root / "project1" / "runtime" / subdir
+    parent_dir.mkdir(parents=True, exist_ok=True)
+
+    dangling_target = external_dir / dangling_name
+    assert not dangling_target.exists()
+    _create_symlink_or_skip(parent_dir / filename, dangling_target, target_is_directory=False)
+
+    with pytest.raises(ProjectScaffoldingError):
+        build_project_runtime_layout(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert not dangling_target.exists()
+
+
+def test_remediation01_rejects_nested_ancestor_directory_aliases_below_runtime_root(
+    tmp_path: Path,
+) -> None:
+    projects_root, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    layout = initialize_project_runtime(
+        projects_root=projects_root,
+        project_id="project1",
+        candidate_root=candidate_root,
+        stable_root=stable_root,
+    )
+
+    outside_file = external_dir / "nested" / "deep.json"
+    outside_file.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_bytes = b'{"sentinel": "outside-nested"}\n'
+    outside_file.write_bytes(sentinel_bytes)
+
+    state_alias = layout.state_dir / "nested_alias"
+    _create_symlink_or_skip(state_alias, external_dir, target_is_directory=True)
+
+    dangling_dir = external_dir / "missing_receipts_dir"
+    assert not dangling_dir.exists()
+    receipt_alias = layout.receipt_dir / "dangling_nested"
+    _create_symlink_or_skip(receipt_alias, dangling_dir, target_is_directory=True)
+
+    with pytest.raises(ProjectScaffoldingError):
+        resolve_project_runtime_path(
+            layout,
+            "state/nested_alias/nested/deep.json",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        resolve_project_runtime_path(
+            layout,
+            "audit/receipts/dangling_nested/sub/r1.json",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert outside_file.read_bytes() == sentinel_bytes
+    assert not dangling_dir.exists()
+
+
+def test_remediation01_write_boundary_rejects_stale_check_manifest_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    probe_target = external_dir / "probe.txt"
+    probe_target.write_text("probe\n", encoding="utf-8")
+    probe_link = tmp_path / "probe_link.txt"
+    _create_symlink_or_skip(probe_link, probe_target, target_is_directory=False)
+    probe_link.unlink()
+
+    external_manifest = external_dir / "outside_manifest.json"
+    sentinel_bytes = b'{"sentinel": "unchanged-outside"}\n'
+    external_manifest.write_bytes(sentinel_bytes)
+
+    injected = False
+
+    def _inject_manifest_symlink(payload: object) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            manifest_link = (
+                projects_root / "project1" / "runtime" / "audit" / "scaffold_manifest.json"
+            )
+            manifest_link.symlink_to(external_manifest, target_is_directory=False)
+        assert_no_secrets(payload)
+
+    monkeypatch.setattr(scaffolding_mod, "assert_no_secrets", _inject_manifest_symlink)
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert injected is True
+    assert external_manifest.read_bytes() == sentinel_bytes
+
+
+def test_remediation01_write_boundary_rejects_stale_check_audit_dir_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects_root, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    probe_dir = external_dir / "probe_dir"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    probe_link = tmp_path / "probe_dir_link"
+    _create_symlink_or_skip(probe_link, probe_dir, target_is_directory=True)
+    probe_link.unlink()
+
+    external_audit = external_dir / "outside_audit"
+    external_audit.mkdir(parents=True, exist_ok=True)
+
+    injected = False
+
+    def _inject_audit_dir_symlink(payload: object) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            audit_dir = projects_root / "project1" / "runtime" / "audit"
+            (audit_dir / "receipts").rmdir()
+            audit_dir.rmdir()
+            audit_dir.symlink_to(external_audit, target_is_directory=True)
+        assert_no_secrets(payload)
+
+    monkeypatch.setattr(scaffolding_mod, "assert_no_secrets", _inject_audit_dir_symlink)
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert injected is True
+    assert not (external_audit / "scaffold_manifest.json").exists()
+
+
+def test_remediation01_rejects_receipt_deep_nested_ancestor_and_lexical_escape(
+    tmp_path: Path,
+) -> None:
+    projects_root, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    layout = initialize_project_runtime(
+        projects_root=projects_root,
+        project_id="project1",
+        candidate_root=candidate_root,
+        stable_root=stable_root,
+    )
+
+    outside_receipt = external_dir / "nested" / "r1.json"
+    outside_receipt.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_bytes = b'{"project_id": "project1", "sentinel": "outside-receipt"}\n'
+    outside_receipt.write_bytes(sentinel_bytes)
+
+    deep_parent = layout.receipt_dir / "level1" / "level2"
+    deep_parent.mkdir(parents=True, exist_ok=True)
+    _create_symlink_or_skip(deep_parent / "alias", external_dir, target_is_directory=True)
+
+    with pytest.raises(ProjectScaffoldingError):
+        resolve_project_runtime_path(
+            layout,
+            "audit/receipts/level1/level2/alias/nested/r1.json",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        resolve_project_runtime_path(
+            layout,
+            "audit/receipts/../../outside.json",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        resolve_project_runtime_path(
+            layout,
+            outside_receipt,
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert outside_receipt.read_bytes() == sentinel_bytes
+
+
+def test_remediation02_rejects_preexisting_ancestor_symlink_above_projects_root(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    external_projects = external_dir / "projects"
+    external_projects.mkdir(parents=True, exist_ok=True)
+    sentinel = external_projects / "sentinel.txt"
+    sentinel_bytes = b"external-ancestor-sentinel\n"
+    sentinel.write_bytes(sentinel_bytes)
+
+    alias_parent = tmp_path / "alias_parent"
+    _create_symlink_or_skip(alias_parent, external_dir, target_is_directory=True)
+    aliased_projects_root = alias_parent / "projects"
+
+    with pytest.raises(ProjectScaffoldingError):
+        build_project_runtime_layout(
+            projects_root=aliased_projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=aliased_projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert not (external_projects / "project1").exists()
+    assert list(external_projects.iterdir()) == [sentinel]
+
+
+def test_remediation02_rejects_dangling_ancestor_symlink_above_projects_root(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    dangling_parent = external_dir / "missing_parent"
+    assert not dangling_parent.exists()
+
+    alias_parent = tmp_path / "dangling_alias"
+    _create_symlink_or_skip(alias_parent, dangling_parent, target_is_directory=True)
+    aliased_projects_root = alias_parent / "projects"
+
+    with pytest.raises(ProjectScaffoldingError):
+        build_project_runtime_layout(
+            projects_root=aliased_projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=aliased_projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert not dangling_parent.exists()
+
+
+def test_remediation02_rejects_ancestor_symlink_preserving_matching_project(
+    tmp_path: Path,
+) -> None:
+    _, candidate_root, stable_root, external_dir = _make_roots(tmp_path)
+    ext_project = external_dir / "projects" / "project1"
+    ext_audit = ext_project / "runtime" / "audit"
+    ext_state = ext_project / "runtime" / "state"
+    ext_audit.mkdir(parents=True, exist_ok=True)
+    ext_state.mkdir(parents=True, exist_ok=True)
+
+    manifest_bytes = b'{"schema_version": "1.0", "project_id": "project1", "note": "ext"}\n'
+    state_bytes = b'{"project_id": "project1", "sentinel": "ext-ancestor-state"}\n'
+    ext_manifest = ext_audit / "scaffold_manifest.json"
+    ext_state_file = ext_state / "project_state.json"
+    ext_manifest.write_bytes(manifest_bytes)
+    ext_state_file.write_bytes(state_bytes)
+
+    alias_parent = tmp_path / "alias_parent"
+    _create_symlink_or_skip(alias_parent, external_dir, target_is_directory=True)
+    aliased_projects_root = alias_parent / "projects"
+
+    with pytest.raises(ProjectScaffoldingError):
+        build_project_runtime_layout(
+            projects_root=aliased_projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    with pytest.raises(ProjectScaffoldingError):
+        initialize_project_runtime(
+            projects_root=aliased_projects_root,
+            project_id="project1",
+            candidate_root=candidate_root,
+            stable_root=stable_root,
+        )
+
+    assert ext_manifest.read_bytes() == manifest_bytes
+    assert ext_state_file.read_bytes() == state_bytes

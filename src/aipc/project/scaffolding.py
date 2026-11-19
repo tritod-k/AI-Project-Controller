@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -30,7 +33,7 @@ from aipc.review.governance_policy import (
     ReviewGovernancePolicyError,
     _UniqueKeySafeLoader,
 )
-from aipc.storage.json_store import load_json, write_json_atomic
+from aipc.storage.json_store import load_json
 from aipc.version.models import Identifier
 
 _IDENTIFIER_ADAPTER = TypeAdapter(Identifier)
@@ -104,13 +107,73 @@ def validate_project_identifier(project_id: str) -> Identifier:
     return validated
 
 
+def _assert_not_symlink_lstat(path: Path, *, label: str) -> os.stat_result | None:
+    """Inspect path via lstat without following symlinks; reject symlinks and errors."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except NotADirectoryError as exc:
+        raise ProjectScaffoldingError(f"Non-directory ancestor in {label}: {path}") from exc
+    except OSError as exc:
+        raise ProjectScaffoldingError(f"Cannot lstat {label} ({path}): {exc}") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise ProjectScaffoldingError(f"Symlink path is forbidden for {label}: {path}")
+    return st
+
+
 def _check_no_traversal_or_symlink(path: Path, *, label: str) -> None:
     if "\x00" in str(path):
         raise ProjectScaffoldingError(f"Null byte in {label} path")
     if ".." in path.parts:
         raise ProjectScaffoldingError(f"Parent traversal '..' is forbidden in {label}: {path}")
-    if path.is_symlink():
-        raise ProjectScaffoldingError(f"Symlink path is forbidden for {label}: {path}")
+    _assert_not_symlink_lstat(path, label=label)
+
+
+def _assert_no_ancestor_symlinks(path: Path, *, label: str) -> None:
+    """Inspect all lexical path components via lstat without following symlinks."""
+    if not path.parts:
+        return
+    current = Path(path.parts[0])
+    for part in path.parts[1:]:
+        current = current / part
+        _assert_not_symlink_lstat(current, label=label)
+
+
+def _assert_lexical_chain_and_containment(
+    root: Path,
+    target: Path,
+    *,
+    label: str,
+    expect_dir: bool | None = None,
+) -> Path:
+    """Verify no symlinks in root..target via lstat and verify lexical+resolved containment."""
+    _check_no_traversal_or_symlink(root, label=f"{label}_root")
+    if root.is_absolute():
+        _assert_no_ancestor_symlinks(root, label=f"{label}_root")
+    _check_no_traversal_or_symlink(target, label=label)
+    if target != root and not target.is_relative_to(root):
+        raise ProjectScaffoldingError(f"{label} ({target}) is lexically outside {root}")
+
+    _assert_not_symlink_lstat(root, label=f"{label}_root")
+    rel = target.relative_to(root)
+    current = root
+    for part in rel.parts:
+        current = current / part
+        _assert_not_symlink_lstat(current, label=label)
+
+    st = _assert_not_symlink_lstat(target, label=label)
+    if st is not None and expect_dir is not None:
+        if expect_dir and not stat.S_ISDIR(st.st_mode):
+            raise ProjectScaffoldingError(f"Expected directory for {label}: {target}")
+        if not expect_dir and not stat.S_ISREG(st.st_mode):
+            raise ProjectScaffoldingError(f"Expected regular file for {label}: {target}")
+
+    resolved_root = root.resolve()
+    resolved_target = target.resolve()
+    if resolved_target != resolved_root and not resolved_target.is_relative_to(resolved_root):
+        raise ProjectScaffoldingError(f"{label} escapes {root} after resolution: {resolved_target}")
+    return resolved_target
 
 
 def _require_absolute_clean_path(path: Path, *, label: str) -> Path:
@@ -119,6 +182,7 @@ def _require_absolute_clean_path(path: Path, *, label: str) -> Path:
     _check_no_traversal_or_symlink(path, label=label)
     if not path.is_absolute():
         raise ProjectScaffoldingError(f"{label} must be an absolute path: {path}")
+    _assert_no_ancestor_symlinks(path, label=label)
     return path
 
 
@@ -160,7 +224,8 @@ def _check_no_yaml_milestone_grant(data: Any, *, label: str) -> None:
 
 def _load_safe_yaml_mapping(path: Path, *, label: str) -> tuple[str, dict[str, Any]]:
     _check_no_traversal_or_symlink(path, label=label)
-    if not path.exists() or not path.is_file():
+    st = _assert_not_symlink_lstat(path, label=label)
+    if st is None or not stat.S_ISREG(st.st_mode):
         raise ProjectScaffoldingError(f"{label} file does not exist: {path}")
     try:
         raw_text = path.read_text(encoding="utf-8")
@@ -226,15 +291,20 @@ def build_project_runtime_layout(
     clean_candidate_root = _require_absolute_clean_path(candidate_root, label="candidate_root")
     clean_stable_root = _require_absolute_clean_path(stable_root, label="stable_root")
 
-    if clean_projects_root.exists() and clean_projects_root.is_symlink():
-        raise ProjectScaffoldingError(f"projects_root cannot be a symlink: {clean_projects_root}")
+    _assert_not_symlink_lstat(clean_projects_root, label="projects_root")
+    base_projects_root = clean_projects_root.resolve()
 
-    project_root = clean_projects_root / validated_id
+    project_root = base_projects_root / validated_id
     runtime_root = project_root / "runtime"
     state_dir = runtime_root / "state"
     audit_dir = runtime_root / "audit"
     worktrees_dir = runtime_root / "worktrees"
     receipt_dir = audit_dir / "receipts"
+    project_state_path = state_dir / "project_state.json"
+    queue_path = state_dir / "canonical_queue.json"
+    budget_ledger_path = state_dir / "repair_budget_ledger.json"
+    lock_path = state_dir / "controller.lock"
+    scaffold_manifest_path = audit_dir / "scaffold_manifest.json"
 
     for dir_label, dir_path in (
         ("project_root", project_root),
@@ -244,10 +314,31 @@ def build_project_runtime_layout(
         ("worktrees_dir", worktrees_dir),
         ("receipt_dir", receipt_dir),
     ):
-        _check_no_traversal_or_symlink(dir_path, label=dir_label)
+        _assert_lexical_chain_and_containment(
+            base_projects_root, dir_path, label=dir_label, expect_dir=True
+        )
+
+    for file_label, file_path in (
+        ("project_state_path", project_state_path),
+        ("queue_path", queue_path),
+        ("budget_ledger_path", budget_ledger_path),
+        ("lock_path", lock_path),
+        ("scaffold_manifest_path", scaffold_manifest_path),
+    ):
+        _assert_lexical_chain_and_containment(
+            runtime_root, file_path, label=file_label, expect_dir=False
+        )
 
     resolved_project_root = project_root.resolve()
     resolved_runtime_root = runtime_root.resolve()
+    if resolved_project_root != base_projects_root / validated_id:
+        raise ProjectScaffoldingError(
+            f"project_root resolved outside expected location: {resolved_project_root}"
+        )
+    if resolved_runtime_root != resolved_project_root / "runtime":
+        raise ProjectScaffoldingError(
+            f"runtime_root resolved outside expected location: {resolved_runtime_root}"
+        )
 
     forbidden_for_project: list[tuple[str, Path]] = [
         ("candidate_root", clean_candidate_root),
@@ -257,8 +348,8 @@ def build_project_runtime_layout(
         clean_other = _require_absolute_clean_path(raw_other, label=f"other_project_roots[{idx}]")
         forbidden_for_project.append((f"other_project_roots[{idx}]", clean_other))
 
-    if clean_projects_root.exists() and clean_projects_root.is_dir():
-        for sibling in clean_projects_root.iterdir():
+    if base_projects_root.exists() and base_projects_root.is_dir():
+        for sibling in base_projects_root.iterdir():
             if sibling.name == validated_id:
                 continue
             forbidden_for_project.append((f"sibling_project[{sibling.name}]", sibling))
@@ -299,17 +390,17 @@ def build_project_runtime_layout(
 
     return ProjectRuntimeLayout(
         project_id=validated_id,
-        project_root=resolved_project_root,
-        runtime_root=resolved_runtime_root,
-        state_dir=state_dir.resolve(),
-        audit_dir=audit_dir.resolve(),
-        worktrees_dir=worktrees_dir.resolve(),
-        project_state_path=(state_dir / "project_state.json").resolve(),
-        queue_path=(state_dir / "canonical_queue.json").resolve(),
-        budget_ledger_path=(state_dir / "repair_budget_ledger.json").resolve(),
-        receipt_dir=receipt_dir.resolve(),
-        lock_path=(state_dir / "controller.lock").resolve(),
-        scaffold_manifest_path=(audit_dir / "scaffold_manifest.json").resolve(),
+        project_root=project_root,
+        runtime_root=runtime_root,
+        state_dir=state_dir,
+        audit_dir=audit_dir,
+        worktrees_dir=worktrees_dir,
+        project_state_path=project_state_path,
+        queue_path=queue_path,
+        budget_ledger_path=budget_ledger_path,
+        receipt_dir=receipt_dir,
+        lock_path=lock_path,
+        scaffold_manifest_path=scaffold_manifest_path,
     )
 
 
@@ -325,21 +416,13 @@ def resolve_project_runtime_path(
     raw_target = Path(target)
     _check_no_traversal_or_symlink(raw_target, label="runtime_target")
 
+    _assert_lexical_chain_and_containment(
+        layout.project_root, layout.runtime_root, label="runtime_root", expect_dir=True
+    )
     joined = raw_target if raw_target.is_absolute() else layout.runtime_root / raw_target
-    _check_no_traversal_or_symlink(joined, label="runtime_joined")
-
-    # Reject any intermediate symlink between runtime_root and joined.
-    current = joined
-    while current != layout.runtime_root and current != current.parent:
-        if current.is_symlink():
-            raise ProjectScaffoldingError(f"Symlink component forbidden inside runtime: {current}")
-        current = current.parent
-
-    resolved = joined.resolve()
-    if not resolved.is_relative_to(layout.runtime_root):
-        raise ProjectScaffoldingError(
-            f"Path escapes project runtime_root ({layout.runtime_root}): {resolved}"
-        )
+    resolved = _assert_lexical_chain_and_containment(
+        layout.runtime_root, joined, label="runtime_target"
+    )
 
     forbidden: list[tuple[str, Path]] = [
         ("candidate_root", _require_absolute_clean_path(candidate_root, label="candidate_root")),
@@ -354,6 +437,52 @@ def resolve_project_runtime_path(
         )
     _assert_disjoint(joined, resolved, forbidden, target_label="runtime_target")
     return resolved
+
+
+def _write_json_atomic_guarded(
+    root: Path,
+    target: Path,
+    data: dict[str, Any],
+    *,
+    label: str,
+) -> None:
+    """Atomically write JSON after revalidating lexical chain and containment."""
+    _assert_lexical_chain_and_containment(
+        root, target.parent, label=f"{label}_dir", expect_dir=True
+    )
+    _assert_lexical_chain_and_containment(root, target, label=label, expect_dir=False)
+
+    serialized = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    temporary: Path | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _assert_lexical_chain_and_containment(
+            root, target.parent, label=f"{label}_dir", expect_dir=True
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _assert_lexical_chain_and_containment(root, target, label=label, expect_dir=False)
+        _assert_not_symlink_lstat(temporary, label=f"{label}_tmp")
+        os.replace(temporary, target)
+        temporary = None
+    except ProjectScaffoldingError:
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise ProjectScaffoldingError(f"Cannot atomically save {label}: {target}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def initialize_project_runtime(
@@ -386,14 +515,20 @@ def initialize_project_runtime(
         layout.worktrees_dir,
         layout.receipt_dir,
     ):
-        if directory.exists() and not directory.is_dir():
-            raise ProjectScaffoldingError(f"Expected directory but found file: {directory}")
+        _assert_lexical_chain_and_containment(
+            layout.project_root, directory, label="runtime_dir", expect_dir=True
+        )
         directory.mkdir(parents=True, exist_ok=True)
+        _assert_lexical_chain_and_containment(
+            layout.project_root, directory, label="runtime_dir", expect_dir=True
+        )
 
     manifest_path = layout.scaffold_manifest_path
-    if manifest_path.exists():
-        if manifest_path.is_symlink() or not manifest_path.is_file():
-            raise ProjectScaffoldingError(f"Invalid existing scaffold manifest: {manifest_path}")
+    _assert_lexical_chain_and_containment(
+        layout.runtime_root, manifest_path, label="scaffold_manifest", expect_dir=False
+    )
+    manifest_st = _assert_not_symlink_lstat(manifest_path, label="scaffold_manifest")
+    if manifest_st is not None:
         existing = load_json(manifest_path)
         if not isinstance(existing, dict) or existing.get("project_id") != layout.project_id:
             raise ProjectScaffoldingError(
@@ -409,7 +544,12 @@ def initialize_project_runtime(
             "worktrees_dir": str(layout.worktrees_dir),
         }
         assert_no_secrets(manifest_payload)
-        write_json_atomic(manifest_path, manifest_payload)
+        _write_json_atomic_guarded(
+            layout.runtime_root,
+            manifest_path,
+            manifest_payload,
+            label="scaffold_manifest",
+        )
 
     return layout
 
