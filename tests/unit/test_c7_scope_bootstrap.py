@@ -16,6 +16,11 @@ from aipc.controller import (
     persist_milestone_authorization_evidence,
     verify_milestone_c_authorization_scope,
 )
+from aipc.controller.milestone_authorization import (
+    ApprovedMilestoneScope,
+    MilestoneAuthorizationTrustContext,
+    issue_milestone_authorization_record,
+)
 from aipc.controller.planner_engine import HumanGoalSpec
 from aipc.controller.task_queue import (
     load_milestone_authorization_evidence,
@@ -68,6 +73,64 @@ def _persist_c7_evidence(
     return path, ev
 
 
+def _issue_c7_trust_context(
+    tmp_path: Path,
+    *,
+    filename: str = "external_c7_grant.json",
+    record_id: str = "rec-c7-bootstrap-01",
+    approval_id: str = "ktritod-c7-20261118",
+    project_id: str = "proj-c7",
+    milestone_id: str = "milestone-c7",
+    commander_id: str = "K.TRITOD",
+    baseline_commit_sha: str = C7_BASELINE_SHA,
+    authorized_workstreams: tuple[str, ...] = C7_WORKSTREAMS,
+    allowed_path_prefixes: tuple[str, ...] = (
+        "src/",
+        "tests/",
+        "docs/",
+        ".agents/",
+        "projects/",
+        "schemas/",
+        "tools/",
+    ),
+) -> MilestoneAuthorizationTrustContext:
+    trusted_root = (tmp_path / "controller_trusted_root").resolve()
+    candidate_root = (tmp_path / "simulated_candidate").resolve()
+    stable_root = (tmp_path / "simulated_stable").resolve()
+    excluded_roots = (candidate_root, stable_root)
+    record_path = trusted_root / filename
+    raw_grant_bytes = (
+        f"commander-grant:{project_id}:{milestone_id}:{approval_id}:{commander_id}"
+    ).encode()
+    record, record_sha256 = issue_milestone_authorization_record(
+        raw_grant_bytes=raw_grant_bytes,
+        record_id=record_id,
+        approval_id=approval_id,
+        project_id=project_id,
+        milestone_id=milestone_id,
+        commander_id=commander_id,
+        approved_scope=ApprovedMilestoneScope(
+            workstreams=authorized_workstreams,
+            allowed_path_prefixes=allowed_path_prefixes,
+            baseline_commit_sha=baseline_commit_sha,
+        ),
+        output_path=record_path,
+        trusted_external_root=trusted_root,
+        excluded_roots=excluded_roots,
+    )
+    return MilestoneAuthorizationTrustContext(
+        record_path=record_path,
+        expected_record_sha256=record_sha256,
+        expected_approval_digest=record.approval_digest,
+        trusted_external_root=trusted_root,
+        excluded_roots=excluded_roots,
+        expected_project_id=project_id,
+        expected_milestone_id=milestone_id,
+        expected_commander_id=commander_id,
+        expected_approval_id=approval_id,
+    )
+
+
 def _c7_contract(
     *,
     task_id: str = "task-rce01-bootstrap",
@@ -99,6 +162,7 @@ def _c7_goal_spec(
     approval_granted: bool = True,
     approval_id: str | None = "ktritod-c7-20261118",
     approval_evidence_path: str | None = None,
+    milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
 ) -> HumanGoalSpec:
     return HumanGoalSpec(
         project_id=project_id,
@@ -114,6 +178,7 @@ def _c7_goal_spec(
         approval_granted=approval_granted,
         approval_id=approval_id,
         approval_evidence_path=approval_evidence_path,
+        milestone_trust_context=milestone_trust_context,
     )
 
 
@@ -143,6 +208,7 @@ def test_c7_all_identifiers_and_workstreams_allowed_with_persisted_evidence(
     assert ev.baseline_commit_sha == C7_BASELINE_SHA
     assert ev.authorized_workstreams == C7_WORKSTREAMS
     assert ev.evidence_digest is not None
+    trust_ctx = _issue_c7_trust_context(tmp_path, milestone_id="milestone-c7")
 
     contract = _c7_contract(
         task_id=f"task-{workstream}-01",
@@ -150,7 +216,7 @@ def test_c7_all_identifiers_and_workstreams_allowed_with_persisted_evidence(
         milestone_id="milestone-c7",
         approval_evidence_path=str(ev_path),
     )
-    queue = PersistentTaskQueue(tmp_path / "queue.json")
+    queue = PersistentTaskQueue(tmp_path / "queue.json", milestone_trust_context=trust_ctx)
     snap = queue.initialize(
         project_id="proj-c7",
         milestone_id="milestone-c7",
@@ -196,6 +262,7 @@ def test_c7_all_identifiers_and_workstreams_allowed_with_persisted_evidence(
         phase_id=workstream,
         phase_name=f"Workstream {workstream}",
         approval_evidence_path=str(ev_path),
+        milestone_trust_context=trust_ctx,
     )
     assert goal.milestone_id == milestone_id
 
@@ -241,8 +308,25 @@ def test_c7_missing_evidence_and_project_yaml_never_infer_authorization(tmp_path
 
     valid_contract = _c7_contract(approval_id=ev.approval_id, approval_evidence_path=str(ev_path))
     queue = PersistentTaskQueue(tmp_path / "queue.json")
-    with pytest.raises(ControllerError, match="Milestone C.7 authorization verification failed"):
+    with pytest.raises(
+        ControllerError,
+        match="External milestone authorization trust context is required",
+    ):
         queue.initialize(
+            project_id="proj-c7",
+            milestone_id="milestone-c7",
+            contracts=[valid_contract],
+            approval_id=ev.approval_id,
+            approval_evidence_path=ev_path,
+        )
+
+    trust_ctx = _issue_c7_trust_context(tmp_path)
+    trusted_queue = PersistentTaskQueue(
+        tmp_path / "trusted_queue.json",
+        milestone_trust_context=trust_ctx,
+    )
+    with pytest.raises(ControllerError, match="does not match queue project_id"):
+        trusted_queue.initialize(
             project_id="wrong-project",
             milestone_id="milestone-c7",
             contracts=[valid_contract],
@@ -250,7 +334,7 @@ def test_c7_missing_evidence_and_project_yaml_never_infer_authorization(tmp_path
             approval_evidence_path=ev_path,
         )
     with pytest.raises(ControllerError, match="Milestone C.7 authorization verification failed"):
-        queue.initialize(
+        trusted_queue.initialize(
             project_id="proj-c7",
             milestone_id="milestone-c7",
             contracts=[valid_contract],
@@ -258,11 +342,18 @@ def test_c7_missing_evidence_and_project_yaml_never_infer_authorization(tmp_path
             approval_evidence_path=missing_path,
         )
 
-    with pytest.raises(ValueError, match="unauthorized future milestone scope"):
+    with pytest.raises(ValueError, match="requires Controller-owned milestone_trust_context"):
         _c7_goal_spec(approval_granted=False, approval_evidence_path=None)
 
-    with pytest.raises(ValueError, match="unauthorized future milestone scope"):
+    with pytest.raises(ValueError, match="requires Controller-owned milestone_trust_context"):
         _c7_goal_spec(approval_granted=True, approval_evidence_path=str(missing_path))
+
+    with pytest.raises(ValueError, match="unauthorized future milestone scope"):
+        _c7_goal_spec(
+            approval_granted=True,
+            approval_evidence_path=str(missing_path),
+            milestone_trust_context=trust_ctx,
+        )
 
     with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
         _c7_manifest(approval_evidence_path=None)
