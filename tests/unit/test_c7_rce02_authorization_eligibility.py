@@ -44,6 +44,7 @@ from aipc.controller.milestone_authorization import (
     issue_milestone_authorization_record,
     load_and_verify_milestone_authorization,
     migrate_legacy_approval_evidence,
+    requires_external_milestone_trust,
 )
 from aipc.controller.milestone_authorization import (
     main as milestone_auth_cli_main,
@@ -463,7 +464,7 @@ def test_external_authorization_negative_boundaries(tmp_path: Path) -> None:
 
 
 def test_task_queue_legacy_reload_and_external_trust_context_gate(tmp_path: Path) -> None:
-    # 1. Legacy C7 signed approval behavior + reload preserved
+    # 1. Legacy-only C7 initialization without external trust context is now rejected
     legacy_ev = tmp_path / "milestone_c7_approval.json"
     persist_milestone_authorization_evidence(
         legacy_ev,
@@ -480,7 +481,7 @@ def test_task_queue_legacy_reload_and_external_trust_context_gate(tmp_path: Path
         phase_id="rce02",
         milestone_id="milestone-c7",
         title="RCE02 task",
-        objective="Verify legacy reload and external trust context.",
+        objective="Verify legacy rejection, reload, and external trust context.",
         in_scope=("src/aipc/controller/task_queue.py",),
         validation_commands=("pytest tests/unit/test_c7_rce02_authorization_eligibility.py",),
         approval_id="appr-c7-leg",
@@ -488,7 +489,19 @@ def test_task_queue_legacy_reload_and_external_trust_context_gate(tmp_path: Path
     )
     queue_path = tmp_path / "queue.json"
     legacy_q = PersistentTaskQueue(queue_path)
-    legacy_q.initialize(
+    with pytest.raises(ControllerError, match="External milestone authorization trust context"):
+        legacy_q.initialize(
+            project_id="proj-aipc",
+            milestone_id="milestone-c7",
+            contracts=(contract,),
+            approval_id="appr-c7-leg",
+            approval_evidence_path=legacy_ev,
+        )
+
+    # 2. Valid external trust context permits initialization and reload
+    valid_ctx, _, _ = _issue_external_grant(tmp_path / "valid_q", approval_id="appr-c7-ext2")
+    valid_q = PersistentTaskQueue(queue_path, milestone_trust_context=valid_ctx)
+    valid_q.initialize(
         project_id="proj-aipc",
         milestone_id="milestone-c7",
         contracts=(contract,),
@@ -498,7 +511,7 @@ def test_task_queue_legacy_reload_and_external_trust_context_gate(tmp_path: Path
     reloaded = PersistentTaskQueue(queue_path).load()
     assert reloaded.tasks[0].status == QueuedTaskStatus.ELIGIBLE
 
-    # 2. External trust context gates begin_dispatch before RUNNING transition
+    # 3. External trust context gates begin_dispatch before RUNNING transition
     trust_ctx, _, _ = _issue_external_grant(tmp_path, approval_id="appr-c7-ext")
     ext_q = PersistentTaskQueue(queue_path, milestone_trust_context=trust_ctx)
     # Tamper external record before dispatch -> must fail closed and keep ELIGIBLE
@@ -507,11 +520,11 @@ def test_task_queue_legacy_reload_and_external_trust_context_gate(tmp_path: Path
         ext_q.begin_dispatch("rce02-task-01", worker_id="w-1", provider="gemini-antigravity")
     assert ext_q.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
 
-    # Valid external record permits dispatch
-    valid_ctx, _, _ = _issue_external_grant(tmp_path / "valid_q", approval_id="appr-c7-ext2")
-    valid_q = PersistentTaskQueue(queue_path, milestone_trust_context=valid_ctx)
+    # 4. Valid external record permits dispatch
     dispatched = valid_q.begin_dispatch(
-        "rce02-task-01", worker_id="w-1", provider="gemini-antigravity"
+        "rce02-task-01",
+        worker_id="w-1",
+        provider="gemini-antigravity",
     )
     assert dispatched.status == QueuedTaskStatus.RUNNING
 
@@ -765,3 +778,472 @@ def test_subscription_worker_external_grant_gate_and_rate_limit_interruption(
     ok_outcome = asyncio.run(worker.execute_worker_task(task))
     assert invoked
     assert ok_outcome.agent_result.status == AgentStatus.COMPLETED
+
+
+def _make_legacy_evidence_file(
+    path: Path,
+    *,
+    project_id: str = "proj-aipc",
+    milestone_id: str = "milestone-c7",
+    approval_id: str = "appr-c7-leg",
+    workstreams: tuple[str, ...] = ("rce01", "rce02", "rce03"),
+) -> Path:
+    persist_milestone_authorization_evidence(
+        path,
+        MilestoneAuthorizationEvidence(
+            approval_id=approval_id,
+            project_id=project_id,
+            milestone_id=milestone_id,
+            authorized_workstreams=workstreams,
+            allowed_path_prefixes=("src/", "tests/"),
+        ),
+    )
+    return path
+
+
+def _init_git_worktree(candidate_root: Path) -> Path:
+    subprocess.run(["git", "init"], cwd=candidate_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=candidate_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=candidate_root,
+        check=True,
+        capture_output=True,
+    )
+    target_file = candidate_root / "src" / "aipc" / "sample.py"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=candidate_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=candidate_root,
+        check=True,
+        capture_output=True,
+    )
+    return candidate_root
+
+
+def test_remediation01_task_queue_rejects_missing_external_trust_for_c7(
+    tmp_path: Path,
+) -> None:
+    legacy_ev = _make_legacy_evidence_file(tmp_path / "legacy_c7.json")
+    for phase_id in ("rce01", "rce02", "rce03"):
+        contract = ApprovedTaskContract(
+            task_id=f"{phase_id}-task-01",
+            phase_id=phase_id,
+            milestone_id="milestone-c7",
+            title=f"C7 {phase_id} task",
+            objective="Verify missing external trust is rejected.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest tests/unit/test_c7_rce02_authorization_eligibility.py",),
+            approval_id="appr-c7-leg",
+            approval_evidence_path=str(legacy_ev),
+        )
+        queue = PersistentTaskQueue(tmp_path / f"queue_{phase_id}.json")
+        with pytest.raises(ControllerError):
+            queue.initialize(
+                project_id="proj-aipc",
+                milestone_id="milestone-c7",
+                contracts=(contract,),
+                approval_id="appr-c7-leg",
+                approval_evidence_path=legacy_ev,
+            )
+
+    # Dispatch without external trust must also fail closed even on an existing queue
+    valid_ctx, _, _ = _issue_external_grant(
+        tmp_path / "ext_proj",
+        project_id="proj-ext-c7",
+        approval_id="appr-c7-ext",
+        workstreams=("rce01", "rce02", "rce03"),
+    )
+    external_legacy_ev = _make_legacy_evidence_file(
+        tmp_path / "external_legacy_c7.json",
+        project_id="proj-ext-c7",
+        approval_id="appr-c7-ext",
+    )
+    ext_contract = ApprovedTaskContract(
+        task_id="rce02-task-ext",
+        phase_id="rce02",
+        milestone_id="milestone-c7",
+        title="External C7 task",
+        objective="Verify external trust required at dispatch.",
+        in_scope=("src/aipc/controller/task_queue.py",),
+        validation_commands=("pytest",),
+        approval_id="appr-c7-ext",
+        approval_evidence_path=str(external_legacy_ev),
+    )
+    ext_queue_path = tmp_path / "ext_queue.json"
+    PersistentTaskQueue(ext_queue_path, milestone_trust_context=valid_ctx).initialize(
+        project_id="proj-ext-c7",
+        milestone_id="milestone-c7",
+        contracts=(ext_contract,),
+        approval_id="appr-c7-ext",
+        approval_evidence_path=external_legacy_ev,
+    )
+    untrusted_q = PersistentTaskQueue(ext_queue_path)
+    with pytest.raises(ControllerError):
+        untrusted_q.begin_dispatch(
+            "rce02-task-ext",
+            worker_id="w-1",
+            provider="gemini-antigravity",
+        )
+    assert untrusted_q.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+
+    # Positive external-record-governed nonlegacy project remains allowed
+    dispatched = PersistentTaskQueue(
+        ext_queue_path,
+        milestone_trust_context=valid_ctx,
+    ).begin_dispatch(
+        "rce02-task-ext",
+        worker_id="w-1",
+        provider="gemini-antigravity",
+    )
+    assert dispatched.status == QueuedTaskStatus.RUNNING
+
+    # Explicit Milestone D remains blocked
+    with pytest.raises((ControllerError, ValueError)):
+        d_contract = ApprovedTaskContract(
+            task_id="d01-task-01",
+            phase_id="d01",
+            milestone_id="milestone-d",
+            title="Blocked D task",
+            objective="Must be blocked.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest",),
+        )
+        PersistentTaskQueue(tmp_path / "d_queue.json").initialize(
+            project_id="proj-aipc",
+            milestone_id="milestone-d",
+            contracts=(d_contract,),
+        )
+
+    # Pre-C7 compatibility preserved (Milestone C.6 without milestone_trust_context)
+    c6_ev = _make_legacy_evidence_file(
+        tmp_path / "legacy_c6.json",
+        milestone_id="milestone-c6",
+        approval_id="appr-c6-leg",
+        workstreams=("cisl01",),
+    )
+    c6_contract = ApprovedTaskContract(
+        task_id="cisl01-task-01",
+        phase_id="cisl01",
+        milestone_id="milestone-c6",
+        title="C6 compatibility task",
+        objective="Preserve pre-C7 compatibility.",
+        in_scope=("src/aipc/controller/task_queue.py",),
+        validation_commands=("pytest",),
+        approval_id="appr-c6-leg",
+        approval_evidence_path=str(c6_ev),
+    )
+    c6_q = PersistentTaskQueue(tmp_path / "c6_queue.json")
+    c6_q.initialize(
+        project_id="proj-aipc",
+        milestone_id="milestone-c6",
+        contracts=(c6_contract,),
+        approval_id="appr-c6-leg",
+        approval_evidence_path=c6_ev,
+    )
+    c6_rec = c6_q.begin_dispatch(
+        "cisl01-task-01",
+        worker_id="w-1",
+        provider="gemini-antigravity",
+    )
+    assert c6_rec.status == QueuedTaskStatus.RUNNING
+
+
+def test_remediation01_planner_rejects_missing_external_trust_for_c7_and_aliases(
+    tmp_path: Path,
+    review_case: dict[str, Any],
+) -> None:
+    workspace = str(review_case["project"].project.workspace)
+    legacy_ev = _make_legacy_evidence_file(
+        tmp_path / "legacy_c7_plan.json",
+        project_id="example",
+        milestone_id="milestone-c7",
+        approval_id="appr-c7-leg",
+        workstreams=("rce01", "rce02", "rce03"),
+    )
+    criteria = [AcceptanceCriterion(id="AC-tests", statement="Tests pass", required=True)]
+
+    for milestone_id, phase_id in (
+        ("milestone-c7", "rce01"),
+        ("c.7", "rce02"),
+        ("milestone-c.7", "rce03"),
+    ):
+        with pytest.raises(ValueError):
+            HumanGoalSpec(
+                project_id="example",
+                project_name="Example",
+                workspace=workspace,
+                milestone_id=milestone_id,
+                phase_id=phase_id,
+                phase_name=f"{phase_id}-repair",
+                goal_statement="Legacy evidence without external trust must fail.",
+                acceptance_criteria=criteria,
+                in_scope_paths=("src/aipc/controller/task_queue.py",),
+                validation_commands=("pytest",),
+                approval_granted=True,
+                approval_id="appr-c7-leg",
+                approval_evidence_path=str(legacy_ev),
+                milestone_trust_context=None,
+            )
+
+    # Bypassed goal construction must still fail at planner execution
+    bypassed_goal = HumanGoalSpec.model_construct(
+        project_id="example",
+        project_name="Example",
+        workspace=workspace,
+        milestone_id="milestone-c7",
+        phase_id="rce02",
+        phase_name="rce02-repair",
+        goal_statement="Bypassed goal without external trust.",
+        acceptance_criteria=tuple(criteria),
+        in_scope_paths=("src/aipc/controller/task_queue.py",),
+        out_of_scope_paths=(),
+        validation_commands=("pytest",),
+        allowed_tools=("filesystem",),
+        forbidden_actions=("network",),
+        timeout_seconds=600,
+        max_attempts=3,
+        high_risk_mutation=False,
+        expands_approved_scope=False,
+        approval_granted=True,
+        approval_id="appr-c7-leg",
+        approval_evidence_path=str(legacy_ev),
+        milestone_trust_context=None,
+    )
+    codex_obs = to_runtime_observation(
+        qualify_codex_subscription_runtime(
+            sdk_installed_override=True,
+            sdk_version_override=CODEX_PINNED_SDK_VERSION,
+            runtime_version_override=CODEX_PINNED_SDK_VERSION,
+            auth_present_override=True,
+        )
+    )
+    engine = PlannerOrchestrationEngine(
+        role_registry=build_default_subscription_role_registry((codex_obs,))
+    )
+    init_state = review_case["state"].model_copy(update={"current_phase": "rce02"})
+    with pytest.raises((ValueError, ControllerError)):
+        engine.build_initial_plan(bypassed_goal, state=init_state)
+
+    # Explicit Milestone D remains blocked
+    with pytest.raises(ValueError):
+        HumanGoalSpec(
+            project_id="example",
+            project_name="Example",
+            workspace=workspace,
+            milestone_id="milestone-d",
+            phase_id="d01",
+            phase_name="d01-blocked",
+            goal_statement="Milestone D must remain blocked.",
+            acceptance_criteria=criteria,
+            in_scope_paths=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest",),
+            approval_granted=True,
+        )
+
+    # Pre-C7 compatibility preserved (Milestone C.6 with legacy evidence)
+    c6_ev = _make_legacy_evidence_file(
+        tmp_path / "legacy_c6_plan.json",
+        project_id="example",
+        milestone_id="milestone-c6",
+        approval_id="appr-c6-leg",
+        workstreams=("cisl01",),
+    )
+    c6_goal = HumanGoalSpec(
+        project_id="example",
+        project_name="Example",
+        workspace=workspace,
+        milestone_id="milestone-c6",
+        phase_id="cisl01",
+        phase_name="cisl01-compat",
+        goal_statement="Preserve C6 compatibility.",
+        acceptance_criteria=criteria,
+        in_scope_paths=("src/aipc/controller/task_queue.py",),
+        validation_commands=("pytest",),
+        approval_granted=True,
+        approval_id="appr-c6-leg",
+        approval_evidence_path=str(c6_ev),
+    )
+    assert c6_goal.milestone_id == "milestone-c6"
+
+
+def test_remediation01_worker_rejects_missing_external_trust_before_invoker(
+    tmp_path: Path,
+) -> None:
+    trust_ctx, _, candidate_root = _issue_external_grant(
+        tmp_path,
+        project_id="proj-ext-c7",
+        approval_id="appr-c7-worker",
+        workstreams=("rce01", "rce02", "rce03"),
+    )
+    _init_git_worktree(candidate_root)
+    ev_dir = tmp_path / "evidence"
+    invoked = False
+
+    async def _mock_invoker(task, cfg, env, model) -> WorkerInvocationResponse:
+        nonlocal invoked
+        invoked = True
+        return WorkerInvocationResponse(session_id="sess-r01", model_used=model, summary="ok")
+
+    untrusted_cfg = SubscriptionWorkerConfig(
+        candidate_worktree=str(candidate_root),
+        evidence_output_dir=str(ev_dir),
+        in_scope_paths=("src/aipc/",),
+        model_requested="gemini-4-hydrogen-medium",
+        require_non_empty_diff=False,
+        milestone_trust_context=None,
+    )
+    untrusted_worker = AntigravitySubscriptionWorkerAutomation(
+        untrusted_cfg,
+        qualification_report=_make_agy_report(),
+        worker_invoker=_mock_invoker,
+    )
+
+    base_task = TaskRequest(
+        schema_version="1.0",
+        task_id="task-r01-check",
+        project_id="proj-ext-c7",
+        phase_id="rce02",
+        attempt=1,
+        task_type="implementation",
+        prompt="Update sample.py",
+        workspace=str(candidate_root),
+        allowed_tools=["read_file", "edit_file"],
+        forbidden_actions=["git_push", "shell_exec"],
+        timeout_seconds=120,
+    )
+
+    for phase_id, meta in (
+        ("rce01", {}),
+        ("rce02", {}),
+        ("rce03", {}),
+        ("c.7", {"milestone_id": "c.7"}),
+        ("phase-c7", {"milestone_id": "milestone-c7"}),
+        ("d01", {"milestone_id": "milestone-d"}),
+    ):
+        invoked = False
+        bad_task = base_task.model_copy(update={"phase_id": phase_id, "metadata": meta})
+        with pytest.raises((MilestoneAuthorizationError, ControllerError, ValueError)):
+            asyncio.run(untrusted_worker.execute_worker_task(bad_task))
+        assert not invoked
+
+    # Positive external-record-governed nonlegacy project remains allowed
+    trusted_cfg = untrusted_cfg.model_copy(update={"milestone_trust_context": trust_ctx})
+    trusted_worker = AntigravitySubscriptionWorkerAutomation(
+        trusted_cfg,
+        qualification_report=_make_agy_report(),
+        worker_invoker=_mock_invoker,
+    )
+    invoked = False
+    ok_task = base_task.model_copy(update={"phase_id": "rce03"})
+    ok_outcome = asyncio.run(trusted_worker.execute_worker_task(ok_task))
+    assert invoked
+    assert ok_outcome.agent_result.status == AgentStatus.COMPLETED
+
+    # Pre-C7 compatibility preserved (C6 and Phase 24 without milestone_trust_context)
+    for compat_phase in ("cisl01", "phase-24"):
+        invoked = False
+        compat_task = base_task.model_copy(update={"phase_id": compat_phase, "metadata": {}})
+        compat_outcome = asyncio.run(untrusted_worker.execute_worker_task(compat_task))
+        assert invoked
+        assert compat_outcome.agent_result.status == AgentStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "phase_id",
+    [
+        "0",
+        "00",
+        "01",
+        "09",
+        "9",
+        "10",
+        "24",
+        "phase00",
+        "phase09",
+        "phase24",
+        "phase-00",
+        "phase-09",
+        "phase-24",
+        "phase_00",
+        "phase_09",
+        "phase_24",
+        "phase-09-review",
+    ],
+)
+def test_pre_c7_numeric_phase_aliases_and_c7_d_future_boundaries(phase_id: str) -> None:
+    assert not requires_external_milestone_trust(milestone_id="phase-24", phase_id=phase_id)
+    assert requires_external_milestone_trust(milestone_id="milestone-c7", phase_id=phase_id)
+    assert requires_external_milestone_trust(milestone_id="c.7", phase_id=phase_id)
+    assert requires_external_milestone_trust(milestone_id="milestone-future-x", phase_id=phase_id)
+    assert requires_external_milestone_trust(
+        milestone_id="phase-24", phase_id=phase_id, task_id="rce02-task-01"
+    )
+    assert requires_external_milestone_trust(milestone_id="milestone-d", phase_id=phase_id)
+
+
+@pytest.mark.parametrize(
+    "bad_phase",
+    [
+        "25",
+        "phase-25",
+        "phase25",
+        "99",
+        "000",
+        "unknown-phase",
+        "d01",
+        "rce01",
+        "rce02",
+        "rce03",
+        "c.7",
+    ],
+)
+def test_non_legacy_or_blocked_phases_still_require_external_trust(bad_phase: str) -> None:
+    assert requires_external_milestone_trust(milestone_id="phase-24", phase_id=bad_phase)
+
+
+def test_phase24_queue_with_bare_phase09_remains_compatible(tmp_path: Path) -> None:
+    queue = PersistentTaskQueue(tmp_path / "phase24_09_queue.json")
+    contract = ApprovedTaskContract(
+        task_id="task-p24-09",
+        phase_id="09",
+        milestone_id="phase-24",
+        title="Legacy Phase 24 bare phase 09 task",
+        objective="Verify bare numeric phase 09 works without external trust context.",
+        in_scope=("src/aipc/controller/repair_coordinator.py",),
+        validation_commands=("pytest tests/unit/test_c5_rg02_triage.py -q",),
+    )
+    queue.initialize(
+        project_id="example",
+        milestone_id="phase-24",
+        contracts=(contract,),
+    )
+    dispatched = queue.begin_dispatch(
+        contract.task_id,
+        worker_id="agy-flash",
+        provider="gemini",
+    )
+    assert dispatched.status == QueuedTaskStatus.RUNNING
+
+    with pytest.raises((ControllerError, ValueError)):
+        d_contract = ApprovedTaskContract(
+            task_id="d01-blocked-09",
+            phase_id="09",
+            milestone_id="milestone-d",
+            title="Blocked D with numeric phase",
+            objective="Must remain blocked.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest",),
+        )
+        PersistentTaskQueue(tmp_path / "d_09_queue.json").initialize(
+            project_id="example",
+            milestone_id="milestone-d",
+            contracts=(d_contract,),
+        )

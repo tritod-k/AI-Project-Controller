@@ -26,8 +26,10 @@ from aipc.agents.role_registry import (
 from aipc.controller.errors import ControllerError
 from aipc.controller.milestone_authorization import (
     MilestoneAuthorizationTrustContext,
+    _contains_forbidden_milestone_d,
     _normalize_milestone_id,
     load_and_verify_milestone_authorization,
+    requires_external_milestone_trust,
 )
 from aipc.controller.task_queue import (
     MilestoneAuthorizationEvidence,
@@ -198,7 +200,25 @@ class HumanGoalSpec(CanonicalRecord):
 
     @model_validator(mode="after")
     def validate_goal_spec(self) -> Self:
-        if not _AUTHORIZED_GOAL_MILESTONE_RE.match(self.milestone_id.strip().lower()):
+        for val in (self.milestone_id, self.phase_id, self.phase_name):
+            if _contains_forbidden_milestone_d(val):
+                raise ValueError(
+                    "milestone_id references unauthorized future milestone scope: "
+                    f"{self.milestone_id!r}"
+                )
+        needs_external_trust = requires_external_milestone_trust(
+            milestone_id=self.milestone_id,
+            phase_id=self.phase_id,
+            phase_name=self.phase_name,
+        )
+        if needs_external_trust and self.milestone_trust_context is None:
+            raise ValueError(
+                f"milestone_id {self.milestone_id!r} (phase {self.phase_id!r}) requires "
+                "Controller-owned milestone_trust_context"
+            )
+        if self.milestone_trust_context is None and not _AUTHORIZED_GOAL_MILESTONE_RE.match(
+            self.milestone_id.strip().lower()
+        ):
             raise ValueError(
                 "milestone_id references unauthorized future milestone scope: "
                 f"{self.milestone_id!r}"
@@ -241,6 +261,11 @@ class HumanGoalSpec(CanonicalRecord):
             except Exception as exc:
                 raise ValueError(f"milestone_trust_context verification failed: {exc}") from exc
 
+        if needs_external_trust and self.approval_granted is not True:
+            raise ValueError(
+                "milestone_id references unauthorized future milestone scope: "
+                f"{self.milestone_id!r}"
+            )
         if refs_c7 or refs_c6 or refs_c5 or refs_c:
             has_legacy_evidence = bool(
                 self.approval_evidence_path and self.approval_evidence_path.strip()
@@ -272,6 +297,11 @@ class HumanGoalSpec(CanonicalRecord):
                             f"{self.milestone_id!r}"
                         ) from exc
             else:
+                if refs_c7 or self.milestone_trust_context is None and needs_external_trust:
+                    raise ValueError(
+                        f"milestone_id {self.milestone_id!r} requires Controller-owned "
+                        "milestone_trust_context"
+                    )
                 if (
                     self.approval_granted is not True
                     or not (self.approval_id and self.approval_id.strip())
@@ -791,6 +821,18 @@ class PlannerOrchestrationEngine:
                     final_project_state=blocked_state,
                 )
 
+            if (
+                requires_external_milestone_trust(
+                    milestone_id=goal.milestone_id,
+                    phase_id=goal.phase_id,
+                    phase_name=goal.phase_name,
+                )
+                and goal.milestone_trust_context is None
+            ):
+                raise ControllerError(
+                    f"External milestone_trust_context is required for "
+                    f"milestone {goal.milestone_id!r} (phase {goal.phase_id!r})"
+                )
             if goal.milestone_trust_context is not None:
                 verified_auth = load_and_verify_milestone_authorization(
                     goal.milestone_trust_context,

@@ -62,6 +62,55 @@ _C_PHASE_ALIASES: dict[str, str] = {
     "phase-02": "c02",
     "phase-03": "c03",
 }
+_PRE_C7_HISTORICAL_MILESTONES: frozenset[str] = frozenset(
+    {
+        "milestone-a",
+        "milestone_a",
+        "workstream-a",
+        "workstream_a",
+        "aipc-2.0-milestone-a",
+        "milestone-b",
+        "milestone_b",
+        "workstream-b",
+        "workstream_b",
+        "aipc-2.0-milestone-b",
+        "milestone-c",
+        "milestone_c",
+        "workstream-c",
+        "workstream_c",
+        "aipc-2.0-milestone-c",
+        "milestone-c5",
+        "milestone_c5",
+        "milestone-c.5",
+        "milestone_c.5",
+        "c.5",
+        "workstream-c5",
+        "workstream_c5",
+        "workstream-c.5",
+        "workstream_c.5",
+        "milestone-c6",
+        "milestone_c6",
+        "milestone-c.6",
+        "milestone_c.6",
+        "c.6",
+        "workstream-c6",
+        "workstream_c6",
+        "workstream-c.6",
+        "workstream_c.6",
+    }
+)
+_PRE_C7_MILESTONE_NUM_RE = re.compile(r"^phase[-_]?(?:0?[0-9]|1\d|2[0-4])(?:[-_].*)?$")
+_PRE_C7_PHASE_NUM_RE = re.compile(r"^(?:phase[-_]?)?(?:0?[0-9]|1\d|2[0-4])(?:[-_].*)?$")
+_PRE_C7_WORKSTREAM_RE = re.compile(
+    r"^(?:a0[1-9]|b0[1-9]|c0[1-3]|phase[-_]c0[1-3]|rg0[1-4]|cisl0[1-3])(?:[-_].*)?$"
+)
+_PRE_C7_SUFFIX_WORKSTREAM_RE = re.compile(
+    r"^(?:[a-z0-9]+[-_])*(?:a0[1-9]|b0[1-9]|c0[1-3]|rg0[1-4]|cisl0[1-3])$"
+)
+_C7_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]?c\.?7|workstream[-_]?c\.?7|"
+    r"phase[-_]?c\.?7|c\.7|rce0[1-3])(?![0-9])"
+)
 
 
 class MilestoneAuthorizationError(ControllerError):
@@ -79,6 +128,48 @@ def _normalize_milestone_id(value: str) -> str:
 
 def _contains_forbidden_milestone_d(value: str) -> bool:
     return bool(_FORBIDDEN_D_RE.search(value.strip().lower()))
+
+
+def _is_pre_c7_historical_milestone(value: str) -> bool:
+    low = value.strip().lower()
+    if _contains_forbidden_milestone_d(low) or _C7_TOKEN_RE.search(low):
+        return False
+    return low in _PRE_C7_HISTORICAL_MILESTONES or bool(_PRE_C7_MILESTONE_NUM_RE.fullmatch(low))
+
+
+def _is_pre_c7_historical_phase(value: str) -> bool:
+    low = value.strip().lower()
+    if _contains_forbidden_milestone_d(low) or _C7_TOKEN_RE.search(low):
+        return False
+    return (
+        low in _PRE_C7_HISTORICAL_MILESTONES
+        or low in _COMPOSITE_C_PHASES
+        or bool(_PRE_C7_PHASE_NUM_RE.fullmatch(low))
+        or bool(_PRE_C7_WORKSTREAM_RE.fullmatch(low))
+        or bool(_PRE_C7_SUFFIX_WORKSTREAM_RE.fullmatch(low))
+    )
+
+
+def requires_external_milestone_trust(
+    *,
+    milestone_id: str | None = None,
+    phase_id: str | None = None,
+    task_id: str | None = None,
+    phase_name: str | None = None,
+) -> bool:
+    """Return True when the milestone or phase requires external Controller trust."""
+    for raw in (milestone_id, phase_id, task_id, phase_name):
+        if isinstance(raw, str) and raw.strip():
+            low = raw.strip().lower()
+            if _contains_forbidden_milestone_d(low) or _C7_TOKEN_RE.search(low):
+                return True
+    if isinstance(milestone_id, str) and milestone_id.strip():
+        if not _is_pre_c7_historical_milestone(milestone_id):
+            return True
+    if isinstance(phase_id, str) and phase_id.strip():
+        if not _is_pre_c7_historical_phase(phase_id):
+            return True
+    return False
 
 
 def _normalize_rel_path(raw_path: str, *, label: str) -> str:
@@ -730,4 +821,5 @@ __all__ = [
     "load_and_verify_milestone_authorization",
     "main",
     "migrate_legacy_approval_evidence",
+    "requires_external_milestone_trust",
 ]

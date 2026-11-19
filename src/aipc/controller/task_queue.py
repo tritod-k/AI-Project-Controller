@@ -851,8 +851,24 @@ class PersistentTaskQueue:
         milestone_id: str,
         phase_id: str,
         in_scope_paths: Sequence[str],
+        task_id: str | None = None,
         override_trust_ctx: MilestoneAuthorizationTrustContext | None = None,
     ) -> None:
+        from aipc.controller.milestone_authorization import (
+            _contains_forbidden_milestone_d,
+            _normalize_milestone_id,
+            load_and_verify_milestone_authorization,
+            requires_external_milestone_trust,
+        )
+
+        for val in (milestone_id, phase_id, task_id):
+            if val is not None and (
+                _contains_forbidden_milestone_d(val) or _is_unapproved_future_scope(val)
+            ):
+                raise ControllerError(
+                    f"Milestone/phase {val!r} references strictly blocked "
+                    "Milestone D / future scope"
+                )
         if (
             self._milestone_trust_context is not None
             and override_trust_ctx is not None
@@ -862,12 +878,18 @@ class PersistentTaskQueue:
         effective_ctx = (
             override_trust_ctx if override_trust_ctx is not None else self._milestone_trust_context
         )
-        if effective_ctx is None:
-            return
-        from aipc.controller.milestone_authorization import (
-            _normalize_milestone_id,
-            load_and_verify_milestone_authorization,
+        needs_external_trust = requires_external_milestone_trust(
+            milestone_id=milestone_id,
+            phase_id=phase_id,
+            task_id=task_id,
         )
+        if effective_ctx is None:
+            if needs_external_trust:
+                raise ControllerError(
+                    f"External milestone authorization trust context is required for "
+                    f"milestone {milestone_id!r} (phase {phase_id!r})"
+                )
+            return
 
         try:
             verified = load_and_verify_milestone_authorization(
@@ -991,18 +1013,19 @@ class PersistentTaskQueue:
             raise ControllerError("task queue initialization requires at least one task")
 
         for contract in contracts:
-            self._verify_milestone_c_authorization(
-                project_id=project_id,
-                milestone_id=milestone_id,
-                contract=contract,
-                approval_evidence_path=approval_evidence_path,
-            )
             self._verify_external_milestone_trust_context(
                 project_id=project_id,
                 milestone_id=milestone_id,
                 phase_id=contract.phase_id,
                 in_scope_paths=contract.in_scope,
+                task_id=contract.task_id,
                 override_trust_ctx=milestone_trust_context,
+            )
+            self._verify_milestone_c_authorization(
+                project_id=project_id,
+                milestone_id=milestone_id,
+                contract=contract,
+                approval_evidence_path=approval_evidence_path,
             )
 
         records = tuple(QueuedTaskRecord(contract=c) for c in contracts)
@@ -1126,19 +1149,20 @@ class PersistentTaskQueue:
                 )
 
         target = by_id[task_id]
+        self._verify_external_milestone_trust_context(
+            project_id=snap.project_id,
+            milestone_id=snap.milestone_id,
+            phase_id=target.contract.phase_id,
+            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
+            task_id=target.contract.task_id,
+            override_trust_ctx=milestone_trust_context,
+        )
         self._verify_milestone_c_authorization(
             project_id=snap.project_id,
             milestone_id=snap.milestone_id,
             contract=target.contract,
             snapshot_evidence_path=snap.approval_evidence_path,
             extra_paths=target_paths or (),
-        )
-        self._verify_external_milestone_trust_context(
-            project_id=snap.project_id,
-            milestone_id=snap.milestone_id,
-            phase_id=target.contract.phase_id,
-            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
-            override_trust_ctx=milestone_trust_context,
         )
         if target.status not in (QueuedTaskStatus.ELIGIBLE, QueuedTaskStatus.REPAIR_REQUIRED):
             raise ControllerError(
@@ -1513,19 +1537,20 @@ class PersistentTaskQueue:
                     raise ControllerError(
                         f"out-of-scope target path '{rel_path}' rejected for task '{task_id}'"
                     )
+        self._verify_external_milestone_trust_context(
+            project_id=snap.project_id,
+            milestone_id=snap.milestone_id,
+            phase_id=target.contract.phase_id,
+            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
+            task_id=target.contract.task_id,
+            override_trust_ctx=None,
+        )
         self._verify_milestone_c_authorization(
             project_id=snap.project_id,
             milestone_id=snap.milestone_id,
             contract=target.contract,
             snapshot_evidence_path=snap.approval_evidence_path,
             extra_paths=target_paths or (),
-        )
-        self._verify_external_milestone_trust_context(
-            project_id=snap.project_id,
-            milestone_id=snap.milestone_id,
-            phase_id=target.contract.phase_id,
-            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
-            override_trust_ctx=None,
         )
         if self._repair_budget_path is None:
             raise ControllerError(
