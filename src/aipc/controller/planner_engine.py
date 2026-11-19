@@ -213,7 +213,8 @@ class HumanGoalSpec(CanonicalRecord):
         )
         if needs_external_trust and self.milestone_trust_context is None:
             raise ValueError(
-                f"milestone_id {self.milestone_id!r} (phase {self.phase_id!r}) requires "
+                "milestone_id references unauthorized future milestone scope: "
+                f"{self.milestone_id!r} (phase {self.phase_id!r}); requires "
                 "Controller-owned milestone_trust_context"
             )
         if self.milestone_trust_context is None and not _AUTHORIZED_GOAL_MILESTONE_RE.match(
@@ -299,7 +300,8 @@ class HumanGoalSpec(CanonicalRecord):
             else:
                 if refs_c7 or self.milestone_trust_context is None and needs_external_trust:
                     raise ValueError(
-                        f"milestone_id {self.milestone_id!r} requires Controller-owned "
+                        "milestone_id references unauthorized future milestone scope: "
+                        f"{self.milestone_id!r}; requires Controller-owned "
                         "milestone_trust_context"
                     )
                 if (

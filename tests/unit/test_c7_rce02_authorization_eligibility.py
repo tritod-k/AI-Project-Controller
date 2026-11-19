@@ -1247,3 +1247,29 @@ def test_phase24_queue_with_bare_phase09_remains_compatible(tmp_path: Path) -> N
             milestone_id="milestone-d",
             contracts=(d_contract,),
         )
+
+
+def test_planner_goal_denial_preserves_legacy_and_trust_context_message(
+    tmp_path: Path,
+) -> None:
+    criteria = (AcceptanceCriterion(id="AC-1", statement="Test", required=True),)
+    for milestone_id, phase_id, phase_name in (
+        ("milestone-b-multi-worker", "09", "Phase 09"),
+        ("milestone-c7", "rce02", "rce02-repair"),
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            HumanGoalSpec(
+                project_id="proj-1",
+                project_name="Proj",
+                workspace=str(tmp_path),
+                milestone_id=milestone_id,
+                phase_id=phase_id,
+                phase_name=phase_name,
+                goal_statement="Unauthorized milestone without trust context",
+                acceptance_criteria=criteria,
+                in_scope_paths=("src/aipc/controller/planner_engine.py",),
+                validation_commands=("pytest -q",),
+            )
+        msg = str(exc_info.value)
+        assert "unauthorized future milestone scope" in msg
+        assert "milestone_trust_context" in msg
