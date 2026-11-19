@@ -1,4 +1,22 @@
-# C.7 Recovery03 final local release checkpoint
+# C.7 Recovery04 final local release checkpoint
+
+This section is the authoritative pre-freeze completion report checkpoint; older sections below are preserved historical records and do not override it.
+
+Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: AIPC 2.0 Milestone C.7 RCE01-RCE03 (`recovery04`).
+
+Summary of Review #2 Triage & `recovery04` Resolution:
+- Independent Codex Review #2 on `31ef716a9c0ce787b931d5ab65a92a7cc44234f1` returned `REVISE` / `HOLD_FOR_HUMAN_TRIAGE` (`RCE03: FAIL` due to missing ancestor-symlink check in template-loading helper; `RCE01`/`RCE02`/`C7-VALIDATION: UNVERIFIED` due to omitted enforcement call sites/receipts under single-job 131 KB cap).
+- Human Commander K.TRITOD authorized surgical `RCE03` repair (`c7_commander_tier2_cycle3_rce03_template_ancestor_and_split_review_grant.json`, `sha256: 933355128ee628650b60736401c237579eb4322761c8825b572f25f704f3ba54`) and 4 split per-criterion Review Cycle #3 jobs (`RCE01`, `RCE02`, `RCE03`, `C7-VALIDATION`) without altering canonical 131 KB / 32 KB caps or `RCE01`/`RCE02` production code.
+- `RCE03` fix committed at `tested_source_sha` `9e1427f420e1d2992a9a81be6a19b6b5b40d640d` (Stable-managed subscription worker session `d25e1886-3236-470f-aa82-caf188e8a1ad`, strictly `src/aipc/project/scaffolding.py` and `tests/unit/test_c7_rce03_scaffolding.py`).
+- Full Windows regression suite: **1,557 passed, 1 skipped, 0 failed** + trusted C03 isolated **1 passed** + Ruff/schemas/wheel/`git diff --check` exit `0` (`full_verification_r3_fd8c72f0de614091a052727ab9315fad`).
+- Offline `--network none` Linux Docker: standalone `RCE03` **25 passed, 0 skipped** (`c7_recovery04_rce03_linux_docker_receipt.json`, `sha256: f5a5aab670438ae700306f02d8864a748c14a4fe17d6e8905e45e294f74e152f`); full C.7/A04/C.5/C.6 **217 passed, 1 skipped** (nested Docker unavailable; 0 symlink skips) + C03 **1 passed**.
+- ZERO-reset budgets: Tier-1 `33/40` (`RCE01=12/14`, `RCE02=10/12`, `RCE03=7/12`, `bootstrap-c7=4/6`); Tier-2 `2/3` logical cycles (`2/6` CLI invocations prior to Cycle #3); invocation charges `27/42` (2 preserved duplicate charges, 0 resets).
+- Post-freeze actions on exact `frozenSHA_r3`: external `source_equivalence_proof.json`, exact-SHA Python 3.12/3.13 GitHub Actions CI, and 4 split Review Cycle #3 jobs. Only verified 4/4 `PASS` permits opening one PR targeting `master`. No merge, auto-merge, paid APIs, or Milestone D.
+
+Timestamp: 2026-11-19T22:17:00+07:00 (Asia/Bangkok).
+
+---
+## C.7 Recovery03 final local release checkpoint
 
 This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.
 

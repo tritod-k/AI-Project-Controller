@@ -1,4 +1,27 @@
-# C.7 Recovery03 final local release checkpoint
+# C.7 Recovery04 final local release checkpoint
+
+This section is the authoritative pre-freeze evidence checkpoint; older sections below are preserved historical records and do not override it.
+
+Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: AIPC 2.0 Milestone C.7 RCE01-RCE03 (`recovery04`). Following Independent Codex Review #2 on `31ef716a9c0ce787b931d5ab65a92a7cc44234f1` (`REVISE` / `HOLD_FOR_HUMAN_TRIAGE`; audit receipts `c7_recovery03_review2_cli_receipt_31ef716.json` and `c7_recovery03_review2_gate_receipt_31ef716.json`), Human Commander K.TRITOD issued immutable grant `c7_commander_tier2_cycle3_rce03_template_ancestor_and_split_review_grant.json` (`sha256: 933355128ee628650b60736401c237579eb4322761c8825b572f25f704f3ba54`).
+
+Verified `tested_source_sha`: `9e1427f420e1d2992a9a81be6a19b6b5b40d640d` (Stable-managed subscription worker session `d25e1886-3236-470f-aa82-caf188e8a1ad`, strictly `src/aipc/project/scaffolding.py` and `tests/unit/test_c7_rce03_scaffolding.py`):
+- Added pre-resolution lexical ancestor-symlink rejection (`_validate_template_file_path`) to `_load_safe_yaml_mapping` and `validate_project_template` (handling both absolute and `Path.cwd()`-anchored relative paths, with read-boundary revalidation).
+- Added negative regression tests for both `validate_project_template` and `validate_governance_template` through parent and nested symlinked ancestors.
+- Standalone `--network none` Linux Docker `RCE03`: **25 passed, 0 skipped, 0 failed**, Ruff clean (`H:/AIPC_Workspace/runtime_c/audit/c7_recovery04_rce03_linux_docker_receipt.json`, `sha256: f5a5aab670438ae700306f02d8864a748c14a4fe17d6e8905e45e294f74e152f`).
+- Full Windows regression suite: **1,557 passed, 1 skipped** (POSIX process groups), **0 failed** (`H:/AIPC_Workspace/runtime_c/milestone_c7/full_verification_r3_fd8c72f0de614091a052727ab9315fad`).
+- Trusted C03 isolated (`--noconftest -p no:cacheprovider -o filterwarnings=default`): **1 passed**.
+- Whole-repo Ruff check/format (337 files), domain (4) & project (2) schemas, offline wheel (`sha256: fbb7c45720b5a75555b6b5359727ee25523aeab0a6345f5dc241c56e5ea112d3`), and `git diff --check`: all exit `0`.
+- Full `--network none` Linux Docker C.7/A04/C.5/C.6 snapshot: **217 passed, 1 skipped** (nested Docker daemon unavailable; 0 symlink skips), isolated C03 **1 passed**, Ruff/schemas exit `0`, `snapshot_immutable: true`.
+- Stable Controller `H:/AIPC_Workspace/stable_c`: clean and pinned at `f98846e8639b3ab846afe49454a6f79f6b236c36`.
+
+ZERO-reset accounting: Tier-1 `33/40` (`task-rce01=12/14`, `task-rce02=10/12`, `task-rce03=7/12`, `bootstrap-c7=4/6`); Tier-2 `2/3` logical cycles (`2/6` CLI invocations prior to Cycle #3); canonical invocation charges `27/42` (2 preserved duplicate charges, 0 resets).
+
+Post-freeze external verification: this docs-only commit establishes `frozenSHA_r3`. Cryptographic `source_equivalence_proof.json`, exact-SHA Python 3.12/3.13 GitHub Actions CI, and Review Cycle #3 (4 split per-criterion `subscription_reviewer_gate` jobs: `RCE01`, `RCE02`, `RCE03`, `C7-VALIDATION`) execute externally against `frozenSHA_r3` without mutating the frozen commit.
+
+Timestamp: 2026-11-19T22:17:00+07:00 (Asia/Bangkok).
+
+---
+## C.7 Recovery03 final local release checkpoint
 
 This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.
 
