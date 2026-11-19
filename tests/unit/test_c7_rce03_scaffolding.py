@@ -741,3 +741,65 @@ def test_remediation02_rejects_ancestor_symlink_preserving_matching_project(
 
     assert ext_manifest.read_bytes() == manifest_bytes
     assert ext_state_file.read_bytes() == state_bytes
+
+
+def test_rejects_template_validators_via_symlinked_parent_and_nested_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_templates = tmp_path / "real_templates"
+    nested_templates = real_templates / "nested"
+    nested_templates.mkdir(parents=True, exist_ok=True)
+
+    project_text = (REPO_ROOT / "templates" / "PROJECT.yaml").read_text(encoding="utf-8")
+    gov_text = (REPO_ROOT / "templates" / "review_governance.yaml").read_text(encoding="utf-8")
+
+    for target_dir in (real_templates, nested_templates):
+        (target_dir / "PROJECT.yaml").write_text(project_text, encoding="utf-8")
+        (target_dir / "review_governance.yaml").write_text(gov_text, encoding="utf-8")
+
+    parent_alias = tmp_path / "parent_alias"
+    _create_symlink_or_skip(parent_alias, real_templates, target_is_directory=True)
+
+    clean_outer = tmp_path / "clean_outer"
+    clean_outer.mkdir(parents=True, exist_ok=True)
+    nested_alias = clean_outer / "alias_mid"
+    _create_symlink_or_skip(nested_alias, real_templates, target_is_directory=True)
+
+    # Absolute paths through parent-directory symlink and nested ancestor symlink must fail.
+    for bad_project in (
+        parent_alias / "PROJECT.yaml",
+        nested_alias / "nested" / "PROJECT.yaml",
+    ):
+        with pytest.raises(ProjectScaffoldingError):
+            validate_project_template(bad_project)
+
+    for bad_gov in (
+        parent_alias / "review_governance.yaml",
+        nested_alias / "nested" / "review_governance.yaml",
+    ):
+        with pytest.raises(ProjectScaffoldingError):
+            validate_governance_template(bad_gov)
+
+    # Clean relative paths succeed, while relative paths with symlinked ancestors fail.
+    monkeypatch.chdir(tmp_path)
+    assert validate_project_template(Path("real_templates/PROJECT.yaml")).project.id == (
+        "sample-python-app"
+    )
+    assert (
+        validate_governance_template(Path("real_templates/review_governance.yaml")).policy_id
+        == "sample-project-governance-v1"
+    )
+
+    for bad_rel_project in (
+        Path("parent_alias/PROJECT.yaml"),
+        Path("clean_outer/alias_mid/nested/PROJECT.yaml"),
+    ):
+        with pytest.raises(ProjectScaffoldingError):
+            validate_project_template(bad_rel_project)
+
+    for bad_rel_gov in (
+        Path("parent_alias/review_governance.yaml"),
+        Path("clean_outer/alias_mid/nested/review_governance.yaml"),
+    ):
+        with pytest.raises(ProjectScaffoldingError):
+            validate_governance_template(bad_rel_gov)

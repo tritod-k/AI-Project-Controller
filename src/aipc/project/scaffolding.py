@@ -222,15 +222,27 @@ def _check_no_yaml_milestone_grant(data: Any, *, label: str) -> None:
             _check_no_yaml_milestone_grant(item, label=label)
 
 
-def _load_safe_yaml_mapping(path: Path, *, label: str) -> tuple[str, dict[str, Any]]:
+def _validate_template_file_path(path: Path, *, label: str) -> Path:
+    """Validate template path lexically (no traversal, no ancestor/leaf symlinks, regular file)."""
     _check_no_traversal_or_symlink(path, label=label)
-    st = _assert_not_symlink_lstat(path, label=label)
+    lexical_path = path if path.is_absolute() else Path.cwd() / path
+    _check_no_traversal_or_symlink(lexical_path, label=label)
+    _assert_no_ancestor_symlinks(lexical_path, label=label)
+    st = _assert_not_symlink_lstat(lexical_path, label=label)
     if st is None or not stat.S_ISREG(st.st_mode):
         raise ProjectScaffoldingError(f"{label} file does not exist: {path}")
+    return lexical_path
+
+
+def _load_safe_yaml_mapping(path: Path, *, label: str) -> tuple[str, dict[str, Any]]:
+    _validate_template_file_path(path, label=label)
     try:
+        _validate_template_file_path(path, label=label)
         raw_text = path.read_text(encoding="utf-8")
         assert_no_secrets(raw_text)
         parsed = yaml.load(raw_text, Loader=_UniqueKeySafeLoader)
+    except ProjectScaffoldingError:
+        raise
     except SecretExposureError as exc:
         raise ProjectScaffoldingError(f"{label} contains prohibited credential text") from exc
     except (OSError, UnicodeError, yaml.YAMLError, RecursionError) as exc:
@@ -249,6 +261,7 @@ def validate_project_template(path: Path | str) -> ProjectDefinition:
     """Validate a starter PROJECT.yaml against C01/ProjectDefinition and YAML grant rules."""
     template_path = Path(path)
     _, parsed = _load_safe_yaml_mapping(template_path, label="PROJECT.yaml")
+    _validate_template_file_path(template_path, label="PROJECT.yaml")
     try:
         project_def = load_project(template_path)
     except ProjectDefinitionError as exc:
