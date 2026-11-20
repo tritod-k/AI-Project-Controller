@@ -450,20 +450,22 @@ def test_render_current_status_md_uses_nested_contract_fields_from_persistent_qu
         milestone_id="phase-24",
         contracts=(
             ApprovedTaskContract(
-                task_id="d01-nested-task-01",
-                phase_id="phase-d01",
+                task_id="nested-task-01",
+                phase_id="phase-01",
                 milestone_id="phase-24",
                 title="Render nested contract",
                 objective="Verify CURRENT_STATUS.md extracts nested contract fields.",
                 in_scope=("src/aipc/project/scaffolding.py",),
-                validation_commands=("pytest tests/unit/test_d01_intake_status_and_git_quiescence.py",),
+                validation_commands=(
+                    "pytest tests/unit/test_d01_intake_status_and_git_quiescence.py",
+                ),
             ),
         ),
     )
 
     out_path = render_current_status_md(project_root, queue_path=queue_path)
     rendered = out_path.read_text(encoding="utf-8")
-    assert "`d01-nested-task-01`" in rendered
-    assert "`phase-d01`" in rendered
+    assert "`nested-task-01`" in rendered
+    assert "`phase-01`" in rendered
     assert "`task-0`" not in rendered
     assert "| `-` |" not in rendered

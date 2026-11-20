@@ -916,9 +916,7 @@ def render_current_status_md(
     task_rows: list[tuple[str, str, str]] = []
     for idx, task in enumerate(tasks):
         contract = task.get("contract") if isinstance(task.get("contract"), dict) else {}
-        tid = str(
-            contract.get("task_id") or task.get("task_id") or task.get("id") or f"task-{idx}"
-        )
+        tid = str(contract.get("task_id") or task.get("task_id") or task.get("id") or f"task-{idx}")
         status = str(task.get("status") or "UNKNOWN")
         phase = str(
             contract.get("phase_id")

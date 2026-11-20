@@ -12,7 +12,7 @@ import subprocess
 import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from aipc.domain.errors import StateError
 from aipc.domain.models import CanonicalRecord
@@ -285,7 +285,8 @@ def _check_queue_quiescence(workspace_root: Path, projects_subdir: str) -> list[
                                 for idx, task in enumerate(raw_tasks):
                                     if not isinstance(task, dict):
                                         violations.append(
-                                            f"Malformed canonical_queue.json in {project_dir.name}: "
+                                            f"Malformed canonical_queue.json in "
+                                            f"{project_dir.name}: "
                                             f"task entry at index {idx} must be a JSON object"
                                         )
                                         continue
