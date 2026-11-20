@@ -1,10 +1,10 @@
 # AIPC 2.0 Milestone D (`D01`–`D03`) — Completion Report
 
-**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI + 4-job Codex review `PASS` + Commander K.TRITOD merge approval)  
-**Architecture Baseline:** Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`  
-**Branch:** `gemini/aipc-2.0-milestone-d` (`tested_source_sha_d`: `b141bac948c095c96168c025b939f523816da0f1`)  
-**Owner / Human Commander:** K.TRITOD  
-**Operating Posture:** STRICT `subscription_only`, `EXPERIMENTAL / SUPERVISED`; unattended production remains **NO-GO** pending separate release gate.
+**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI on `frozenSHA_d_r2` + 4-job Codex Review Cycle #2 `PASS` + Commander K.TRITOD merge approval)
+**Architecture Baseline:** Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`
+**Branch:** `gemini/aipc-2.0-milestone-d` (`tested_source_sha_d_r2`: `56db9cea17900d0b27de625f94506e68a81ef2f4`; prior `frozenSHA_d`: `77ad1767ca2d88b5a1b2c7f9af17ce875b7a17db`)
+**Owner / Human Commander:** K.TRITOD
+**Operating Posture:** STRICT `subscription_only`, `EXPERIMENTAL / SUPERVISED`, `Level A + Level B` isolation with explicit Level C host disclosure; unattended production remains **NO-GO** pending separate release gate.
 
 ---
 

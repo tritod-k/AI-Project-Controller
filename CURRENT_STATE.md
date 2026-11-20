@@ -1,3 +1,30 @@
+# AIPC 2.0 Milestone D (`D01`–`D03`) — Tier-2 Remediation Cycle #1 (`D-recovery01`) Pre-Freeze Checkpoint
+
+This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.
+
+Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: AIPC 2.0 Milestone D (`D01`–`D03`, Production Readiness & Multi-Project Workspace) Tier-2 Remediation Cycle #1 (`1/2`, zero budget resets) under Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2` and Human Commander K.TRITOD Tier-2 Cycle #1 Triage Authorization (`d05_commander_tier2_cycle1_grant.json`, HMAC-SHA256 signed, `sha256: 1735acf96ad6ba7afc774ecd18be46b5d012d715f5ca86ffc6864679598d0d58`).
+
+Candidate branch `gemini/aipc-2.0-milestone-d` at `H:/000ProjectCode/AI_Project_Controller`; verified `tested_source_sha_d_r2`: `56db9cea17900d0b27de625f94506e68a81ef2f4` (prior `frozenSHA_d`: `77ad1767ca2d88b5a1b2c7f9af17ce875b7a17db`; base post-PR-#10 `master`: `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`). Promoted Stable Controller `H:/AIPC_Workspace/stable_c` remains clean and pinned at `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`. Sealed historical archive `H:/AIPC_Workspace/runtime_c/` verified 100% untouched (`107,441` files): matches original `d00_runtime_c_sealed_baseline.json` (`3155d13a6bf65826...`) bit-for-bit, `d04` isolation digest (`e51970f1...`) bit-for-bit, AND captured + re-verified full SHA-256 content-hashed baseline `d05_runtime_c_content_baseline.json` (`f0fecdfe757db4962f97fe20c1708f9e403c8f5bed88808cde31937a112c0028`, `scandir_lstat_content_sha256`).
+
+Tier-2 Cycle #1 (`D-recovery01`) repairs authored by promoted `stable_c` Hydrogen subscription Workers (`gemini-4-hydrogen-medium`, 100% `subscription_only`, zero paid APIs):
+- **`D01-recovery01`** (`620c256d` + `2922883`, session `b85ab9f4-0751-4e12-9be0-e705abb1b241`): idempotent repeated `reconcile_queue_and_budget_consistency()` preserving `RESERVED` budget entries for `RECONCILIATION_REQUIRED` tasks across repeated calls (`task_queue.py`); strict canonical `RUNNING`/`DISPATCHING`/`IN_PROGRESS`/`CLAIMING`/`RECONCILIATION_REQUIRED`, active `RESERVED` ledger, and malformed-queue quiescence rejection (`workspace_git_checkpoint.py`); canonical nested `QueuedTaskRecord.contract` rendering in `render_current_status_md()` (`scaffolding.py`); regression tests in `test_d01_hmac_and_consistency.py` and `test_d01_intake_status_and_git_quiescence.py`.
+- **`D02-recovery01`** (`32503fc` + `d479d21`, session `17ef50d6-3a24-476d-9d99-d0394395290e`): schema-validated, provider-neutral per-model eligibility provenance in `_extract_receipt_model_eligibility()` rejecting arbitrary strings and refusing to map generic `qualification_state`/`runtime_state` onto `selected_model` (keeping `UNOBSERVED` absent model-specific provenance); positive & negative regression tests in `test_d02_multiproject_dashboard.py`.
+- **`D03-recovery01`** (`0b1aac6` + `56db9ce`, session `add75570-8905-4ac9-ae4c-dee5dc6ca0ad`): fail-closed rejection of `read_only_root=False` in `build_minimal_docker_verify_argv()`; full `.git/` descendant inspection in `_scan_mount_for_forbidden_descendants()`; mandatory full SHA-256 content-hashed `compute_sealed_archive_manifest()` / `verify_sealed_archive_untouched()` (`scandir_lstat_content_sha256`, detecting same-size mtime-preserved 1-byte tampering) and destination containment guard in `write_sealed_archive_baseline_manifest()` rejecting paths inside/aliasing `archive_root`; regression tests in `test_d03_multiproject_e2e_and_closeout.py`.
+
+Fresh verification at `tested_source_sha_d_r2` (`56db9cea17900d0b27de625f94506e68a81ef2f4`, all verbatim JSON receipts + `.sha256` sidecars retained under `runtime/audit/receipts/r2_verification/`):
+- Targeted D01 (`test_d00` + `test_d01_*`): **27 passed, 0 skipped, 0 failed** on Windows AND `--network none --read-only` Linux Docker.
+- Targeted D02 (`test_d02_*` + `test_dashboard.py`): **18 passed, 0 skipped, 0 failed** on Windows AND `--network none --read-only` Linux Docker.
+- Targeted D03 (`test_d03_*`): **7 passed, 0 skipped, 0 failed** on Windows AND `--network none --read-only` Linux Docker.
+- Combined `--network none --read-only` Linux Docker Milestone D suite (`aipc-cisl-verify:py313-v1`): **52 passed, 0 skipped, 0 failed** (`0` symlink skips).
+- CI-equivalent + Milestone D full Windows regression suite: **1,602 passed, 1 skipped** (POSIX process groups), **0 failed**.
+- Isolated C03 (`--noconftest -c NUL -o filterwarnings=default -p no:cacheprovider`): **1 passed, 0 failed**.
+- Whole-repo `ruff check .` (`0` errors), `ruff format --check .` (`345` files formatted), domain (`4`) & project (`2`) JSON schemas, offline wheel (`ai_project_controller-0.0.1-py3-none-any.whl`, `sha256: 23e134521ba4ad09538b91d873661f4c825833ec208399d3df59b6e1694d8d9b`), `stable_c` isolation (`6671f87c`, clean), `runtime_c/` dual untouched proof (`107,441` files), `git diff --check`: all exit `0`.
+
+Post-freeze external verification: this docs-only commit establishes exact `frozenSHA_d_r2`. External `source_equivalence_proof_d_r2.json`, exact-SHA Python 3.12/3.13 GitHub Actions CI, and 4 fresh `--ephemeral` read-only OpenAI Codex reviewer sessions (`job-a-r2`, `job-b-r2`, `job-c-r2`, `job-v-r2`) execute post-freeze against `frozenSHA_d_r2`. Only verified `4/4 PASS` permits opening PR #11 (`gemini/aipc-2.0-milestone-d` -> `master`, no merge/auto-merge) and pushing the quiescent Private `AIPC_Workspace` snapshot (`isPrivate == true`). Operating posture: `EXPERIMENTAL / SUPERVISED`, `Level A + Level B` isolation with explicit Level C host disclosure.
+
+Timestamp: 2026-11-20T20:00:00Z.
+
+---
 # AIPC 2.0 Milestone D (`D01`–`D03`) final local release checkpoint
 
 This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.

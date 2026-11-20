@@ -1,17 +1,39 @@
 # AIPC 2.0 Milestone D (`D01`–`D03`) — Verification & Audit Evidence
 
-**Milestone:** AIPC 2.0 Milestone D (`D01`–`D03`: Production Readiness & Multi-Project Workspace)  
-**Architecture Baseline:** Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`  
-**Owner / Human Commander:** K.TRITOD  
-**Branch:** `gemini/aipc-2.0-milestone-d`  
-**Base `master` SHA (post-PR-#10):** `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6` (CI run `44620182296` SUCCESS on Python 3.12 & 3.13)  
-**Verified `tested_source_sha_d`:** `b141bac948c095c96168c025b939f523816da0f1`  
-**Pinned Stable Engine (`H:/AIPC_Workspace/stable_c`):** `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6` (clean, unmodified after Section 1 fast-forward)  
+**Milestone:** AIPC 2.0 Milestone D (`D01`–`D03`: Production Readiness & Multi-Project Workspace)
+**Architecture Baseline:** Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`
+**Owner / Human Commander:** K.TRITOD
+**Branch:** `gemini/aipc-2.0-milestone-d`
+**Base `master` SHA (post-PR-#10):** `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6` (CI run `44620182296` SUCCESS on Python 3.12 & 3.13)
+**Verified `tested_source_sha_d` (Cycle 0):** `b141bac948c095c96168c025b939f523816da0f1` (`frozenSHA_d`: `77ad1767ca2d88b5a1b2c7f9af17ce875b7a17db`)
+**Verified `tested_source_sha_d_r2` (Tier-2 Cycle #1 / `D-recovery01`):** `56db9cea17900d0b27de625f94506e68a81ef2f4`
+**Pinned Stable Engine (`H:/AIPC_Workspace/stable_c`):** `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6` (clean, unmodified after Section 1 fast-forward)
 **Operating Profile:** STRICT `subscription_only` (`agy.exe` + `gemini-4-hydrogen-medium` Workers, `codex.cmd` Independent Reviewers; `$0` paid API usage)
 
 ---
 
-## 1. Promoted `stable_c` Worker Provenance
+## 0. Tier-2 Remediation Cycle #1 (`D-recovery01`) Provenance & Verbatim Receipts
+Authorized by Human Commander K.TRITOD (`d05_commander_tier2_cycle1_grant.json`, HMAC-SHA256 signed, `sha256: 1735acf96ad6ba7afc774ecd18be46b5d012d715f5ca86ffc6864679598d0d58`; Tier-2 Cycle `1/2`, `0` budget resets):
+
+| Workstream | Worker Commit + Cleanup | Worker Session ID (`gemini-4-hydrogen-medium`) | Defects Remediated |
+| :--- | :--- | :--- | :--- |
+| `D01-recovery01` | `620c256d` + `2922883` | `b85ab9f4-0751-4e12-9be0-e705abb1b241` | Idempotent `RECONCILIATION_REQUIRED` budget preservation (`task_queue.py`); canonical `RUNNING`/active-ledger/malformed-queue quiescence rejection (`workspace_git_checkpoint.py`); nested `QueuedTaskRecord.contract` rendering (`scaffolding.py`) |
+| `D02-recovery01` | `32503fc` + `d479d21` | `17ef50d6-3a24-476d-9d99-d0394395290e` | Provider-neutral schema-validated per-model eligibility provenance; reject unvalidated strings & generic `qualification_state` mapping (`multi_project.py`) |
+| `D03-recovery01` | `0b1aac6` + `56db9ce` | `add75570-8905-4ac9-ae4c-dee5dc6ca0ad` | Fail-closed `read_only_root=False` rejection; full `.git/` descendant scan; mandatory full SHA-256 content-hashed sealed-archive verification (`scandir_lstat_content_sha256`) + destination containment guard (`isolation_and_closeout.py`) |
+
+Verbatim JSON command receipts (`argv`, `cwd`, `exit_code`, `stdout`, `stdout_sha256` + `.sha256` sidecars) at `tested_source_sha_d_r2` (`56db9cea17900d0b27de625f94506e68a81ef2f4`) under `H:/AIPC_Workspace/projects/AI_Project_Controller/runtime/audit/receipts/r2_verification/`:
+- `r2_d01_pytest_receipt.json`: Windows **27 passed, 0 failed**; `--network none --read-only` Linux Docker **27 passed, 0 skipped, 0 failed**.
+- `r2_d02_pytest_receipt.json`: Windows **18 passed, 0 failed**; `--network none --read-only` Linux Docker **18 passed, 0 skipped, 0 failed**.
+- `r2_d03_pytest_receipt.json`: Windows **7 passed, 0 failed**; `--network none --read-only` Linux Docker **7 passed, 0 skipped, 0 failed**.
+- `r2_linux_docker_suite_receipt.json`: Combined `--network none --read-only` Linux Docker (`aipc-cisl-verify:py313-v1`) **52 passed, 0 skipped, 0 failed** (`0` symlink skips).
+- `r2_full_windows_pytest_receipt.json`: CI-equivalent + Milestone D full Windows suite **1,602 passed, 1 skipped** (POSIX process groups), **0 failed**.
+- `r2_c03_isolated_receipt.json`: Isolated C03 (`--noconftest -c NUL -o filterwarnings=default -p no:cacheprovider`) **1 passed, 0 failed**.
+- `r2_static_and_wheel_receipt.json`: `ruff check .` (`0`), `ruff format --check .` (`345` files), `aipc.domain.schemas --check` (`0`), `aipc.project.schemas --check` (`0`), `pip wheel` (`ai_project_controller-0.0.1-py3-none-any.whl`, `sha256: 23e134521ba4ad09538b91d873661f4c825833ec208399d3df59b6e1694d8d9b`), `git diff --check` (`0`), `stable_c` (`6671f87c`, clean).
+- `r2_runtime_c_untouched_receipt.json` + `d05_runtime_c_content_baseline.json` + `d05_runtime_c_content_untouched_pass.json`: `107,441` files match original `d00` baseline (`3155d13a6bf65826...`), `d04` isolation digest (`e51970f1...`), AND full SHA-256 content-hashed `d05` baseline (`f0fecdfe757db4962f97fe20c1708f9e403c8f5bed88808cde31937a112c0028`, `scandir_lstat_content_sha256`).
+
+---
+
+## 1. Promoted `stable_c` Worker Provenance (Cycle 0 Historical)
 All substantive Milestone D source and test files were authored by promoted `stable_c`-managed `AntigravitySubscriptionWorkerAutomation` Workers (`gemini-4-hydrogen-medium`):
 
 | Workstream | Commit SHA | Worker Session ID | Scope |
