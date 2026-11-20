@@ -28,17 +28,49 @@ _REQUIRED_GITIGNORE_EXCLUSIONS: tuple[str, ...] = (
     "*.key",
     ".env*",
 )
-_NON_QUIESCENT_TASK_STATUSES: frozenset[str] = frozenset(
+_QUIESCENT_TASK_STATUSES: frozenset[str] = frozenset(
     {
-        "RUNNING",
-        "DISPATCHING",
-        "IN_PROGRESS",
-        "CLAIMING",
-        "RECONCILIATION_REQUIRED",
+        "PENDING",
+        "ELIGIBLE",
+        "QUEUED",
+        "DEFERRED",
+        "COMPLETED",
+        "PASSED",
+        "FAILED",
+        "BLOCKED",
+        "CANCELLED",
     }
 )
-_SECRET_SCAN_SUFFIXES: frozenset[str] = frozenset({".json", ".yaml", ".yml", ".md"})
+_SKIPPED_WALK_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        "stable_c",
+        ".venv",
+        ".venv_stable",
+        "runtime_c",
+        "worktrees",
+        "logs",
+        "__pycache__",
+    }
+)
+_PORTABLE_ROOT_DOC_NAMES: frozenset[str] = frozenset({"GEMINI.md", "AGENTS.md", "README.md"})
+_SECRET_SCAN_SUFFIXES: frozenset[str] = frozenset({".json", ".yaml", ".yml", ".md", ".bat"})
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+_BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9_.\-]+", re.IGNORECASE)
+_SK_RE = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}")
+_AIZA_RE = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
+_GH_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?:ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"
+)
+_PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
+_KV_SECRET_RE = re.compile(
+    r"""(?i)(api[_-]?key|token|password|secret)\s*([:=])\s*['"]?([^\s'"]+)['"]?"""
+)
+_AUTH_HEADER_RE = re.compile(r"""(?i)(authorization)\s*([:=])\s*['"]?(?!Bearer\s)([^\s'"]+)['"]?""")
+_EXPRESSION_PREFIXES = ("(", "$", "{", "[", "<", "*", "%", ",")
+_NON_SECRET_LITERALS: frozenset[str] = frozenset({"null", "none", "true", "false"})
 
 
 class WorkspaceGitQuiescenceError(StateError):
@@ -135,7 +167,7 @@ def acquire_controller_lock(lock_path: Path) -> Iterator[None]:
 
 
 def _walk_workspace_files(workspace_root: Path) -> tuple[list[Path], list[str]]:
-    """Walk workspace files without following symlinks, skipping ``.git``."""
+    """Walk workspace files without following symlinks, skipping ignored engine directories."""
     files: list[Path] = []
     violations: list[str] = []
 
@@ -158,12 +190,23 @@ def _walk_workspace_files(workspace_root: Path) -> tuple[list[Path], list[str]]:
                 violations.append(f"Symlink forbidden in workspace: {rel}")
                 continue
             if stat.S_ISDIR(st.st_mode):
+                if entry.name in _SKIPPED_WALK_DIRS:
+                    continue
                 _visit(entry)
             elif stat.S_ISREG(st.st_mode):
                 files.append(entry)
 
     _visit(workspace_root)
     return files, violations
+
+
+def _gitignore_covers_exclusion(active_lines: set[str], required: str) -> bool:
+    for line in active_lines:
+        if line.startswith("!"):
+            continue
+        if line == required or line.endswith(f"/{required}"):
+            return True
+    return False
 
 
 def _check_git_hygiene(workspace_root: Path) -> list[str]:
@@ -220,7 +263,7 @@ def _check_git_hygiene(workspace_root: Path) -> list[str]:
                     if line.strip() and not line.lstrip().startswith("#")
                 }
                 for req in _REQUIRED_GITIGNORE_EXCLUSIONS:
-                    if req not in active_lines:
+                    if not _gitignore_covers_exclusion(active_lines, req):
                         violations.append(f".gitignore missing required exclusion: {req}")
     return violations
 
@@ -260,54 +303,56 @@ def _check_queue_quiescence(workspace_root: Path, projects_subdir: str) -> list[
                             f"Malformed canonical_queue.json in {project_dir.name}: "
                             "root must be a JSON object"
                         )
+                    elif "tasks" not in queue_data:
+                        violations.append(
+                            f"Malformed canonical_queue.json in {project_dir.name}: "
+                            "missing 'tasks' list"
+                        )
                     else:
-                        if "tasks" in queue_data:
-                            raw_tasks = queue_data["tasks"]
-                            collection_name = "tasks"
-                        elif "items" in queue_data:
-                            raw_tasks = queue_data["items"]
-                            collection_name = "items"
-                        else:
-                            raw_tasks = None
-                            collection_name = "tasks"
+                        raw_tasks = queue_data["tasks"]
+                        if not isinstance(raw_tasks, list):
                             violations.append(
                                 f"Malformed canonical_queue.json in {project_dir.name}: "
-                                "missing 'tasks' list"
+                                "'tasks' must be a list"
                             )
-
-                        if raw_tasks is not None:
-                            if not isinstance(raw_tasks, list):
-                                violations.append(
-                                    f"Malformed canonical_queue.json in {project_dir.name}: "
-                                    f"'{collection_name}' must be a list"
+                        else:
+                            for idx, task in enumerate(raw_tasks):
+                                if not isinstance(task, dict):
+                                    violations.append(
+                                        f"Malformed canonical_queue.json in "
+                                        f"{project_dir.name}: "
+                                        f"task entry at index {idx} must be a JSON object"
+                                    )
+                                    continue
+                                contract = task.get("contract")
+                                nested_tid = (
+                                    contract.get("task_id") if isinstance(contract, dict) else None
                                 )
-                            else:
-                                for idx, task in enumerate(raw_tasks):
-                                    if not isinstance(task, dict):
-                                        violations.append(
-                                            f"Malformed canonical_queue.json in "
-                                            f"{project_dir.name}: "
-                                            f"task entry at index {idx} must be a JSON object"
-                                        )
-                                        continue
-                                    status = str(task.get("status") or "").strip().upper()
-                                    if status in _NON_QUIESCENT_TASK_STATUSES:
-                                        contract = task.get("contract")
-                                        nested_tid = (
-                                            contract.get("task_id")
-                                            if isinstance(contract, dict)
-                                            else None
-                                        )
-                                        task_id = str(
-                                            nested_tid
-                                            or task.get("task_id")
-                                            or task.get("id")
-                                            or f"index-{idx}"
-                                        )
-                                        violations.append(
-                                            f"Non-quiescent task {task_id} in {project_dir.name}: "
-                                            f"status={status}"
-                                        )
+                                task_id = str(
+                                    nested_tid
+                                    or task.get("task_id")
+                                    or task.get("id")
+                                    or f"index-{idx}"
+                                )
+                                if task.get("reconciliation_required"):
+                                    violations.append(
+                                        f"Non-quiescent task {task_id} in {project_dir.name}: "
+                                        "reconciliation_required is truthy"
+                                    )
+                                    continue
+                                raw_status = task.get("status")
+                                if not isinstance(raw_status, str) or not raw_status.strip():
+                                    violations.append(
+                                        f"Malformed task {task_id} in {project_dir.name}: "
+                                        "missing or non-string 'status'"
+                                    )
+                                    continue
+                                status = raw_status.strip().upper()
+                                if status not in _QUIESCENT_TASK_STATUSES:
+                                    violations.append(
+                                        f"Non-quiescent task {task_id} in {project_dir.name}: "
+                                        f"status={status}"
+                                    )
 
         ledger_path = state_dir / "repair_budget_ledger.json"
         try:
@@ -480,6 +525,50 @@ def _check_git_index_clean(workspace_root: Path) -> tuple[bool, list[str]]:
     return True, violations
 
 
+def _is_portable_root_doc_or_launcher(candidate_file: Path, workspace_root: Path) -> bool:
+    if candidate_file.parent != workspace_root:
+        return False
+    name = candidate_file.name
+    if name in _PORTABLE_ROOT_DOC_NAMES:
+        return True
+    if name.startswith("AIPC_") and name.endswith(".md"):
+        return True
+    return candidate_file.suffix.lower() == ".bat"
+
+
+def _is_suspicious_kv_value(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or stripped.startswith(_EXPRESSION_PREFIXES):
+        return False
+    if stripped.lower() in _NON_SECRET_LITERALS:
+        return False
+    return any(ch.isalnum() for ch in stripped)
+
+
+def _has_workspace_secret(content: str, *, is_portable_doc: bool) -> bool:
+    if (
+        _BEARER_RE.search(content)
+        or _SK_RE.search(content)
+        or _AIZA_RE.search(content)
+        or _GH_TOKEN_RE.search(content)
+        or _PEM_PRIVATE_KEY_RE.search(content)
+    ):
+        return True
+    if not is_portable_doc:
+        try:
+            assert_no_secrets(content)
+        except SecretExposureError:
+            return True
+        return False
+    for match in _KV_SECRET_RE.finditer(content):
+        if _is_suspicious_kv_value(match.group(3)):
+            return True
+    for match in _AUTH_HEADER_RE.finditer(content):
+        if _is_suspicious_kv_value(match.group(3)):
+            return True
+    return False
+
+
 def verify_workspace_git_quiescence(
     workspace_root: Path | str,
     *,
@@ -528,13 +617,14 @@ def verify_workspace_git_quiescence(
             if candidate_file.suffix.lower() not in _SECRET_SCAN_SUFFIXES:
                 continue
             rel = candidate_file.relative_to(clean_ws).as_posix()
+            is_portable_doc = _is_portable_root_doc_or_launcher(candidate_file, clean_ws)
             try:
                 content = candidate_file.read_text(encoding="utf-8")
-                assert_no_secrets(content)
-            except SecretExposureError:
-                secret_violations.append(f"Secret detected in workspace file: {rel}")
             except (OSError, UnicodeError):
                 secret_violations.append(f"Cannot read workspace text file as UTF-8: {rel}")
+                continue
+            if _has_workspace_secret(content, is_portable_doc=is_portable_doc):
+                secret_violations.append(f"Secret detected in workspace file: {rel}")
 
         is_git_repo, git_index_violations = _check_git_index_clean(clean_ws)
 

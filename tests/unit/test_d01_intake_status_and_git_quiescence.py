@@ -261,7 +261,7 @@ def test_verify_workspace_git_quiescence_positive_and_cli(
     state_dir.mkdir(parents=True, exist_ok=True)
 
     (state_dir / "canonical_queue.json").write_text(
-        '{"tasks": [{"task_id": "t-01", "status": "DONE"}]}\n',
+        '{"tasks": [{"task_id": "t-01", "status": "COMPLETED"}]}\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -398,7 +398,7 @@ def test_verify_workspace_git_quiescence_rejects_running_malformed_queue_and_res
     for idx, bad_payload in enumerate(
         (
             ["not-a-dict-root"],
-            {"tasks": {"t-1": {"status": "DONE"}}},
+            {"tasks": {"t-1": {"status": "COMPLETED"}}},
             {"tasks": ["not-a-task-dict"]},
         )
     ):
@@ -469,3 +469,117 @@ def test_render_current_status_md_uses_nested_contract_fields_from_persistent_qu
     assert "`phase-01`" in rendered
     assert "`task-0`" not in rendered
     assert "| `-` |" not in rendered
+
+
+def test_verify_workspace_git_quiescence_strict_queue_allowlist_and_malformed_tasks(
+    tmp_path: Path,
+) -> None:
+    bad_payloads: tuple[dict[str, object], ...] = (
+        {"tasks": None},
+        {"items": []},
+        {},
+        {"tasks": [{"task_id": "t-missing-status"}]},
+        {"tasks": [{"task_id": "t-none-status", "status": None}]},
+        {"tasks": [{"task_id": "t-empty-status", "status": "   "}]},
+        {"tasks": [{"task_id": "t-int-status", "status": 42}]},
+        {"tasks": [{"task_id": "t-bogus", "status": "BOGUS_STATUS"}]},
+        {"tasks": [{"task_id": "t-done", "status": "DONE"}]},
+        {
+            "tasks": [
+                {
+                    "task_id": "t-reconcile",
+                    "status": "COMPLETED",
+                    "reconciliation_required": True,
+                }
+            ]
+        },
+        {"tasks": [{"task_id": "t-dispatch", "status": "DISPATCHING"}]},
+        {"tasks": [{"task_id": "t-claim", "status": "CLAIMING"}]},
+        {"tasks": [{"task_id": "t-interrupt", "status": "INTERRUPTED"}]},
+        {"tasks": [{"task_id": "t-wait-prov", "status": "WAITING_PROVIDER"}]},
+        {"tasks": [{"task_id": "t-wait-human", "status": "WAITING_HUMAN"}]},
+        {"tasks": [{"task_id": "t-repair", "status": "REPAIR_REQUIRED"}]},
+    )
+    for idx, payload in enumerate(bad_payloads):
+        ws = _setup_quiescent_workspace(tmp_path / f"strict_bad_{idx}")
+        state_dir = ws / "projects" / "p1" / "runtime" / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "canonical_queue.json").write_text(
+            json.dumps(payload) + "\n",
+            encoding="utf-8",
+        )
+        rep = verify_workspace_git_quiescence(ws)
+        assert rep.passed is False, f"Expected FAIL for payload {payload}"
+        assert rep.checks["queue_quiescence"] is False, f"Expected queue FAIL for {payload}"
+
+
+def test_verify_workspace_git_quiescence_portable_root_docs_glob_ignore_and_secrets(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git executable not available")
+
+    ws = tmp_path / "portable_ws"
+    ws.mkdir(parents=True)
+    (ws / ".gitattributes").write_text("* text=auto eol=lf\n", encoding="utf-8", newline="\n")
+    (ws / ".gitignore").write_text(
+        "stable_c/\n**/runtime/worktrees/\n**/runtime/logs/\n**/*.lock\n*.key\n.env*\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    ps_recipe = (
+        "# Operator Guide\n\n"
+        "```powershell\n"
+        "$env:GH_TOKEN = (($out | Where-Object { $_ -like 'password=*' }) "
+        "-replace '^password=','').Trim()\n"
+        "```\n"
+    )
+    (ws / "GEMINI.md").write_text(ps_recipe, encoding="utf-8", newline="\n")
+    (ws / "AGENTS.md").write_text("# Agents\nFollow controller rules.\n", encoding="utf-8")
+    (ws / "README.md").write_text("# Workspace\n", encoding="utf-8")
+    (ws / "AIPC_RUNBOOK.md").write_text("# Runbook\n", encoding="utf-8")
+    (ws / "launch_aipc.bat").write_text(
+        "@echo off\r\nset MODE=local\r\necho Ready\r\n",
+        encoding="utf-8",
+    )
+
+    # Ignored ephemeral / nested engine dirs should be skipped by walk
+    for ignored_dir in ("stable_c", ".venv", ".venv_stable", "runtime_c", "__pycache__"):
+        d = ws / ignored_dir
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "checkpoint_manifest.json").write_text("{}\n", encoding="utf-8")
+
+    subprocess.run(["git", "init"], cwd=ws, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "add",
+            ".gitattributes",
+            ".gitignore",
+            "GEMINI.md",
+            "AGENTS.md",
+            "README.md",
+            "AIPC_RUNBOOK.md",
+            "launch_aipc.bat",
+        ],
+        cwd=ws,
+        check=True,
+        capture_output=True,
+    )
+
+    rep_ok = verify_workspace_git_quiescence(ws)
+    assert rep_ok.passed is True
+    assert rep_ok.status == "PASS"
+    assert all(rep_ok.checks.values())
+
+    # Real secret in GEMINI.md must still fail no_secrets
+    (ws / "GEMINI.md").write_text(
+        ps_recipe + "\n" + "api" + "_key=" + "realvalue_dummy_01\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    rep_secret = verify_workspace_git_quiescence(ws)
+    assert rep_secret.passed is False
+    assert rep_secret.checks["no_secrets"] is False
+    assert any("GEMINI.md" in v for v in rep_secret.violations)
