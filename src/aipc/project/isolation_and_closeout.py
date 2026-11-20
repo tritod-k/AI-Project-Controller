@@ -10,11 +10,12 @@ Provides:
 - ``export_release_closeout_zip`` and ``verify_and_restore_closeout_zip`` for deterministic,
   LF-safe, SHA-256-verified closeout archives.
 - ``verify_sealed_archive_untouched`` performing read-only ``os.scandir`` + ``os.lstat``
-  verification against a ``scandir_lstat_relpath_size_mtime_ns_kind`` baseline manifest.
+  verification against a ``scandir_lstat_content_sha256`` baseline manifest.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
@@ -33,7 +34,7 @@ from aipc.hardening.env_isolation import ChildEnvironmentIsolationError, assert_
 from aipc.hardening.secrets import assert_no_secrets
 
 _FIXED_ZIP_DATE_TIME: tuple[int, int, int, int, int, int] = (2026, 1, 1, 0, 0, 0)
-_HASH_MODE_SCANDIR_LSTAT = "scandir_lstat_relpath_size_mtime_ns_kind"
+_HASH_MODE_SCANDIR_LSTAT = "scandir_lstat_content_sha256"
 _FORBIDDEN_MOUNT_FILENAMES: frozenset[str] = frozenset(
     {
         "repair_budget_ledger.json",
@@ -96,7 +97,7 @@ class SealedArchiveVerificationReport(CanonicalRecord):
     """Read-only sealed archive integrity verification report."""
 
     schema_version: Literal["1.0"] = "1.0"
-    hash_mode: Literal["scandir_lstat_relpath_size_mtime_ns_kind"] = _HASH_MODE_SCANDIR_LSTAT
+    hash_mode: Literal["scandir_lstat_content_sha256"] = _HASH_MODE_SCANDIR_LSTAT
     passed: StrictBool
     expected_digest: NonBlank
     observed_digest: NonBlank
@@ -191,8 +192,6 @@ def _scan_mount_for_forbidden_descendants(mount_dir: Path, *, label: str) -> Non
                     raise IsolationPolicyError(
                         f"{label} overlaps forbidden directory 'audit/approvals/' at {entry_path}"
                     )
-                if name_lower == ".git":
-                    continue
                 stack.append(entry_path)
 
 
@@ -247,6 +246,8 @@ def build_minimal_docker_verify_argv(
         raise IsolationPolicyError(f"FINAL-05 requires network_mode='none', got {network_mode!r}")
     if type(read_only_root) is not bool:
         raise IsolationPolicyError("read_only_root must be a boolean")
+    if not read_only_root:
+        raise IsolationPolicyError("FINAL-05 requires read_only_root=True")
     if isinstance(command, str | bytes) or not command:
         raise IsolationPolicyError("command must be a non-empty sequence of strings")
 
@@ -276,9 +277,8 @@ def build_minimal_docker_verify_argv(
         "--rm",
         "--network",
         "none",
+        "--read-only",
     ]
-    if read_only_root:
-        argv.append("--read-only")
     argv.extend(
         [
             "--cap-drop",
@@ -582,15 +582,41 @@ def verify_and_restore_closeout_zip(
     )
 
 
+def _compute_archive_file_content_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(_SHA256_CHUNK_BYTES)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror == 1920 or exc.errno in (errno.EINVAL, errno.ELOOP, errno.ENXIO):
+            return f"unopenable_os_error:{exc.errno}:{winerror}"
+        raise IsolationPolicyError(f"Cannot read archive file {path}: {exc}") from exc
+    return hasher.hexdigest()
+
+
+def _compute_symlink_target_sha256(path: Path) -> str:
+    try:
+        target = os.readlink(path)
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        return f"unreadable_symlink_os_error:{exc.errno}:{winerror}"
+    return hashlib.sha256(target.encode("utf-8", errors="surrogateescape")).hexdigest()
+
+
 def compute_sealed_archive_manifest(archive_root: Path | str) -> tuple[str, int]:
-    """Read-only ``os.scandir`` + ``os.lstat`` walk returning ``(sha256, file_count)``."""
+    """Read-only ``os.scandir`` + ``os.lstat`` content-hashed walk returning ``(sha256, file_count)``."""
     root_lex = _validate_clean_path(archive_root, label="archive_root")
     root_st = _assert_not_symlink_lstat(root_lex, label="archive_root")
     if root_st is None or not stat.S_ISDIR(root_st.st_mode):
         raise IsolationPolicyError(f"archive_root must be an existing directory: {root_lex}")
     root_resolved = root_lex.resolve()
 
-    records: list[tuple[str, int, int, str]] = []
+    records: list[tuple[str, int, str, str]] = []
     stack: list[Path] = [root_resolved]
     while stack:
         current = stack.pop()
@@ -609,17 +635,34 @@ def compute_sealed_archive_manifest(archive_root: Path | str) -> tuple[str, int]
                 ) from exc
             relpath = entry_path.relative_to(root_resolved).as_posix()
             if stat.S_ISLNK(st.st_mode):
-                records.append((relpath, int(st.st_size), int(st.st_mtime_ns), "symlink"))
+                records.append(
+                    (relpath, int(st.st_size), "symlink", _compute_symlink_target_sha256(entry_path))
+                )
             elif stat.S_ISDIR(st.st_mode):
                 stack.append(entry_path)
             elif stat.S_ISREG(st.st_mode):
-                records.append((relpath, int(st.st_size), int(st.st_mtime_ns), "file"))
+                records.append(
+                    (
+                        relpath,
+                        int(st.st_size),
+                        "file",
+                        _compute_archive_file_content_sha256(entry_path),
+                    )
+                )
             else:
-                records.append((relpath, int(st.st_size), int(st.st_mtime_ns), "other"))
+                records.append(
+                    (
+                        relpath,
+                        int(st.st_size),
+                        "other",
+                        f"non_regular_mode:{stat.S_IFMT(st.st_mode)}",
+                    )
+                )
 
     records.sort(key=lambda item: item[0])
     manifest_lines = "".join(
-        f"{relpath}\t{size}\t{mtime_ns}\t{kind}\n" for relpath, size, mtime_ns, kind in records
+        f"{relpath}\t{size}\t{kind}\t{content_sha256}\n"
+        for relpath, size, kind, content_sha256 in records
     )
     digest = hashlib.sha256(manifest_lines.encode("utf-8")).hexdigest()
     return digest, len(records)
@@ -630,7 +673,21 @@ def write_sealed_archive_baseline_manifest(
     manifest_path: Path | str,
 ) -> dict[str, Any]:
     """Write a baseline manifest JSON outside ``archive_root`` without mutating ``archive_root``."""
-    digest, file_count = compute_sealed_archive_manifest(archive_root)
+    root_lex = _validate_clean_path(archive_root, label="archive_root")
+    root_st = _assert_not_symlink_lstat(root_lex, label="archive_root")
+    if root_st is None or not stat.S_ISDIR(root_st.st_mode):
+        raise IsolationPolicyError(f"archive_root must be an existing directory: {root_lex}")
+    root_resolved = root_lex.resolve()
+
+    out_lex = _validate_clean_path(manifest_path, label="baseline_manifest_path")
+    _assert_not_symlink_lstat(out_lex, label="baseline_manifest_path")
+    out_resolved = out_lex.resolve(strict=False)
+    if _paths_overlap(out_lex, root_lex) or _paths_overlap(out_resolved, root_resolved):
+        raise IsolationPolicyError(
+            f"baseline_manifest_path ({out_resolved}) cannot reside inside or alias archive_root ({root_resolved})"
+        )
+
+    digest, file_count = compute_sealed_archive_manifest(root_resolved)
     payload: dict[str, Any] = {
         "schema_version": "1.0",
         "hash_mode": _HASH_MODE_SCANDIR_LSTAT,
@@ -638,9 +695,8 @@ def write_sealed_archive_baseline_manifest(
         "file_count": file_count,
     }
     assert_no_secrets(payload)
-    out = _validate_clean_path(manifest_path, label="baseline_manifest_path")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    out_resolved.parent.mkdir(parents=True, exist_ok=True)
+    out_resolved.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
 
 
@@ -665,7 +721,7 @@ def verify_sealed_archive_untouched(
         raise IsolationPolicyError("baseline_manifest_path must contain a JSON object")
 
     hash_mode = raw_manifest.get("hash_mode")
-    if hash_mode is not None and hash_mode != _HASH_MODE_SCANDIR_LSTAT:
+    if hash_mode != _HASH_MODE_SCANDIR_LSTAT:
         raise IsolationPolicyError(
             f"Unsupported baseline hash_mode {hash_mode!r}; expected {_HASH_MODE_SCANDIR_LSTAT!r}"
         )

@@ -347,6 +347,7 @@ def test_a_two_project_interleaved_e2e_and_readonly_dashboard(tmp_path: Path) ->
         assert status_md.is_file()
         status_text = status_md.read_text(encoding="utf-8")
         assert "DERIVED / NON-AUTHORITATIVE" in status_text
+        assert f"task-{pid}-01" in status_text
         assert f"app-{pid}.json" in status_text
         assert f"rcpt-{pid}.json" in status_text
 
@@ -506,6 +507,15 @@ def test_c_final05_minimal_docker_argv_and_level_c_disclosure(tmp_path: Path) ->
             network_mode="bridge",
         )
 
+    # read_only_root=False fails closed (FINAL-05)
+    with pytest.raises(IsolationPolicyError, match="read_only_root=True"):
+        build_minimal_docker_verify_argv(
+            image="aipc-cisl-verify:py313-v1",
+            candidate_worktree=candidate,
+            command=["pytest"],
+            read_only_root=False,
+        )
+
     # Forbidden mount roots (workspace root & sibling project)
     with pytest.raises(IsolationPolicyError):
         build_minimal_docker_verify_argv(
@@ -523,7 +533,7 @@ def test_c_final05_minimal_docker_argv_and_level_c_disclosure(tmp_path: Path) ->
             forbidden_mount_roots=(sibling_proj,),
         )
 
-    # Forbidden state/, audit/approvals/, ledger, queue, *.key, .aipc_operator
+    # Forbidden state/, audit/approvals/, ledger, queue, *.key, .aipc_operator (including inside .git/)
     for rel in (
         "state",
         "audit/approvals",
@@ -531,6 +541,9 @@ def test_c_final05_minimal_docker_argv_and_level_c_disclosure(tmp_path: Path) ->
         "canonical_queue.json",
         "secret.key",
         ".aipc_operator",
+        ".git/leak.key",
+        ".git/.aipc_operator",
+        ".git/hooks/state",
     ):
         bad_dir = tmp_path / f"bad_{rel.replace('/', '_')}"
         bad_dir.mkdir(parents=True, exist_ok=True)
@@ -634,6 +647,42 @@ def test_e_sealed_archive_untouched_pass_and_tamper_detection(tmp_path: Path) ->
     report_bad = verify_sealed_archive_untouched(archive, manifest_path)
     assert report_bad.passed is False
     assert report_bad.expected_digest != report_bad.observed_digest
+
+
+def test_e2_sealed_archive_same_size_mtime_preserved_tamper_and_dest_containment(
+    tmp_path: Path,
+) -> None:
+    """(e2) Same-size 1-byte tamper with preserved st_mtime_ns fails; manifest inside archive rejected."""
+    archive = tmp_path / "sealed_archive"
+    (archive / "sub").mkdir(parents=True)
+    target_file = archive / "sub" / "payload.txt"
+    target_file.write_bytes(b"abcdef1234\n")
+
+    # Baseline manifest destination inside archive_root must fail closed without creating dirs/files
+    bad_manifest = archive / "nested_bad" / "baseline_manifest.json"
+    with pytest.raises(IsolationPolicyError):
+        write_sealed_archive_baseline_manifest(archive, bad_manifest)
+    assert not bad_manifest.exists()
+    assert not bad_manifest.parent.exists()
+
+    manifest_path = tmp_path / "baseline_manifest.json"
+    payload = write_sealed_archive_baseline_manifest(archive, manifest_path)
+    assert payload["hash_mode"] == "scandir_lstat_content_sha256"
+
+    report_ok = verify_sealed_archive_untouched(archive, manifest_path)
+    assert report_ok.passed is True
+    assert report_ok.hash_mode == "scandir_lstat_content_sha256"
+
+    # Modify 1 byte in place (exact same byte size) and restore exact st_mtime_ns
+    orig_st = os.lstat(target_file)
+    target_file.write_bytes(b"Zbcdef1234\n")
+    os.utime(target_file, ns=(orig_st.st_atime_ns, orig_st.st_mtime_ns))
+
+    assert os.lstat(target_file).st_size == orig_st.st_size
+    assert os.lstat(target_file).st_mtime_ns == orig_st.st_mtime_ns
+    report_tampered = verify_sealed_archive_untouched(archive, manifest_path)
+    assert report_tampered.passed is False
+    assert report_tampered.expected_digest != report_tampered.observed_digest
 
 
 def test_f_clean_git_checkout_restore_lf_and_quiescence(tmp_path: Path) -> None:
