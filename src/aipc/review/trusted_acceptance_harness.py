@@ -21,6 +21,11 @@ from uuid import uuid4
 
 from pydantic import Field, StrictBool, StrictInt, field_validator, model_validator
 
+from aipc.controller.milestone_authorization import (
+    MilestoneAuthorizationTrustContext,
+    _normalize_milestone_id,
+    load_and_verify_milestone_authorization,
+)
 from aipc.controller.milestone_b_orchestrator import HandoffNextAuthorizedAction
 from aipc.controller.self_dev_runner import (
     CandidateImportOriginReport,
@@ -85,6 +90,25 @@ _MILESTONE_C7_IDS: frozenset[str] = frozenset(
 )
 _MILESTONE_C7_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]c\.?7|workstream[-_]c\.?7|c\.7|rce0[1-3])(?![0-9])"
+)
+_MILESTONE_D_IDS: frozenset[str] = frozenset(
+    {
+        "milestone-d",
+        "milestone_d",
+        "workstream-d",
+        "workstream_d",
+        "aipc-2.0-milestone-d",
+    }
+)
+_MILESTONE_D_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]?d|workstream[-_]?d|aipc[-_.]?2\.?0[-_.]?d|d0[1-3])(?![0-9])"
+)
+_STRICTLY_UNAUTHORIZED_FUTURE_RE = re.compile(
+    r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[4-9]|[1-9]\d)|"
+    r"rg(?:00|0[5-9]|[1-9]\d)|cisl(?:00|0[4-9]|[1-9]\d)|rce(?:00|0[4-9]|[1-9]\d)|"
+    r"phase[-_]?(?:2[5-9]|[3-9]\d|[1-9]\d{2,})|"
+    r"milestone[-_][e-z](?![a-z])|workstream[-_][e-z](?![a-z])|"
+    r"[e-z]0[1-9]|[e-z][1-9]\d)(?![0-9])"
 )
 _UNAUTHORIZED_FUTURE_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)|"
@@ -179,9 +203,68 @@ def assert_milestone_c_scope_authorized(
     approval_evidence_path: Path | str | None = None,
     project_id: str | None = None,
     in_scope_paths: Sequence[str] | None = None,
+    milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
 ) -> None:
-    """Fail closed if Milestone D or any unauthorized milestone scope is referenced."""
+    """Fail closed if Milestone D (without external trust) or any unauthorized scope is used."""
     norm_milestone = milestone_id.strip().lower()
+    if norm_milestone in _MILESTONE_D_IDS and milestone_trust_context is not None:
+        if _STRICTLY_UNAUTHORIZED_FUTURE_RE.search(norm_milestone):
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' is not authorized"
+            )
+        if phase_id is not None and _STRICTLY_UNAUTHORIZED_FUTURE_RE.search(
+            phase_id.strip().lower()
+        ):
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: phase_id '{phase_id}' references "
+                "unauthorized future scope"
+            )
+        if task_id is not None and _STRICTLY_UNAUTHORIZED_FUTURE_RE.search(task_id.strip().lower()):
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
+                "unauthorized future scope"
+            )
+        other_res = (_MILESTONE_C5_TOKEN_RE, _MILESTONE_C6_TOKEN_RE, _MILESTONE_C7_TOKEN_RE)
+        if phase_id is not None and any(r.search(phase_id.strip().lower()) for r in other_res):
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: phase_id '{phase_id}' references "
+                "wrong milestone scope under Milestone D"
+            )
+        if task_id is not None and any(r.search(task_id.strip().lower()) for r in other_res):
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: task_id '{task_id}' references "
+                "wrong milestone scope under Milestone D"
+            )
+        effective_phase = phase_id
+        if effective_phase is None and task_id is not None:
+            m = re.search(r"(?<![a-z0-9])(d0[1-3])(?![0-9])", task_id.strip().lower())
+            if m is not None:
+                effective_phase = m.group(1)
+        try:
+            verified = load_and_verify_milestone_authorization(
+                milestone_trust_context,
+                phase_id=effective_phase,
+                in_scope_paths=in_scope_paths or (),
+            )
+            if _normalize_milestone_id(verified.milestone_id) != "milestone-d":
+                raise ValueError(
+                    f"milestone_id mismatch: expected 'milestone-d', got {verified.milestone_id!r}"
+                )
+            if project_id is not None and verified.project_id != project_id:
+                raise ValueError(
+                    f"project_id mismatch: expected {project_id!r}, got {verified.project_id!r}"
+                )
+            if approval_id is not None and verified.approval_id != approval_id:
+                raise ValueError(
+                    f"approval_id mismatch: expected {approval_id!r}, got {verified.approval_id!r}"
+                )
+        except Exception as exc:
+            raise ValueError(
+                f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' "
+                f"authorization failed ({exc})"
+            ) from exc
+        return
+
     if _contains_unauthorized_prefix(norm_milestone):
         raise ValueError(
             f"{UNAUTHORIZED_MILESTONE_D_BLOCKED}: milestone '{milestone_id}' is not authorized"
@@ -370,6 +453,7 @@ class TrustedHarnessManifest(CanonicalRecord):
     trusted_manifest_path: str | None = None
     approval_id: str | None = None
     approval_evidence_path: str | None = None
+    milestone_trust_context: MilestoneAuthorizationTrustContext | None = None
     protected_harness_globs: tuple[NonBlank, ...] = _DEFAULT_PROTECTED_HARNESS_GLOBS
     pinned_file_sha256: dict[str, Digest] = Field(default_factory=dict)
     pre_workspace_snapshot: dict[str, Digest] = Field(default_factory=dict)
@@ -407,6 +491,7 @@ class TrustedHarnessManifest(CanonicalRecord):
             approval_id=self.approval_id,
             approval_evidence_path=self.approval_evidence_path,
             project_id=self.project_id,
+            milestone_trust_context=self.milestone_trust_context,
         )
         if not self.pinned_file_sha256:
             raise ValueError(
@@ -601,6 +686,7 @@ def build_trusted_harness_manifest(
     trusted_manifest_dir: Path | None = None,
     approval_id: str | None = None,
     approval_evidence_path: Path | str | None = None,
+    milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
 ) -> TrustedHarnessManifest:
     """Build a TrustedHarnessManifest with SHA-256 digests of protected files in workspace."""
     workspace_root = Path(workspace).resolve()
@@ -618,6 +704,7 @@ def build_trusted_harness_manifest(
         approval_id=approval_id,
         approval_evidence_path=approval_path_str,
         project_id=project_id,
+        milestone_trust_context=milestone_trust_context,
     )
     pinned: dict[str, str] = {}
     operator_tests: dict[str, bytes] = {}
@@ -685,6 +772,7 @@ def build_trusted_harness_manifest(
         trusted_manifest_path=trusted_path_str,
         approval_id=approval_id,
         approval_evidence_path=approval_path_str,
+        milestone_trust_context=milestone_trust_context,
         protected_harness_globs=protected_harness_globs,
         pinned_file_sha256=pinned,
         pre_workspace_snapshot=pre_snap,

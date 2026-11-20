@@ -35,6 +35,17 @@ _FORBIDDEN_D_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]d|workstream[-_]d|d0[1-9]|d[1-9]\d|"
     r"phase[-_]?25|aipc[-_.]?2\.?0[-_.]?d)(?![a-z0-9])"
 )
+_FORBIDDEN_E_PLUS_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_][e-z]|workstream[-_][e-z]|"
+    r"aipc[-_.]?2\.?0[-_.]?[e-z]|"
+    r"(?!p(?:0[0-9]|1\d|2[0-4])(?![a-z0-9])|r0[1-9](?![a-z0-9]))(?:[e-z]0[1-9]|[e-z][1-9]\d)|"
+    r"phase[-_]?(?:2[6-9]|[3-9]\d|[1-9]\d{2,}))(?![a-z0-9])"
+)
+_FORBIDDEN_D_EXTRA_RE = re.compile(r"(?<![a-z0-9])(?:d0[4-9]|d[1-9]\d|phase[-_]?25)(?![0-9])")
+_MILESTONE_D_WORKSTREAMS: frozenset[str] = frozenset({"d01", "d02", "d03"})
+_MILESTONE_D_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]?d|workstream[-_]?d|aipc[-_.]?2\.?0[-_.]?d|d0[1-3])(?![0-9])"
+)
 _MILESTONE_ALIASES: dict[str, str] = {
     "milestone-c5": "milestone-c5",
     "milestone_c5": "milestone-c5",
@@ -53,6 +64,11 @@ _MILESTONE_ALIASES: dict[str, str] = {
     "c.7": "milestone-c7",
     "milestone-c": "milestone-c",
     "aipc-2.0-milestone-c": "milestone-c",
+    "milestone-d": "milestone-d",
+    "milestone_d": "milestone-d",
+    "workstream-d": "milestone-d",
+    "workstream_d": "milestone-d",
+    "aipc-2.0-milestone-d": "milestone-d",
 }
 _COMPOSITE_C_PHASES: frozenset[str] = frozenset(
     {"milestone-c-repair", "milestone-c-docs", "milestone-c-hydrogen"}
@@ -130,6 +146,15 @@ def _contains_forbidden_milestone_d(value: str) -> bool:
     return bool(_FORBIDDEN_D_RE.search(value.strip().lower()))
 
 
+def _contains_forbidden_future_e_plus(value: str) -> bool:
+    low = value.strip().lower()
+    return bool(_FORBIDDEN_E_PLUS_RE.search(low) or _FORBIDDEN_D_EXTRA_RE.search(low))
+
+
+def _is_milestone_d_token(value: str) -> bool:
+    return bool(_MILESTONE_D_TOKEN_RE.search(value.strip().lower()))
+
+
 def _is_pre_c7_historical_milestone(value: str) -> bool:
     low = value.strip().lower()
     if _contains_forbidden_milestone_d(low) or _C7_TOKEN_RE.search(low):
@@ -161,7 +186,11 @@ def requires_external_milestone_trust(
     for raw in (milestone_id, phase_id, task_id, phase_name):
         if isinstance(raw, str) and raw.strip():
             low = raw.strip().lower()
-            if _contains_forbidden_milestone_d(low) or _C7_TOKEN_RE.search(low):
+            if (
+                _contains_forbidden_milestone_d(low)
+                or _contains_forbidden_future_e_plus(low)
+                or _C7_TOKEN_RE.search(low)
+            ):
                 return True
     if isinstance(milestone_id, str) and milestone_id.strip():
         if not _is_pre_c7_historical_milestone(milestone_id):
@@ -186,9 +215,9 @@ def _normalize_rel_path(raw_path: str, *, label: str) -> str:
         or ".." in norm.split("/")
     ):
         raise MilestoneAuthorizationError(f"Unsafe or non-relative path in {label}: {raw_path!r}")
-    if _contains_forbidden_milestone_d(norm):
+    if _contains_forbidden_future_e_plus(norm):
         raise MilestoneAuthorizationError(
-            f"Path {raw_path!r} references forbidden Milestone D scope"
+            f"Path {raw_path!r} references forbidden future milestone scope"
         )
     return norm
 
@@ -301,8 +330,8 @@ class ApprovedMilestoneScope(CanonicalRecord):
         norm_ws: list[str] = []
         for ws in self.workstreams:
             low = ws.strip().lower()
-            if _contains_forbidden_milestone_d(low):
-                raise ValueError(f"Workstream {ws!r} references forbidden Milestone D scope")
+            if _contains_forbidden_future_e_plus(low):
+                raise ValueError(f"Workstream {ws!r} references forbidden future milestone scope")
             if low not in norm_ws:
                 norm_ws.append(low)
         object.__setattr__(self, "workstreams", tuple(norm_ws))
@@ -362,8 +391,26 @@ class ControllerMilestoneAuthorizationRecord(CanonicalRecord):
             ("project_id", self.project_id),
             ("milestone_id", self.milestone_id),
         ):
-            if _contains_forbidden_milestone_d(val):
-                raise ValueError(f"{field_name} references forbidden Milestone D scope: {val!r}")
+            if _contains_forbidden_future_e_plus(val):
+                raise ValueError(
+                    f"{field_name} references forbidden future milestone scope: {val!r}"
+                )
+        norm_ms = _normalize_milestone_id(self.milestone_id)
+        if norm_ms == "milestone-d":
+            invalid_ws = [
+                ws for ws in self.approved_scope.workstreams if ws not in _MILESTONE_D_WORKSTREAMS
+            ]
+            if invalid_ws:
+                raise ValueError(
+                    f"milestone-d record workstreams must be within d01-d03, got {invalid_ws!r}"
+                )
+        else:
+            d_ws = [ws for ws in self.approved_scope.workstreams if _is_milestone_d_token(ws)]
+            if d_ws:
+                raise ValueError(
+                    f"Non-milestone-d record {self.milestone_id!r} cannot authorize "
+                    f"Milestone D workstreams {d_ws!r}"
+                )
         if self.expires_at is not None:
             issued = (
                 self.issued_at
@@ -415,16 +462,16 @@ class MilestoneAuthorizationTrustContext(CanonicalRecord):
 
     @model_validator(mode="after")
     def validate_context(self) -> Self:
-        if _contains_forbidden_milestone_d(self.expected_milestone_id):
+        if _contains_forbidden_future_e_plus(self.expected_milestone_id):
             raise ValueError(
-                f"expected_milestone_id references forbidden Milestone D scope: "
+                f"expected_milestone_id references forbidden future milestone scope: "
                 f"{self.expected_milestone_id!r}"
             )
-        if self.required_phase_id is not None and _contains_forbidden_milestone_d(
+        if self.required_phase_id is not None and _contains_forbidden_future_e_plus(
             self.required_phase_id
         ):
             raise ValueError(
-                f"required_phase_id references forbidden Milestone D scope: "
+                f"required_phase_id references forbidden future milestone scope: "
                 f"{self.required_phase_id!r}"
             )
         assert_no_secrets(self.model_dump(mode="json"))
@@ -568,12 +615,23 @@ def migrate_legacy_approval_evidence(
 
 def _is_phase_allowed(phase_id: str, record: ControllerMilestoneAuthorizationRecord) -> bool:
     p_low = phase_id.strip().lower()
-    if _contains_forbidden_milestone_d(p_low):
+    if _contains_forbidden_future_e_plus(p_low):
+        return False
+    norm_ms = _normalize_milestone_id(record.milestone_id)
+    if _is_milestone_d_token(p_low) and norm_ms != "milestone-d":
+        return False
+    if (
+        norm_ms == "milestone-d"
+        and p_low not in _MILESTONE_D_WORKSTREAMS
+        and not any(
+            p_low.startswith(f"{w}-") or p_low.endswith(f"-{w}") for w in _MILESTONE_D_WORKSTREAMS
+        )
+    ):
         return False
     ws_set = {w.strip().lower() for w in record.approved_scope.workstreams}
     if any(p_low == w or p_low.startswith(f"{w}-") or p_low.endswith(f"-{w}") for w in ws_set):
         return True
-    if _normalize_milestone_id(record.milestone_id) == "milestone-c":
+    if norm_ms == "milestone-c":
         mapped = _C_PHASE_ALIASES.get(p_low)
         if mapped is not None and mapped in ws_set:
             return True

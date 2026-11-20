@@ -26,7 +26,9 @@ from aipc.agents.role_registry import (
 from aipc.controller.errors import ControllerError
 from aipc.controller.milestone_authorization import (
     MilestoneAuthorizationTrustContext,
+    _contains_forbidden_future_e_plus,
     _contains_forbidden_milestone_d,
+    _is_milestone_d_token,
     _normalize_milestone_id,
     load_and_verify_milestone_authorization,
     requires_external_milestone_trust,
@@ -98,6 +100,15 @@ _MILESTONE_C7_IDS: frozenset[str] = frozenset(
 _MILESTONE_C7_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]c\.?7|workstream[-_]c\.?7|c\.7|rce0[1-3])(?![0-9])"
 )
+_MILESTONE_D_IDS: frozenset[str] = frozenset(
+    {
+        "milestone-d",
+        "milestone_d",
+        "workstream-d",
+        "workstream_d",
+        "aipc-2.0-milestone-d",
+    }
+)
 _AUTHORIZED_GOAL_MILESTONE_RE = re.compile(
     r"^(?:phase-(?:0[1-9]|1\d|2[0-4])|milestone[-_]a|workstream[-_]a|aipc-2\.0-milestone-a|"
     r"milestone[-_]c|aipc-2\.0-milestone-c|milestone[-_]c\.?5|c\.5|"
@@ -130,6 +141,15 @@ def _references_milestone_c7(text: str) -> bool:
     return bool(_MILESTONE_C7_TOKEN_RE.search(lowered))
 
 
+def _references_milestone_d(text: str) -> bool:
+    lowered = text.strip().lower()
+    if _contains_forbidden_future_e_plus(lowered):
+        return False
+    if lowered in _MILESTONE_D_IDS:
+        return True
+    return _is_milestone_d_token(lowered)
+
+
 def _references_milestone_c(text: str) -> bool:
     lowered = text.strip().lower()
     if (
@@ -153,23 +173,27 @@ def _references_unauthorized_milestone(
     allow_milestone_c5: bool = False,
     allow_milestone_c6: bool = False,
     allow_milestone_c7: bool = False,
+    allow_milestone_d: bool = False,
 ) -> bool:
     lowered = text.strip().lower()
+    if _contains_forbidden_future_e_plus(lowered):
+        return True
     if any(tok in lowered for tok in _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS):
-        return True
+        return not allow_milestone_d
     if _MILESTONE_D_TOKEN_RE.search(lowered):
-        return True
+        return not allow_milestone_d
     if _references_milestone_c5(lowered):
         return not allow_milestone_c5
     if _references_milestone_c6(lowered):
         return not allow_milestone_c6
     if _references_milestone_c7(lowered):
         return not allow_milestone_c7
-    tokens = (
-        tuple(t for t in _UNAUTHORIZED_MILESTONE_TOKENS if t not in _APPROVED_MILESTONE_C_TOKENS)
-        if allow_milestone_c
-        else _UNAUTHORIZED_MILESTONE_TOKENS
-    )
+    excluded_tokens: tuple[str, ...] = ()
+    if allow_milestone_c:
+        excluded_tokens += _APPROVED_MILESTONE_C_TOKENS
+    if allow_milestone_d:
+        excluded_tokens += _STRICTLY_UNAPPROVED_MILESTONE_D_TOKENS
+    tokens = tuple(t for t in _UNAUTHORIZED_MILESTONE_TOKENS if t not in excluded_tokens)
     return any(tok in lowered for tok in tokens)
 
 
@@ -201,7 +225,7 @@ class HumanGoalSpec(CanonicalRecord):
     @model_validator(mode="after")
     def validate_goal_spec(self) -> Self:
         for val in (self.milestone_id, self.phase_id, self.phase_name):
-            if _contains_forbidden_milestone_d(val):
+            if _contains_forbidden_future_e_plus(val):
                 raise ValueError(
                     "milestone_id references unauthorized future milestone scope: "
                     f"{self.milestone_id!r}"
@@ -217,6 +241,13 @@ class HumanGoalSpec(CanonicalRecord):
                 f"{self.milestone_id!r} (phase {self.phase_id!r}); requires "
                 "Controller-owned milestone_trust_context"
             )
+        if self.milestone_trust_context is None:
+            for val in (self.milestone_id, self.phase_id, self.phase_name):
+                if _contains_forbidden_milestone_d(val):
+                    raise ValueError(
+                        "milestone_id references unauthorized future milestone scope: "
+                        f"{self.milestone_id!r}"
+                    )
         if self.milestone_trust_context is None and not _AUTHORIZED_GOAL_MILESTONE_RE.match(
             self.milestone_id.strip().lower()
         ):
@@ -240,6 +271,11 @@ class HumanGoalSpec(CanonicalRecord):
             _references_milestone_c(val)
             for val in (self.milestone_id, self.phase_id, self.phase_name)
         )
+        refs_d = any(
+            _references_milestone_d(val)
+            for val in (self.milestone_id, self.phase_id, self.phase_name)
+        )
+        verified_auth = None
         if self.milestone_trust_context is not None:
             try:
                 verified_auth = load_and_verify_milestone_authorization(
@@ -259,6 +295,15 @@ class HumanGoalSpec(CanonicalRecord):
                         f"milestone_id mismatch: {verified_auth.milestone_id!r} != "
                         f"{self.milestone_id!r}"
                     )
+                if (
+                    self.approval_id is not None
+                    and self.approval_id.strip()
+                    and verified_auth.approval_id != self.approval_id.strip()
+                ):
+                    raise ValueError(
+                        f"approval_id mismatch: {verified_auth.approval_id!r} != "
+                        f"{self.approval_id!r}"
+                    )
             except Exception as exc:
                 raise ValueError(f"milestone_trust_context verification failed: {exc}") from exc
 
@@ -267,6 +312,16 @@ class HumanGoalSpec(CanonicalRecord):
                 "milestone_id references unauthorized future milestone scope: "
                 f"{self.milestone_id!r}"
             )
+        if refs_d:
+            if (
+                verified_auth is None
+                or _normalize_milestone_id(verified_auth.milestone_id) != "milestone-d"
+            ):
+                raise ValueError(
+                    "milestone_id references unauthorized future milestone scope: "
+                    f"{self.milestone_id!r}; requires Controller-owned milestone_trust_context "
+                    "for milestone-d"
+                )
         if refs_c7 or refs_c6 or refs_c5 or refs_c:
             has_legacy_evidence = bool(
                 self.approval_evidence_path and self.approval_evidence_path.strip()
@@ -343,11 +398,25 @@ class HumanGoalSpec(CanonicalRecord):
             if _references_unauthorized_milestone(
                 val,
                 allow_milestone_c=(
-                    self.approval_granted and refs_c and not refs_c5 and not refs_c6 and not refs_c7
+                    self.approval_granted
+                    and refs_c
+                    and not refs_c5
+                    and not refs_c6
+                    and not refs_c7
+                    and not refs_d
                 ),
-                allow_milestone_c5=self.approval_granted and refs_c5,
-                allow_milestone_c6=self.approval_granted and refs_c6,
-                allow_milestone_c7=self.approval_granted and refs_c7,
+                allow_milestone_c5=self.approval_granted and refs_c5 and not refs_d,
+                allow_milestone_c6=self.approval_granted and refs_c6 and not refs_d,
+                allow_milestone_c7=self.approval_granted and refs_c7 and not refs_d,
+                allow_milestone_d=(
+                    self.approval_granted
+                    and self.milestone_trust_context is not None
+                    and refs_d
+                    and not refs_c
+                    and not refs_c5
+                    and not refs_c6
+                    and not refs_c7
+                ),
             ):
                 raise ValueError(f"{label} references unauthorized future milestone scope: '{val}'")
         overlap = set(self.in_scope_paths) & set(self.out_of_scope_paths)

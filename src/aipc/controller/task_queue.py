@@ -47,6 +47,21 @@ _PROHIBITED_MILESTONE_PREFIXES: tuple[str, ...] = (
     "d02",
     "d03",
 )
+_STRICTLY_BLOCKED_FUTURE_PREFIXES: tuple[str, ...] = (
+    "phase-25",
+    "phase_25",
+    "phase25",
+    "aipc-2.0",
+    "aipc-2-",
+    "aipc_2_0",
+    "aipc2",
+)
+_STRICTLY_BLOCKED_FUTURE_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_][e-z]|workstream[-_][e-z]|"
+    r"aipc[-_.]?2\.?0[-_.]?[e-z]|"
+    r"(?!p(?:0[0-9]|1\d|2[0-4])(?![a-z0-9])|r0[1-9](?![a-z0-9]))(?:[e-z]0[1-9]|[e-z][1-9]\d)|"
+    r"d0[4-9]|d[1-9]\d|phase[-_]?(?:2[5-9]|[3-9]\d|[1-9]\d{2,}))(?![a-z0-9])"
+)
 
 
 _MILESTONE_C_BASELINE_SHA = "849c86684867487f6f0ad8eb54c603cba240dd34"
@@ -61,6 +76,7 @@ _AUTHORIZED_MILESTONE_C_WORKSTREAMS: frozenset[str] = frozenset({"c01", "c02", "
 _AUTHORIZED_MILESTONE_C5_WORKSTREAMS: frozenset[str] = frozenset({"rg01", "rg02", "rg03", "rg04"})
 _AUTHORIZED_MILESTONE_C6_WORKSTREAMS: frozenset[str] = frozenset({"cisl01", "cisl02", "cisl03"})
 _AUTHORIZED_MILESTONE_C7_WORKSTREAMS: frozenset[str] = frozenset({"rce01", "rce02", "rce03"})
+_AUTHORIZED_MILESTONE_D_WORKSTREAMS: frozenset[str] = frozenset({"d01", "d02", "d03"})
 _AUTHORIZED_MILESTONE_C_IDS: frozenset[str] = frozenset({"milestone-c", "aipc-2.0-milestone-c"})
 _AUTHORIZED_MILESTONE_C5_IDS: frozenset[str] = frozenset(
     {"milestone-c5", "milestone_c5", "milestone-c.5", "milestone_c.5", "c.5"}
@@ -70,6 +86,9 @@ _AUTHORIZED_MILESTONE_C6_IDS: frozenset[str] = frozenset(
 )
 _AUTHORIZED_MILESTONE_C7_IDS: frozenset[str] = frozenset(
     {"milestone-c7", "milestone_c7", "milestone-c.7", "milestone_c.7", "c.7"}
+)
+_AUTHORIZED_MILESTONE_D_IDS: frozenset[str] = frozenset(
+    {"milestone-d", "milestone_d", "workstream-d", "workstream_d"}
 )
 _AUTHORIZED_MILESTONE_C_COMPOSITE_PHASES: frozenset[str] = frozenset(
     {"milestone-c-repair", "milestone-c-docs", "milestone-c-hydrogen"}
@@ -106,6 +125,9 @@ _MILESTONE_C6_TOKEN_RE = re.compile(
 _MILESTONE_C7_TOKEN_RE = re.compile(
     r"(?<![a-z0-9])(?:milestone[-_]c\.?7|workstream[-_]c\.?7|c\.7|rce0[1-3])(?![0-9])"
 )
+_MILESTONE_D_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])(?:milestone[-_]?d|workstream[-_]?d|d0[1-3])(?![0-9])"
+)
 _FORBIDDEN_WORKSTREAM_RE = re.compile(
     r"(?<![a-z0-9])(?:c(?:0[4-9]|[1-9]\d)|d(?:0[1-9]|[1-9]\d)|rg(?:00|0[5-9]|[1-9]\d)|"
     r"cisl(?:00|0[4-9]|[1-9]\d)|rce(?:00|0[4-9]|[1-9]\d))(?![0-9])"
@@ -118,9 +140,30 @@ def _utc_now() -> datetime:
 
 def _is_unapproved_future_scope(text: str) -> bool:
     lowered = text.strip().lower()
+    if _STRICTLY_BLOCKED_FUTURE_RE.search(lowered):
+        return True
     return any(
         lowered.startswith(prefix) or prefix in lowered for prefix in _PROHIBITED_MILESTONE_PREFIXES
     )
+
+
+def _is_strictly_blocked_future_scope(text: str) -> bool:
+    lowered = text.strip().lower()
+    if _STRICTLY_BLOCKED_FUTURE_RE.search(lowered):
+        return True
+    return any(
+        lowered.startswith(prefix) or prefix in lowered
+        for prefix in _STRICTLY_BLOCKED_FUTURE_PREFIXES
+    )
+
+
+def _is_milestone_d_scope(text: str) -> bool:
+    lowered = text.strip().lower()
+    if _is_strictly_blocked_future_scope(lowered):
+        return False
+    if lowered in _AUTHORIZED_MILESTONE_D_IDS:
+        return True
+    return bool(_MILESTONE_D_TOKEN_RE.search(lowered))
 
 
 def _is_milestone_c5_scope(text: str) -> bool:
@@ -170,7 +213,7 @@ def _normalize_c5_milestone_id(milestone_id: str) -> str:
 
 def _is_authorized_milestone_identifier(milestone_id: str) -> bool:
     low = milestone_id.strip().lower()
-    if _is_unapproved_future_scope(low) and low not in _AUTHORIZED_MILESTONE_C_IDS:
+    if _is_strictly_blocked_future_scope(low) and low not in _AUTHORIZED_MILESTONE_C_IDS:
         return False
     return (
         low in _AUTHORIZED_LEGACY_MILESTONE_IDS
@@ -178,6 +221,7 @@ def _is_authorized_milestone_identifier(milestone_id: str) -> bool:
         or low in _AUTHORIZED_MILESTONE_C5_IDS
         or low in _AUTHORIZED_MILESTONE_C6_IDS
         or low in _AUTHORIZED_MILESTONE_C7_IDS
+        or low in _AUTHORIZED_MILESTONE_D_IDS
     )
 
 
@@ -335,13 +379,14 @@ def _is_phase_in_workstreams(
     is_c5: bool = False,
     is_c6: bool = False,
     is_c7: bool = False,
+    is_d: bool = False,
 ) -> bool:
     if any(
         phase_low == w or phase_low.startswith(f"{w}-") or phase_low.endswith(f"-{w}")
         for w in workstreams
     ):
         return True
-    if is_c5 or is_c6 or is_c7:
+    if is_c5 or is_c6 or is_c7 or is_d:
         return False
     mapped = _MILESTONE_C_PHASE_ALIASES.get(phase_low)
     if mapped is not None:
@@ -525,7 +570,7 @@ class ApprovedTaskContract(CanonicalRecord):
             ("milestone_id", self.milestone_id),
             ("title", self.title),
         ):
-            if _is_unapproved_future_scope(val):
+            if _is_strictly_blocked_future_scope(val):
                 raise ValueError(
                     f"{field_name} references unapproved future roadmap scope: '{val}'"
                 )
@@ -545,7 +590,32 @@ class ApprovedTaskContract(CanonicalRecord):
         is_c = any(
             _is_milestone_c_scope(val) for val in (self.milestone_id, self.phase_id, self.task_id)
         )
-        if is_c5:
+        is_d = any(
+            _is_milestone_d_scope(val) for val in (self.milestone_id, self.phase_id, self.task_id)
+        )
+        if is_d:
+            if self.milestone_id.strip().lower() not in _AUTHORIZED_MILESTONE_D_IDS:
+                raise ValueError(
+                    f"milestone_id {self.milestone_id!r} cannot host Milestone D task/phase scope"
+                )
+            if self.approval_id is None:
+                raise ValueError(
+                    "Milestone D task contract requires an explicit approval_id "
+                    "reference to an external Controller-owned authorization record"
+                )
+            p_low = self.phase_id.strip().lower()
+            if _is_strictly_blocked_future_scope(p_low) or not _is_phase_in_workstreams(
+                p_low, set(_AUTHORIZED_MILESTONE_D_WORKSTREAMS), is_d=True
+            ):
+                raise ValueError(
+                    f"phase_id {self.phase_id!r} is outside authorized Milestone D D01-D03 scope"
+                )
+            if self.approval_evidence_path is not None:
+                raise ValueError(
+                    "Milestone D task contract must be authorized via Controller-owned "
+                    "milestone_trust_context, not legacy approval_evidence_path"
+                )
+        elif is_c5:
             if self.milestone_id.strip().lower() not in _AUTHORIZED_MILESTONE_C5_IDS:
                 raise ValueError(
                     f"milestone_id {self.milestone_id!r} cannot host Milestone C.5 task/phase scope"
@@ -752,7 +822,7 @@ class TaskQueueSnapshot(CanonicalRecord):
 
     @model_validator(mode="after")
     def validate_queue_graph(self) -> Self:
-        if _is_unapproved_future_scope(
+        if _is_strictly_blocked_future_scope(
             self.milestone_id
         ) or not _is_authorized_milestone_identifier(self.milestone_id):
             raise ValueError(
@@ -855,7 +925,7 @@ class PersistentTaskQueue:
         override_trust_ctx: MilestoneAuthorizationTrustContext | None = None,
     ) -> None:
         from aipc.controller.milestone_authorization import (
-            _contains_forbidden_milestone_d,
+            _contains_forbidden_future_e_plus,
             _normalize_milestone_id,
             load_and_verify_milestone_authorization,
             requires_external_milestone_trust,
@@ -863,11 +933,10 @@ class PersistentTaskQueue:
 
         for val in (milestone_id, phase_id, task_id):
             if val is not None and (
-                _contains_forbidden_milestone_d(val) or _is_unapproved_future_scope(val)
+                _contains_forbidden_future_e_plus(val) or _is_strictly_blocked_future_scope(val)
             ):
                 raise ControllerError(
-                    f"Milestone/phase {val!r} references strictly blocked "
-                    "Milestone D / future scope"
+                    f"Milestone/phase {val!r} references strictly blocked future scope"
                 )
         if (
             self._milestone_trust_context is not None
@@ -1001,7 +1070,7 @@ class PersistentTaskQueue:
         milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
     ) -> TaskQueueSnapshot:
         """Create and persist a validated milestone task queue from approved contracts."""
-        if _is_unapproved_future_scope(milestone_id):
+        if _is_strictly_blocked_future_scope(milestone_id):
             raise ControllerError(
                 f"unapproved milestone '{milestone_id}': Phase 25 / AIPC 2.0 is forbidden"
             )
