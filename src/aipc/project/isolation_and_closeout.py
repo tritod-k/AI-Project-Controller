@@ -672,6 +672,7 @@ def verify_sealed_archive_untouched(
 
     expected_digest_raw = (
         raw_manifest.get("expected_digest")
+        or raw_manifest.get("aggregate_manifest_sha256")
         or raw_manifest.get("digest")
         or raw_manifest.get("manifest_sha256")
         or raw_manifest.get("sha256")
