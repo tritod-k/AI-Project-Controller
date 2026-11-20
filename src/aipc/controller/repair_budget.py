@@ -241,7 +241,9 @@ class BudgetReservationRecord(CanonicalRecord):
     bucket: Literal["OUTER_REPAIR", "INNER_CORRECTION", "INITIAL_INVOCATION"] = "OUTER_REPAIR"
     inner_pass_index: NonNegativeInt = 0
     dispatch_claim_id: str | None = None
-    status: Literal["RESERVED", "CONSUMED", "INTERRUPTED"] = "RESERVED"
+    status: Literal["RESERVED", "CONSUMED", "RELEASED", "INTERRUPTED"] = "RESERVED"
+    operation_id: NonBlank | None = None
+    attempt_id: Identifier | None = None
     funding_source: Literal["BASE", "GRANT"] | None = None
     grant_approval_id: NonBlank | None = None
     grant_sha256: Sha256Hex | None = None
@@ -253,11 +255,15 @@ class BudgetReservationRecord(CanonicalRecord):
     policy_sha256: Sha256Hex
     created_at: datetime
     consumed_at: datetime | None = None
+    released_at: datetime | None = None
+    release_reason: NonBlank | None = None
 
     @model_validator(mode="after")
     def validate_reservation(self) -> Self:
         if self.status == "CONSUMED" and self.consumed_attempt_id is None:
             raise ValueError("CONSUMED reservation requires consumed_attempt_id")
+        if self.status == "RELEASED" and self.released_at is None:
+            raise ValueError("RELEASED reservation requires released_at")
         if self.funding_source == "GRANT" and self.grant_approval_id is None:
             raise ValueError("GRANT-funded reservation requires grant_approval_id")
         if self.funding_source == "BASE" and self.grant_approval_id is not None:
@@ -1903,6 +1909,312 @@ class DurableRepairBudgetLedger:
             write_json_atomic(self._path, updated.model_dump(mode="json"))
             return consumed
 
+    def reserve_attempt_budget(
+        self,
+        *,
+        task_id: str,
+        operation_id: str,
+        attempt_id: str,
+        attempt: int = 1,
+        candidate_sha: str = "0" * 40,
+        review_id: str | None = None,
+        route: Literal[
+            "REVIEW_COORDINATOR",
+            "VERIFICATION_FAILURE",
+            "INNER_SELF_CORRECTION",
+            "INITIAL_WORKER_DISPATCH",
+        ] = "REVIEW_COORDINATOR",
+        explicit_root_task: str | None = None,
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
+        trust_context: PolicyTrustContext | None = None,
+        target_paths: Sequence[str] | None = None,
+    ) -> BudgetReservationRecord:
+        """Reserve an operation-correlated attempt budget slot (RESERVED)."""
+        clean_op = operation_id.strip() if isinstance(operation_id, str) else ""
+        clean_att = attempt_id.strip() if isinstance(attempt_id, str) else ""
+        if not clean_op:
+            raise RepairBudgetError("reserve_attempt_budget requires a non-blank operation_id")
+        if not clean_att:
+            raise RepairBudgetError("reserve_attempt_budget requires a non-blank attempt_id")
+        if attempt < 1:
+            raise RepairBudgetError("attempt must be >= 1")
+        norm_paths = _normalize_target_paths(target_paths)
+        event_id = f"op-{clean_op}"
+
+        with _acquire_ledger_lock(self._path):
+            state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
+            root_task = self.resolve_root_task(
+                state,
+                task_id=task_id,
+                explicit_root_task=explicit_root_task,
+            )
+            counter = state.registered_roots[root_task]
+
+            existing_res_id = state.event_to_reservation.get(event_id)
+            if existing_res_id is not None:
+                existing = state.reservations[existing_res_id]
+                if (
+                    existing.task_id != task_id
+                    or existing.operation_id != clean_op
+                    or existing.attempt_id != clean_att
+                ):
+                    raise RepairBudgetError(
+                        f"Conflicting replay for operation_id '{clean_op}' rejected"
+                    )
+                if existing.status == "RESERVED":
+                    return existing
+                raise RepairBudgetError(
+                    f"Operation '{clean_op}' already transitioned to '{existing.status}'"
+                )
+
+            if state.milestone_consumed >= state.milestone_limit:
+                raise RepairBudgetError(
+                    f"Milestone '{state.milestone_id}' aggregate repair budget exhausted "
+                    f"({state.milestone_consumed}/{state.milestone_limit})"
+                )
+            if counter.consumed >= counter.effective_limit:
+                raise RepairBudgetError(
+                    f"Root lineage '{root_task}' repair budget exhausted "
+                    f"({counter.consumed}/{counter.effective_limit})"
+                )
+
+            now = self._clock()
+            op_digest = hashlib.sha256(clean_op.encode("utf-8")).hexdigest()[:12]
+            res_id = f"res-op-{root_task}-att-{attempt:02d}-{op_digest}"
+            record = BudgetReservationRecord(
+                reservation_id=res_id,
+                event_id=event_id,
+                task_id=task_id,
+                root_task=root_task,
+                milestone_id=state.milestone_id,
+                attempt=attempt,
+                candidate_sha=candidate_sha,
+                review_id=review_id or event_id,
+                route=route,
+                status="RESERVED",
+                operation_id=clean_op,
+                attempt_id=clean_att,
+                funding_source="BASE",
+                target_paths=norm_paths,
+                approval_id=(
+                    loaded_policy.approval_id if loaded_policy is not None else state.approval_id
+                ),
+                policy_sha256=(
+                    loaded_policy.policy_sha256
+                    if loaded_policy is not None
+                    else state.policy_sha256
+                ),
+                created_at=now,
+            )
+            base_used = (
+                counter.base_consumed if counter.base_consumed is not None else counter.consumed
+            )
+            new_base = base_used + 1 if base_used < counter.base_limit else base_used
+            new_counter = counter.model_copy(
+                update={
+                    "consumed": counter.consumed + 1,
+                    "base_consumed": new_base,
+                }
+            )
+            new_roots = dict(state.registered_roots)
+            new_roots[root_task] = new_counter
+            new_reservations = dict(state.reservations)
+            new_reservations[res_id] = record
+            new_events = dict(state.event_to_reservation)
+            new_events[event_id] = res_id
+
+            updated = _with_digest(
+                state.model_copy(
+                    update={
+                        "milestone_consumed": state.milestone_consumed + 1,
+                        "registered_roots": new_roots,
+                        "reservations": new_reservations,
+                        "event_to_reservation": new_events,
+                        "updated_at": now,
+                    }
+                )
+            )
+            write_json_atomic(self._path, updated.model_dump(mode="json"))
+            return record
+
+    def finalize_attempt_budget(
+        self,
+        *,
+        operation_id: str | None = None,
+        reservation_id: str | None = None,
+        attempt_id: str | None = None,
+        worker_id: str = "controller",
+        provider: str = "controller",
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
+        trust_context: PolicyTrustContext | None = None,
+    ) -> BudgetReservationRecord:
+        """Transition a RESERVED attempt budget entry to CONSUMED."""
+        if operation_id is None and reservation_id is None:
+            raise RepairBudgetError(
+                "finalize_attempt_budget requires operation_id or reservation_id"
+            )
+        with _acquire_ledger_lock(self._path):
+            state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
+            res: BudgetReservationRecord | None = None
+            if reservation_id is not None:
+                res = state.reservations.get(reservation_id)
+            elif operation_id is not None:
+                clean_op = operation_id.strip()
+                res = next(
+                    (r for r in state.reservations.values() if r.operation_id == clean_op),
+                    None,
+                )
+            if res is None:
+                raise RepairBudgetError(
+                    "Unknown or missing budget reservation for finalize_attempt_budget"
+                )
+            if (
+                operation_id is not None
+                and res.operation_id is not None
+                and res.operation_id != operation_id.strip()
+            ):
+                raise RepairBudgetError("operation_id mismatch finalizing budget reservation")
+            if (
+                attempt_id is not None
+                and res.attempt_id is not None
+                and res.attempt_id != attempt_id
+            ):
+                raise RepairBudgetError("attempt_id mismatch finalizing budget reservation")
+            if res.status == "CONSUMED":
+                if (
+                    attempt_id is None
+                    or res.consumed_attempt_id == attempt_id
+                    or res.attempt_id == attempt_id
+                ):
+                    return res
+                raise RepairBudgetError(
+                    f"Reservation '{res.reservation_id}' already CONSUMED by different attempt"
+                )
+            if res.status != "RESERVED":
+                raise RepairBudgetError(
+                    f"Cannot finalize reservation '{res.reservation_id}' from status '{res.status}'"
+                )
+
+            now = self._clock()
+            eff_attempt_id = attempt_id or res.attempt_id or f"att-{res.attempt:02d}-{res.task_id}"
+            consumed = res.model_copy(
+                update={
+                    "status": "CONSUMED",
+                    "attempt_id": eff_attempt_id,
+                    "consumed_attempt_id": eff_attempt_id,
+                    "consumed_worker_id": worker_id,
+                    "consumed_provider": provider,
+                    "consumed_at": now,
+                }
+            )
+            new_reservations = dict(state.reservations)
+            new_reservations[res.reservation_id] = consumed
+            updated = _with_digest(
+                state.model_copy(update={"reservations": new_reservations, "updated_at": now})
+            )
+            write_json_atomic(self._path, updated.model_dump(mode="json"))
+            return consumed
+
+    def release_attempt_budget(
+        self,
+        *,
+        operation_id: str | None = None,
+        reservation_id: str | None = None,
+        reason: str = "orphan_reservation_released",
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
+        trust_context: PolicyTrustContext | None = None,
+    ) -> BudgetReservationRecord:
+        """Transition a RESERVED entry to RELEASED and restore reserved budget counters."""
+        if operation_id is None and reservation_id is None:
+            raise RepairBudgetError(
+                "release_attempt_budget requires operation_id or reservation_id"
+            )
+        clean_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+        if clean_reason is None:
+            raise RepairBudgetError("release_attempt_budget requires a non-blank reason")
+
+        with _acquire_ledger_lock(self._path):
+            state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
+            res: BudgetReservationRecord | None = None
+            if reservation_id is not None:
+                res = state.reservations.get(reservation_id)
+            elif operation_id is not None:
+                clean_op = operation_id.strip()
+                res = next(
+                    (r for r in state.reservations.values() if r.operation_id == clean_op),
+                    None,
+                )
+            if res is None:
+                raise RepairBudgetError(
+                    "Unknown or missing budget reservation for release_attempt_budget"
+                )
+            if res.status == "RELEASED":
+                return res
+            if res.status != "RESERVED":
+                raise RepairBudgetError(
+                    f"Cannot release reservation '{res.reservation_id}' from status '{res.status}'"
+                )
+
+            now = self._clock()
+            counter = state.registered_roots[res.root_task]
+            new_consumed = max(counter.imported_consumed, counter.consumed - 1)
+            new_base = counter.base_consumed
+            if res.funding_source != "GRANT" and new_base is not None and new_base > 0:
+                new_base = min(new_consumed, new_base - 1)
+            elif new_base is not None and new_base > new_consumed:
+                new_base = new_consumed
+
+            new_counter = counter.model_copy(
+                update={
+                    "consumed": new_consumed,
+                    "base_consumed": new_base,
+                }
+            )
+            new_roots = dict(state.registered_roots)
+            new_roots[res.root_task] = new_counter
+
+            new_grants = list(state.applied_grants)
+            if res.funding_source == "GRANT" and res.grant_approval_id is not None:
+                for idx, grant_rec in enumerate(new_grants):
+                    if (
+                        grant_rec.approval_id == res.grant_approval_id
+                        and grant_rec.consumed_repairs is not None
+                        and grant_rec.remaining_repairs is not None
+                        and grant_rec.consumed_repairs > 0
+                    ):
+                        new_grants[idx] = grant_rec.model_copy(
+                            update={
+                                "consumed_repairs": grant_rec.consumed_repairs - 1,
+                                "remaining_repairs": grant_rec.remaining_repairs + 1,
+                            }
+                        )
+                        break
+
+            released = res.model_copy(
+                update={
+                    "status": "RELEASED",
+                    "released_at": now,
+                    "release_reason": clean_reason,
+                }
+            )
+            new_reservations = dict(state.reservations)
+            new_reservations[res.reservation_id] = released
+            new_ms_consumed = max(state.imported_milestone_consumed, state.milestone_consumed - 1)
+
+            updated = _with_digest(
+                state.model_copy(
+                    update={
+                        "milestone_consumed": new_ms_consumed,
+                        "registered_roots": new_roots,
+                        "reservations": new_reservations,
+                        "applied_grants": tuple(new_grants),
+                        "updated_at": now,
+                    }
+                )
+            )
+            write_json_atomic(self._path, updated.model_dump(mode="json"))
+            return released
+
     def apply_extension_grant(
         self,
         *,
@@ -2143,6 +2455,15 @@ def load_policy_trust_context(trust_context: PolicyTrustContext) -> LoadedReview
         raise RepairBudgetError(f"Governance policy check failed: {exc}") from exc
 
 
+def reconcile_queue_and_budget_consistency(queue: Any, ledger: DurableRepairBudgetLedger) -> Any:
+    """Reconcile task queue and repair budget ledger consistency."""
+    from aipc.controller.task_queue import (
+        reconcile_queue_and_budget_consistency as _reconcile,
+    )
+
+    return _reconcile(queue, ledger)
+
+
 __all__ = [
     "AppliedExtensionRecord",
     "BudgetExtensionGrant",
@@ -2154,4 +2475,5 @@ __all__ = [
     "RootBudgetCounter",
     "load_budget_extension_grant",
     "load_policy_trust_context",
+    "reconcile_queue_and_budget_consistency",
 ]

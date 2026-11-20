@@ -37,11 +37,16 @@ PROHIBITED_CHILD_ENV_VARS: frozenset[str] = frozenset(
         "GEMINI_CLI_NO_RELAUNCH",
         "AIPC_LLM_REVIEWER_LIVE",
         "AIPC_LLM_REVIEWER_MODEL",
+        "AIPC_OPERATOR_HMAC_KEY",
+        "AIPC_OPERATOR_HMAC_KEY_PATH",
+        "AIPC_HMAC_KEY",
+        "AIPC_HMAC_SECRET",
     }
 )
 
 PROHIBITED_CHILD_ENV_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^AIPC_.*_API_KEY$", re.IGNORECASE),
+    re.compile(r"^AIPC_OPERATOR_HMAC_.*$", re.IGNORECASE),
     re.compile(r"^GEMINI_.*_KEY$", re.IGNORECASE),
     re.compile(r"^GOOGLE_.*_API_KEY$", re.IGNORECASE),
     re.compile(r"^OPENAI_.*_KEY$", re.IGNORECASE),

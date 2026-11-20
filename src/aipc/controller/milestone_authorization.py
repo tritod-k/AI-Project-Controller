@@ -17,13 +17,13 @@ import json
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from aipc.controller.errors import ControllerError
 from aipc.domain.models import CanonicalRecord, NonBlank
@@ -442,12 +442,20 @@ class MilestoneAuthorizationTrustContext(CanonicalRecord):
     expected_approval_id: NonBlank | None = None
     required_phase_id: NonBlank | None = None
     required_in_scope_paths: tuple[NonBlank, ...] = ()
+    hmac_key_path: Path | None = None
 
     @field_validator("record_path", "trusted_external_root")
     @classmethod
     def _require_abs_path(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("Trust context paths must be absolute")
+        return value
+
+    @field_validator("hmac_key_path")
+    @classmethod
+    def _require_abs_hmac_key_path(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("Trust context hmac_key_path must be absolute")
         return value
 
     @field_validator("excluded_roots")
@@ -495,6 +503,165 @@ class VerifiedMilestoneGrant(CanonicalRecord):
 def get_milestone_authorization_record_json_schema() -> dict[str, Any]:
     """Generate JSON Schema dynamically from ControllerMilestoneAuthorizationRecord."""
     return ControllerMilestoneAuthorizationRecord.model_json_schema()
+
+
+_HMAC_CANONICAL_FIELDS: tuple[str, ...] = (
+    "approval_id",
+    "commander_id",
+    "project_id",
+    "milestone_id",
+    "approved_scope",
+    "budget_limits",
+    "expires_at",
+    "revision",
+)
+
+
+def _canonicalize_hmac_value(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, datetime):
+        dt = value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return dt.isoformat().replace("+00:00", "Z")
+    if isinstance(value, Mapping):
+        return {str(k): _canonicalize_hmac_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_hmac_value(item) for item in value]
+    return value
+
+
+def _coerce_payload_mapping(payload: Mapping[str, Any] | BaseModel) -> dict[str, Any]:
+    if isinstance(payload, BaseModel):
+        return dict(payload.model_dump(mode="json"))
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    raise MilestoneAuthorizationError("Approval HMAC payload must be a mapping or record model")
+
+
+def load_operator_hmac_key(
+    key_path: Path | str,
+    *,
+    forbidden_roots: Sequence[Path | str] = (),
+) -> bytes:
+    """Load operator HMAC key bytes, failing closed on forbidden roots, symlinks, or empty."""
+    path = Path(key_path)
+    if path.is_symlink():
+        raise MilestoneAuthorizationError(f"Operator HMAC key path must not be a symlink: {path}")
+    for raw_root in forbidden_roots:
+        root_path = Path(raw_root)
+        res_root = root_path.resolve()
+        if path.is_absolute() and root_path.is_absolute() and path.is_relative_to(root_path):
+            raise MilestoneAuthorizationError(
+                "Operator HMAC key path cannot reside inside a forbidden root"
+            )
+        if path.resolve(strict=False).is_relative_to(res_root):
+            raise MilestoneAuthorizationError(
+                "Operator HMAC key path cannot reside inside a forbidden root"
+            )
+    if not path.exists():
+        raise MilestoneAuthorizationError(f"Operator HMAC key file not found: {path}")
+    if path.is_symlink():
+        raise MilestoneAuthorizationError(f"Operator HMAC key path must not be a symlink: {path}")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise MilestoneAuthorizationError(f"Cannot resolve operator HMAC key path: {exc}") from exc
+    for raw_root in forbidden_roots:
+        res_root = Path(raw_root).resolve()
+        if resolved.is_relative_to(res_root):
+            raise MilestoneAuthorizationError(
+                "Resolved operator HMAC key path points into a forbidden root"
+            )
+    if not resolved.is_file():
+        raise MilestoneAuthorizationError("Operator HMAC key path must be a regular file")
+    try:
+        raw_bytes = resolved.read_bytes()
+    except OSError as exc:
+        raise MilestoneAuthorizationError(f"Failed reading operator HMAC key: {exc}") from exc
+    if not raw_bytes or not raw_bytes.strip():
+        raise MilestoneAuthorizationError("Operator HMAC key file is empty")
+    return raw_bytes
+
+
+def compute_approval_hmac_sha256(
+    payload: Mapping[str, Any] | BaseModel,
+    secret_bytes: bytes,
+) -> str:
+    """Compute canonical HMAC-SHA256 over the approval record's canonical fields."""
+    if not isinstance(secret_bytes, (bytes, bytearray)) or not secret_bytes:
+        raise MilestoneAuthorizationError("HMAC secret_bytes must be non-empty bytes")
+    payload_dict = _coerce_payload_mapping(payload)
+    canonical = {
+        field: _canonicalize_hmac_value(payload_dict.get(field)) for field in _HMAC_CANONICAL_FIELDS
+    }
+    canonical_bytes = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hmac.new(bytes(secret_bytes), canonical_bytes, hashlib.sha256).hexdigest()
+
+
+def sign_approval_record_hmac(
+    payload: Mapping[str, Any] | BaseModel,
+    key_path: Path | str,
+    *,
+    forbidden_roots: Sequence[Path | str] = (),
+) -> dict[str, Any]:
+    """Sign an approval payload with the operator HMAC key and attach `hmac_sha256`."""
+    secret_bytes = load_operator_hmac_key(key_path, forbidden_roots=forbidden_roots)
+    signed = _coerce_payload_mapping(payload)
+    signed["hmac_sha256"] = compute_approval_hmac_sha256(signed, secret_bytes)
+    return signed
+
+
+def verify_approval_record_hmac(
+    payload: Mapping[str, Any] | BaseModel,
+    key_path: Path | str,
+    *,
+    forbidden_roots: Sequence[Path | str] = (),
+    now: datetime | None = None,
+) -> bool:
+    """Verify approval record HMAC signature and expiration, failing closed on any mismatch."""
+    secret_bytes = load_operator_hmac_key(key_path, forbidden_roots=forbidden_roots)
+    payload_dict = _coerce_payload_mapping(payload)
+    raw_sig = (
+        payload_dict.get("hmac_sha256")
+        or payload_dict.get("hmac_signature")
+        or payload_dict.get("signature")
+    )
+    if not isinstance(raw_sig, str) or not raw_sig.strip():
+        raise MilestoneAuthorizationError("Missing approval HMAC signature")
+    sig_clean = raw_sig.strip().lower()
+
+    raw_exp = payload_dict.get("expires_at")
+    if raw_exp is not None:
+        if isinstance(raw_exp, datetime):
+            exp_dt = raw_exp
+        elif isinstance(raw_exp, str) and raw_exp.strip():
+            try:
+                exp_dt = datetime.fromisoformat(raw_exp.strip().replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise MilestoneAuthorizationError(
+                    f"Malformed expires_at in approval record: {exc}"
+                ) from exc
+        else:
+            raise MilestoneAuthorizationError("Malformed expires_at in approval record")
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=UTC)
+        current_time = now or _utc_now()
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=UTC)
+        if current_time >= exp_dt:
+            raise MilestoneAuthorizationError("External milestone authorization record is expired")
+
+    expected = compute_approval_hmac_sha256(payload_dict, secret_bytes)
+    if not hmac.compare_digest(sig_clean, expected):
+        raise MilestoneAuthorizationError(
+            "Approval record HMAC signature mismatch (tampered or invalid key)"
+        )
+    return True
 
 
 def compute_approval_digest(raw_grant_bytes: bytes) -> str:
@@ -685,8 +852,33 @@ def load_and_verify_milestone_authorization(
         )
 
     assert_no_secrets(raw_obj)
+    current_time = now or _utc_now()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=UTC)
+
+    record_obj: dict[str, Any] = raw_obj
+    if ctx.hmac_key_path is not None:
+        verify_approval_record_hmac(
+            raw_obj,
+            ctx.hmac_key_path,
+            forbidden_roots=ctx.excluded_roots,
+            now=current_time,
+        )
+        record_obj = {
+            k: v
+            for k, v in raw_obj.items()
+            if k
+            not in (
+                "hmac_sha256",
+                "hmac_signature",
+                "signature",
+                "budget_limits",
+                "revision",
+            )
+        }
+
     try:
-        record = ControllerMilestoneAuthorizationRecord.model_validate(raw_obj)
+        record = ControllerMilestoneAuthorizationRecord.model_validate(record_obj)
     except Exception as exc:
         raise MilestoneAuthorizationError(
             f"Malformed ControllerMilestoneAuthorizationRecord: {exc}"
@@ -697,9 +889,6 @@ def load_and_verify_milestone_authorization(
             f"Milestone authorization record is not APPROVED (decision={record.decision})"
         )
 
-    current_time = now or _utc_now()
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=UTC)
     if record.expires_at is not None:
         exp_time = (
             record.expires_at
@@ -773,6 +962,22 @@ def load_and_verify_milestone_authorization(
         commander_id=record.commander_id,
         approval_id=record.approval_id,
         approval_digest=record.approval_digest,
+    )
+
+
+def verify_milestone_authorization_record(
+    trust_ctx: MilestoneAuthorizationTrustContext,
+    *,
+    phase_id: str | None = None,
+    in_scope_paths: Sequence[str] = (),
+    now: datetime | None = None,
+) -> VerifiedMilestoneGrant:
+    """Verify a milestone authorization record using the supplied trust context."""
+    return load_and_verify_milestone_authorization(
+        trust_ctx,
+        phase_id=phase_id,
+        in_scope_paths=in_scope_paths,
+        now=now,
     )
 
 
@@ -874,10 +1079,15 @@ __all__ = [
     "MilestoneAuthorizationTrustContext",
     "VerifiedMilestoneGrant",
     "compute_approval_digest",
+    "compute_approval_hmac_sha256",
     "get_milestone_authorization_record_json_schema",
     "issue_milestone_authorization_record",
     "load_and_verify_milestone_authorization",
+    "load_operator_hmac_key",
     "main",
     "migrate_legacy_approval_evidence",
     "requires_external_milestone_trust",
+    "sign_approval_record_hmac",
+    "verify_approval_record_hmac",
+    "verify_milestone_authorization_record",
 ]
