@@ -309,3 +309,36 @@ unchanged:
   `projects/<project_id>/runtime/{state,audit,worktrees}`, enforcing disjointness against
   Candidate, Stable, candidate workspaces, and sibling project roots (rejecting traversal and
   symlinks) and preserving all existing state, queue, ledger, receipt, lock, and unknown files.
+
+## Milestone D — Production Readiness & Multi-Project Workspace (`D01`–`D03`)
+
+Milestone D extends the C.5–C.7 core under Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`
+with zero competing subsystems, zero external databases, and zero `checkpoint_manifest.json` files:
+
+- **External HMAC Authorization & Queue/Ledger Consistency (`D01-A`, `FINAL-01`–`FINAL-02`):**
+  `aipc.controller.milestone_authorization` supports external-key HMAC-SHA256 signing and
+  constant-time verification (`hmac.compare_digest`) rejecting keys inside Workspace/Candidate
+  roots; `aipc.hardening.env_isolation` strips `AIPC_OPERATOR_HMAC_*` / `AIPC_HMAC_*` from child
+  environments. `aipc.controller.repair_budget` and `aipc.controller.task_queue` correlate
+  `(operation_id, attempt_id)` (`RESERVED` -> `CONSUMED | RELEASED`) with fail-closed
+  `reconcile_queue_and_budget_consistency()` escalating ambiguous mid-spawn crashes to
+  `RECONCILIATION_REQUIRED`.
+- **v1.2 Onboarding, Status Rendering & Private Git Quiescence (`D01-B`, `FINAL-04`):**
+  `aipc.project.scaffolding` initializes v1.2 runtime trees (`plans/{proposals,approved}`,
+  `trusted`, `audit/approvals`, `logs`), snapshots immutable `plan-vXXXX` manifests, enforces
+  short `wt-<hash>` (`<= 12` chars) worktree names, and renders derived non-authoritative
+  `CURRENT_STATUS.md`. `aipc.project.workspace_git_checkpoint` holds exclusive `controller.lock`
+  to verify LF `.gitattributes`, `.gitignore`, zero secrets, valid LF `.sha256` sidecars, and
+  quiescent queues prior to Private Control-Plane Git checkpoints.
+- **Strictly Read-Only Multi-Project Dashboard (`D02`, `FINAL-03`):**
+  `aipc.dashboard.multi_project` and read-only `server.py` endpoints (`GET /multi-project`,
+  `GET /api/multi-project`, HTTP `405` on mutations) aggregate multi-project phase, queue,
+  verdict, C.5/C.6 budgets, genuinely observed model eligibility, and 5-state raw evidence
+  indicators (`NOT_CHECKED` default, `PRESENT_VERIFIED`, `PRUNED`, `MISSING`, `HASH_MISMATCH`)
+  with proven zero mutation of canonical JSON stores.
+- **Minimal Docker Isolation, Closeout Export & 2-Project E2E (`D03`, `FINAL-05`):**
+  `aipc.project.isolation_and_closeout` builds minimal-mount `--network none --read-only` Docker
+  verification commands (rejecting `state/`, `approvals/`, ledgers, keys, and sibling mounts) with
+  explicit Level C Windows host OS disclosure, exports/restores deterministic release-closeout
+  `.zip` + `.sha256` bundles, and verifies sealed historical archives (`runtime_c/`) remain
+  untouched.

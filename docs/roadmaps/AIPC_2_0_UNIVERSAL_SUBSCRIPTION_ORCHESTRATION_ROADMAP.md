@@ -1,5 +1,11 @@
 ## C.7 final local verification checkpoint (authoritative; supersedes older pending items below)
 
+# AIPC 2.0 Universal Subscription Orchestration Roadmap
+
+**Milestone D (`D01`–`D03`) Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING`). Candidate branch `gemini/aipc-2.0-milestone-d` (`tested_source_sha_d`: `b141bac948c095c96168c025b939f523816da0f1`, base `master` post-PR-#10 `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`). All `D01`–`D03` and `FINAL-01`–`FINAL-05` safeguards are implemented by promoted `stable_c` Hydrogen Workers and locally verified (`1,596 passed, 0 failed` Windows; `177 passed, 0 failed` `--network none --read-only` Linux Docker; `runtime_c/` untouched `107,441` files). Exact-SHA CI, 4-job split OpenAI Codex review, Milestone D PR, and Private Control-Plane Git checkpoint execute post-freeze. Unattended production remains **NO-GO**; no auto-merge.
+
+---
+
 Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: Milestone C.7 RCE01-RCE03; attempt history and counters remain in the canonical queue/ledger. All three implementations are committed and locally verified. Freeze/push, exact-SHA CI, exactly one independent CLI review and PR remain pending. No merge, auto-merge or Milestone D is authorized.
 
 Candidate: H:/000ProjectCode/AI_Project_Controller, branch gemini/aipc-2.0-milestone-c7. Source checkpoints: RCE01 68afc4c946ed498754f5d01d3fd29251adf0bf0f; RCE02 3056a103c3d367873dc68a2e9676b5c3e0022433; RCE03 0e4ea401f6db4a28fbd1efe33f7dae5a84cca397. Last Stable remains f98846e8639b3ab846afe49454a6f79f6b236c36. The subsequent documentation freeze SHA is recorded externally, avoiding a self-referential commit identifier.

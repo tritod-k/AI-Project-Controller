@@ -1,3 +1,28 @@
+# AIPC 2.0 Milestone D (`D01`–`D03`) final local release checkpoint
+
+This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.
+
+Status: AWAITING_REVIEW. Phase Gate: PENDING. Current phase: AIPC 2.0 Milestone D (`D01`–`D03`, Production Readiness & Multi-Project Workspace) under Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2` and Human Commander K.TRITOD Milestone D Start Authorization.
+
+Candidate branch `gemini/aipc-2.0-milestone-d` at `H:/000ProjectCode/AI_Project_Controller`; verified `tested_source_sha_d`: `b141bac948c095c96168c025b939f523816da0f1` (base post-PR-#10 `master`: `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`, CI run `44620182296` SUCCESS on Python 3.12 & 3.13). Promoted Stable Controller `H:/AIPC_Workspace/stable_c` remains clean and pinned at `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`. Sealed historical archive `H:/AIPC_Workspace/runtime_c/` verified 100% byte-untouched (`107,441` files, `d00_runtime_c_sealed_baseline.json` digest `3155d13a6bf65826...` matched bit-for-bit).
+
+Implemented via promoted `stable_c` Hydrogen subscription Workers (`gemini-4-hydrogen-medium`, 100% `subscription_only`, zero paid APIs):
+- **`bootstrap-d`** (`3ac70431` + `1fbfdf65` + `f36fc834`, sessions `eb031456-e6dd-4847-bd3f-79fea5e6d103`, `ce725a89-4a8e-494a-b31c-e5f36c209679`): unlocked `milestone-d` (`d01`–`d03`) behind external Controller-owned authorization while preserving all `A04` and `C.5`–`C.7` regressions and keeping `milestone-e`+ strictly blocked.
+- **`D01` (`D01-A` `ef1c5f28` + `D01-B` `198b0d23`, sessions `35ce633e-c512-419e-b17e-dd2b237a9dee`, `97cb9e35-aab3-4c65-84f9-cd1f182b3de8`)**: `FINAL-01` external-key HMAC-SHA256 verification (`milestone_authorization.py`) + child env HMAC key stripping (`env_isolation.py`); `FINAL-02` shared `(operation_id, attempt_id)` Queue/Ledger reservation ordering & fail-closed `RECONCILIATION_REQUIRED` reconciliation (`repair_budget.py`, `task_queue.py`); v1.2 runtime onboarding, immutable `plan-vXXXX` intake, short `wt-<hash>` (`<= 12` chars) worktree naming/cleanup, deterministic non-authoritative `CURRENT_STATUS.md` renderer (`scaffolding.py`); and `FINAL-04` `controller.lock`-held Private Git quiescence verifier (`workspace_git_checkpoint.py`, zero `checkpoint_manifest.json`).
+- **`D02`** (`8a363373`, session `5eabe6ca-4add-4a24-acb5-882482c90863`): strictly read-only multi-project Dashboard & Monitor (`src/aipc/dashboard/multi_project.py`, `server.py`, `__init__.py`) with CLI/JSON + self-contained HTML + read-only HTTP routes (`405` on mutations), genuinely observed per-model eligibility, `FINAL-03` 5-state raw evidence classification (`NOT_CHECKED` default, `PRESENT_VERIFIED`, `PRUNED`, `MISSING`, `HASH_MISMATCH`), and proven zero mutation of canonical JSON stores.
+- **`D03`** (`0709accf` + `b141bac9`, sessions `7a6c4f26-670d-480d-a100-6754e39dcbe0`, `5bf804e3-a5d1-4e65-97cf-ad980392975a`): `FINAL-05` Level A + minimal-mount Level B `--network none --read-only` Docker isolation + explicit Level C host OS disclosure, deterministic release-closeout `.zip` + `.sha256` export/restore, sealed archive untouched verifier (`src/aipc/project/isolation_and_closeout.py`), and simultaneous 2-project E2E + Queue/Ledger crash fault-injection + clean Windows Git checkout restore suite (`tests/e2e/test_d03_multiproject_e2e_and_closeout.py`).
+
+Fresh verification at `tested_source_sha_d` (`b141bac948c095c96168c025b939f523816da0f1`):
+- Full Windows regression suite: **1,596 passed, 1 skipped** (POSIX process groups), **0 failed**.
+- Isolated C03 (`--noconftest -p no:cacheprovider -o filterwarnings=default`): **1 passed**.
+- `--network none --read-only` Linux Docker suite (`aipc-cisl-verify:py313-v1`, D00–D03 + C.5/C.7): **177 passed, 0 skipped, 0 failed** (`0` symlink skips).
+- Whole-repo `ruff check .` (`0` errors), `ruff format --check .` (`345` files formatted), domain (`4`) & project (`2`) JSON schemas, offline wheel build, `stable_c` isolation (`6671f87c`), `runtime_c/` untouched (`107,441` files), `git diff --check`: all exit `0`.
+
+Post-freeze external verification: this docs-only commit establishes exact `frozenSHA_d`. External `source_equivalence_proof_d.json`, exact-SHA Python 3.12/3.13 GitHub Actions CI, and 4 bounded split `subscription_reviewer_gate` jobs (`Job DA: D01`, `Job DB: D02`, `Job DC: D03`, `Job DD: D-VALIDATION`) via fresh `--ephemeral` read-only OpenAI Codex sessions execute post-freeze against `frozenSHA_d`. Only `4/4 PASS` permits opening one Milestone D PR targeting `master` and pushing the quiescent Private Control-Plane Git snapshot (`tritod-k/AIPC_Workspace`, verified `isPrivate == true`). No merge, auto-merge, or unattended production go-live.
+
+Timestamp: 2026-11-20T00:00:00Z.
+
+---
 # C.7 Recovery05 final local release checkpoint
 
 This section is the authoritative pre-freeze checkpoint; older sections below are preserved historical records and do not override it.
