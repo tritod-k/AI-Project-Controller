@@ -28,7 +28,15 @@ _REQUIRED_GITIGNORE_EXCLUSIONS: tuple[str, ...] = (
     "*.key",
     ".env*",
 )
-_NON_QUIESCENT_TASK_STATUSES: frozenset[str] = frozenset({"IN_PROGRESS", "RECONCILIATION_REQUIRED"})
+_NON_QUIESCENT_TASK_STATUSES: frozenset[str] = frozenset(
+    {
+        "RUNNING",
+        "DISPATCHING",
+        "IN_PROGRESS",
+        "CLAIMING",
+        "RECONCILIATION_REQUIRED",
+    }
+)
 _SECRET_SCAN_SUFFIXES: frozenset[str] = frozenset({".json", ".yaml", ".yml", ".md"})
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -217,20 +225,6 @@ def _check_git_hygiene(workspace_root: Path) -> list[str]:
     return violations
 
 
-def _extract_queue_tasks(queue_data: Any) -> list[dict[str, Any]]:
-    if isinstance(queue_data, dict):
-        raw = queue_data.get("tasks")
-        if raw is None:
-            raw = queue_data.get("items", [])
-        if isinstance(raw, dict):
-            return [v for v in raw.values() if isinstance(v, dict)]
-        if isinstance(raw, list):
-            return [v for v in raw if isinstance(v, dict)]
-    elif isinstance(queue_data, list):
-        return [v for v in queue_data if isinstance(v, dict)]
-    return []
-
-
 def _check_queue_quiescence(workspace_root: Path, projects_subdir: str) -> list[str]:
     violations: list[str] = []
     projects_dir = workspace_root / projects_subdir
@@ -242,32 +236,126 @@ def _check_queue_quiescence(workspace_root: Path, projects_subdir: str) -> list[
     for project_dir in sorted(projects_dir.iterdir(), key=lambda p: p.name):
         if not project_dir.is_dir():
             continue
-        queue_path = project_dir / "runtime" / "state" / "canonical_queue.json"
+        state_dir = project_dir / "runtime" / "state"
+        queue_path = state_dir / "canonical_queue.json"
         try:
             st = os.lstat(queue_path)
         except FileNotFoundError:
-            continue
+            st = None
         except OSError as exc:
             violations.append(f"Cannot inspect queue for {project_dir.name}: {exc}")
+            st = None
+
+        if st is not None:
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                violations.append(f"Invalid queue file type for {project_dir.name}")
+            else:
+                try:
+                    queue_data = load_json(queue_path)
+                except StateError as exc:
+                    violations.append(f"Invalid canonical_queue.json in {project_dir.name}: {exc}")
+                else:
+                    if not isinstance(queue_data, dict):
+                        violations.append(
+                            f"Malformed canonical_queue.json in {project_dir.name}: "
+                            "root must be a JSON object"
+                        )
+                    else:
+                        if "tasks" in queue_data:
+                            raw_tasks = queue_data["tasks"]
+                            collection_name = "tasks"
+                        elif "items" in queue_data:
+                            raw_tasks = queue_data["items"]
+                            collection_name = "items"
+                        else:
+                            raw_tasks = None
+                            collection_name = "tasks"
+                            violations.append(
+                                f"Malformed canonical_queue.json in {project_dir.name}: "
+                                "missing 'tasks' list"
+                            )
+
+                        if raw_tasks is not None:
+                            if not isinstance(raw_tasks, list):
+                                violations.append(
+                                    f"Malformed canonical_queue.json in {project_dir.name}: "
+                                    f"'{collection_name}' must be a list"
+                                )
+                            else:
+                                for idx, task in enumerate(raw_tasks):
+                                    if not isinstance(task, dict):
+                                        violations.append(
+                                            f"Malformed canonical_queue.json in {project_dir.name}: "
+                                            f"task entry at index {idx} must be a JSON object"
+                                        )
+                                        continue
+                                    status = str(task.get("status") or "").strip().upper()
+                                    if status in _NON_QUIESCENT_TASK_STATUSES:
+                                        contract = task.get("contract")
+                                        nested_tid = (
+                                            contract.get("task_id")
+                                            if isinstance(contract, dict)
+                                            else None
+                                        )
+                                        task_id = str(
+                                            nested_tid
+                                            or task.get("task_id")
+                                            or task.get("id")
+                                            or f"index-{idx}"
+                                        )
+                                        violations.append(
+                                            f"Non-quiescent task {task_id} in {project_dir.name}: "
+                                            f"status={status}"
+                                        )
+
+        ledger_path = state_dir / "repair_budget_ledger.json"
+        try:
+            l_st = os.lstat(ledger_path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            violations.append(
+                f"Cannot inspect repair_budget_ledger.json for {project_dir.name}: {exc}"
+            )
             continue
 
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-            violations.append(f"Invalid queue file type for {project_dir.name}")
+        if stat.S_ISLNK(l_st.st_mode) or not stat.S_ISREG(l_st.st_mode):
+            violations.append(f"Invalid repair_budget_ledger.json file type for {project_dir.name}")
             continue
 
         try:
-            queue_data = load_json(queue_path)
+            ledger_data = load_json(ledger_path)
         except StateError as exc:
-            violations.append(f"Invalid canonical_queue.json in {project_dir.name}: {exc}")
+            violations.append(f"Invalid repair_budget_ledger.json in {project_dir.name}: {exc}")
             continue
 
-        for idx, task in enumerate(_extract_queue_tasks(queue_data)):
-            status = str(task.get("status") or "").strip().upper()
-            if status in _NON_QUIESCENT_TASK_STATUSES:
-                task_id = str(task.get("task_id") or task.get("id") or f"index-{idx}")
+        if not isinstance(ledger_data, dict):
+            violations.append(
+                f"Malformed repair_budget_ledger.json in {project_dir.name}: "
+                "root must be a JSON object"
+            )
+            continue
+
+        if "reservations" in ledger_data:
+            reservations = ledger_data["reservations"]
+            if not isinstance(reservations, dict):
                 violations.append(
-                    f"Non-quiescent task {task_id} in {project_dir.name}: status={status}"
+                    f"Malformed repair_budget_ledger.json in {project_dir.name}: "
+                    "'reservations' must be a JSON object"
                 )
+                continue
+            for res_id, res_entry in reservations.items():
+                if not isinstance(res_entry, dict):
+                    violations.append(
+                        f"Malformed reservation {res_id} in repair_budget_ledger.json "
+                        f"for {project_dir.name}"
+                    )
+                    continue
+                res_status = str(res_entry.get("status") or "").strip().upper()
+                if res_status == "RESERVED":
+                    violations.append(
+                        f"Non-quiescent RESERVED budget entry {res_id} in {project_dir.name}"
+                    )
     return violations
 
 

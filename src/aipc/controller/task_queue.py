@@ -1852,7 +1852,8 @@ def reconcile_queue_and_budget_consistency(
 ) -> ConsistencyReconciliationResult:
     """Reconcile PersistentTaskQueue and DurableRepairBudgetLedger state fail-closed.
 
-    - Releases orphan RESERVED ledger entries when the queue task is NOT RUNNING.
+    - Releases orphan RESERVED ledger entries when the queue task is missing or
+      neither RUNNING nor RECONCILIATION_REQUIRED (and reconciliation_required is False).
     - Escalates RUNNING tasks with RESERVED, ambiguous, or missing/mismatched
       operation_id entries to RECONCILIATION_REQUIRED without auto-resetting budget.
     - Leaves healthy COMPLETED/CONSUMED pairs consistent.
@@ -1866,7 +1867,11 @@ def reconcile_queue_and_budget_consistency(
     for res_id, res in ledger_state.reservations.items():
         if res.status == "RESERVED":
             task = tasks_by_id.get(res.task_id)
-            if task is None or task.status != QueuedTaskStatus.RUNNING:
+            if task is None or (
+                task.status
+                not in (QueuedTaskStatus.RUNNING, QueuedTaskStatus.RECONCILIATION_REQUIRED)
+                and not task.reconciliation_required
+            ):
                 ledger.release_attempt_budget(  # type: ignore[attr-defined]
                     reservation_id=res_id,
                     reason="orphan_reserved_task_not_in_progress",

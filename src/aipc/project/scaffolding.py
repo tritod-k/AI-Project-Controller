@@ -915,9 +915,18 @@ def render_current_status_md(
     status_counts: dict[str, int] = {}
     task_rows: list[tuple[str, str, str]] = []
     for idx, task in enumerate(tasks):
-        tid = str(task.get("task_id") or task.get("id") or f"task-{idx}")
+        contract = task.get("contract") if isinstance(task.get("contract"), dict) else {}
+        tid = str(
+            contract.get("task_id") or task.get("task_id") or task.get("id") or f"task-{idx}"
+        )
         status = str(task.get("status") or "UNKNOWN")
-        phase = str(task.get("phase_id") or task.get("milestone_id") or "-")
+        phase = str(
+            contract.get("phase_id")
+            or contract.get("milestone_id")
+            or task.get("phase_id")
+            or task.get("milestone_id")
+            or "-"
+        )
         status_counts[status] = status_counts.get(status, 0) + 1
         task_rows.append((tid, status, phase))
     task_rows.sort(key=lambda row: (row[0], row[1], row[2]))

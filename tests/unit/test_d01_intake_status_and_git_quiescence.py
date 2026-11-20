@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from aipc.controller.task_queue import ApprovedTaskContract, PersistentTaskQueue
 from aipc.project.scaffolding import (
     ProjectScaffoldingError,
     build_short_worktree_name,
@@ -365,3 +366,104 @@ def test_verify_workspace_git_quiescence_git_tracked_forbidden_and_lock(tmp_path
     lock_file = ws / "controller.lock"
     with acquire_controller_lock(lock_file), pytest.raises(WorkspaceGitQuiescenceError):
         verify_workspace_git_quiescence(ws, lock_path=lock_file)
+
+
+def test_verify_workspace_git_quiescence_rejects_running_malformed_queue_and_reserved_budget(
+    tmp_path: Path,
+) -> None:
+    # (a) Canonical RUNNING task with nested contract.task_id fails quiescence closed
+    ws_running = _setup_quiescent_workspace(tmp_path / "ws_running")
+    state_running = ws_running / "projects" / "p1" / "runtime" / "state"
+    state_running.mkdir(parents=True)
+    (state_running / "canonical_queue.json").write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "contract": {"task_id": "t-nested-run", "phase_id": "d01"},
+                        "status": "RUNNING",
+                    }
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rep_running = verify_workspace_git_quiescence(ws_running)
+    assert rep_running.passed is False
+    assert rep_running.checks["queue_quiescence"] is False
+    assert any("t-nested-run" in v and "RUNNING" in v for v in rep_running.violations)
+
+    # (b) Malformed queue task collections fail quiescence closed
+    for idx, bad_payload in enumerate(
+        (
+            ["not-a-dict-root"],
+            {"tasks": {"t-1": {"status": "DONE"}}},
+            {"tasks": ["not-a-task-dict"]},
+        )
+    ):
+        ws_bad = _setup_quiescent_workspace(tmp_path / f"ws_bad_{idx}")
+        state_bad = ws_bad / "projects" / "p1" / "runtime" / "state"
+        state_bad.mkdir(parents=True)
+        (state_bad / "canonical_queue.json").write_text(
+            json.dumps(bad_payload) + "\n",
+            encoding="utf-8",
+        )
+        rep_bad = verify_workspace_git_quiescence(ws_bad)
+        assert rep_bad.passed is False
+        assert rep_bad.checks["queue_quiescence"] is False
+
+    # (c) Active RESERVED entry in repair_budget_ledger.json fails quiescence closed
+    ws_res = _setup_quiescent_workspace(tmp_path / "ws_reserved")
+    state_res = ws_res / "projects" / "p1" / "runtime" / "state"
+    state_res.mkdir(parents=True)
+    (state_res / "canonical_queue.json").write_text('{"tasks": []}\n', encoding="utf-8")
+    (state_res / "repair_budget_ledger.json").write_text(
+        json.dumps(
+            {
+                "reservations": {
+                    "res-001": {
+                        "reservation_id": "res-001",
+                        "task_id": "t-01",
+                        "status": "RESERVED",
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rep_res = verify_workspace_git_quiescence(ws_res)
+    assert rep_res.passed is False
+    assert rep_res.checks["queue_quiescence"] is False
+    assert any("RESERVED" in v and "res-001" in v for v in rep_res.violations)
+
+
+def test_render_current_status_md_uses_nested_contract_fields_from_persistent_queue(
+    tmp_path: Path,
+) -> None:
+    _, project_root, runtime_root = _init_project(tmp_path)
+    queue_path = runtime_root / "state" / "canonical_queue.json"
+    queue = PersistentTaskQueue(queue_path)
+    queue.initialize(
+        project_id="proj-alpha",
+        milestone_id="phase-24",
+        contracts=(
+            ApprovedTaskContract(
+                task_id="d01-nested-task-01",
+                phase_id="phase-d01",
+                milestone_id="phase-24",
+                title="Render nested contract",
+                objective="Verify CURRENT_STATUS.md extracts nested contract fields.",
+                in_scope=("src/aipc/project/scaffolding.py",),
+                validation_commands=("pytest tests/unit/test_d01_intake_status_and_git_quiescence.py",),
+            ),
+        ),
+    )
+
+    out_path = render_current_status_md(project_root, queue_path=queue_path)
+    rendered = out_path.read_text(encoding="utf-8")
+    assert "`d01-nested-task-01`" in rendered
+    assert "`phase-d01`" in rendered
+    assert "`task-0`" not in rendered
+    assert "| `-` |" not in rendered

@@ -454,3 +454,72 @@ def test_reserve_finalize_and_release_attempt_budget_errors(tmp_path: Path) -> N
     # Cannot finalize an already RELEASED reservation
     with pytest.raises(RepairBudgetError, match="Cannot finalize"):
         ledger.finalize_attempt_budget(operation_id="op-100", attempt_id="att-01-task-01")
+
+
+def test_reconcile_idempotent_repeated_calls_preserves_reserved_budget(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy_obj = ReviewGovernancePolicy(
+        policy_version="1.0",
+        policy_id="pol-d01-repeat",
+        owner="K.TRITOD",
+        repair_budget=RepairBudgetPolicyConfig(
+            default_auto_code_repairs_per_task=1,
+            total_auto_code_repairs_per_milestone=1,
+        ),
+    )
+    loaded_policy = LoadedReviewGovernancePolicy(
+        policy=policy_obj,
+        policy_path=Path("H:/trusted/policy.json"),
+        policy_sha256=hashlib.sha256(b"policy-d01-repeat").hexdigest(),
+        approval_path=Path("H:/trusted/approval.json"),
+        approval_id="appr-c5-repeat",
+        approval_evidence_digest=hashlib.sha256(b"approval-d01-repeat").hexdigest(),
+        authorized_by="K.TRITOD",
+        project_id="proj-d01",
+        milestone_id="milestone-c5",
+    )
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-repeat-01",
+        attempt_id="att-01-task-01",
+    )
+    queue.begin_dispatch(
+        "task-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-repeat-01",
+    )
+
+    for _ in range(3):
+        outcome = reconcile_queue_and_budget_consistency(queue, ledger)
+        assert outcome.status == "RECONCILIATION_REQUIRED"
+        assert outcome.released_reservation_ids == ()
+        assert outcome.escalated_task_ids == ("task-01",)
+
+        snap = queue.load()
+        assert snap.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+        assert snap.tasks[0].reconciliation_required is True
+
+        state = ledger.load()
+        assert state.reservations[res.reservation_id].status == "RESERVED"
+        assert state.milestone_consumed == 1
+        assert state.registered_roots["task-01"].consumed == 1
+
+    with pytest.raises(RepairBudgetError):
+        ledger.reserve_attempt_budget(
+            task_id="task-01",
+            operation_id="op-repeat-02",
+            attempt_id="att-02-task-01",
+        )
