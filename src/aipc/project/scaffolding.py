@@ -10,12 +10,15 @@ JSON records remain mandatory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +91,21 @@ class ProjectRuntimeLayout(CanonicalRecord):
     receipt_dir: Path
     lock_path: Path
     scaffold_manifest_path: Path
+
+
+class ApprovedPlanSnapshot(CanonicalRecord):
+    """Immutable approved plan snapshot metadata."""
+
+    plan_version: str
+    plan_dir: Path
+    master_plan_path: Path
+    manifest_path: Path
+    manifest_sha256_path: Path
+    master_plan_sha256: str
+    manifest_sha256: str
+
+
+_PLAN_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def validate_project_identifier(project_id: str) -> Identifier:
@@ -564,7 +582,432 @@ def initialize_project_runtime(
             label="scaffold_manifest",
         )
 
+    v12_dirs = (
+        layout.runtime_root / "plans",
+        layout.runtime_root / "plans" / "proposals",
+        layout.runtime_root / "plans" / "approved",
+        layout.runtime_root / "trusted",
+        layout.audit_dir / "approvals",
+        layout.runtime_root / "logs",
+    )
+    for directory in v12_dirs:
+        _assert_lexical_chain_and_containment(
+            layout.project_root, directory, label="runtime_dir", expect_dir=True
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        _assert_lexical_chain_and_containment(
+            layout.project_root, directory, label="runtime_dir", expect_dir=True
+        )
+
     return layout
+
+
+def _write_text_atomic_guarded(
+    root: Path,
+    target: Path,
+    text: str,
+    *,
+    label: str,
+) -> bytes:
+    """Atomically write LF-normalized UTF-8 text after revalidating containment."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    _assert_lexical_chain_and_containment(
+        root, target.parent, label=f"{label}_dir", expect_dir=True
+    )
+    _assert_lexical_chain_and_containment(root, target, label=label, expect_dir=False)
+
+    temporary: Path | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _assert_lexical_chain_and_containment(
+            root, target.parent, label=f"{label}_dir", expect_dir=True
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(normalized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _assert_lexical_chain_and_containment(root, target, label=label, expect_dir=False)
+        _assert_not_symlink_lstat(temporary, label=f"{label}_tmp")
+        os.replace(temporary, target)
+        temporary = None
+    except ProjectScaffoldingError:
+        raise
+    except OSError as exc:
+        raise ProjectScaffoldingError(f"Cannot atomically save {label}: {target}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return normalized.encode("utf-8")
+
+
+def _validate_nonempty_token(value: str, *, label: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ProjectScaffoldingError(f"{label} must be a non-empty string")
+    return value.strip()
+
+
+def snapshot_approved_plan(
+    runtime_root: Path | str,
+    *,
+    plan_version: str,
+    source_plan_path: Path | str,
+    approved_by: str,
+    project_id: str,
+    milestone_id: str,
+    change_impact_path: Path | str | None = None,
+) -> ApprovedPlanSnapshot:
+    """Write an immutable approved plan snapshot under ``plans/approved/<plan_version>/``."""
+    if (
+        not isinstance(plan_version, str)
+        or "/" in plan_version
+        or "\\" in plan_version
+        or ".." in plan_version
+        or "\x00" in plan_version
+        or _PLAN_VERSION_RE.fullmatch(plan_version) is None
+    ):
+        raise ProjectScaffoldingError(f"Invalid plan_version: {plan_version!r}")
+
+    clean_approved_by = _validate_nonempty_token(approved_by, label="approved_by")
+    clean_project_id = _validate_nonempty_token(project_id, label="project_id")
+    clean_milestone_id = _validate_nonempty_token(milestone_id, label="milestone_id")
+
+    raw_rt = Path(runtime_root)
+    _check_no_traversal_or_symlink(raw_rt, label="runtime_root")
+    lexical_rt = raw_rt if raw_rt.is_absolute() else Path.cwd() / raw_rt
+    _check_no_traversal_or_symlink(lexical_rt, label="runtime_root")
+    _assert_no_ancestor_symlinks(lexical_rt, label="runtime_root")
+    rt_st = _assert_not_symlink_lstat(lexical_rt, label="runtime_root")
+    if rt_st is None or not stat.S_ISDIR(rt_st.st_mode):
+        raise ProjectScaffoldingError(f"runtime_root must be an existing directory: {lexical_rt}")
+
+    source_file = _validate_template_file_path(Path(source_plan_path), label="source_plan_path")
+    try:
+        plan_text = source_file.read_text(encoding="utf-8")
+        assert_no_secrets(plan_text)
+    except SecretExposureError as exc:
+        raise ProjectScaffoldingError("source_plan_path contains prohibited secret text") from exc
+    except (OSError, UnicodeError) as exc:
+        raise ProjectScaffoldingError(f"Cannot read source_plan_path: {source_file}") from exc
+
+    change_impact_sha256: str | None = None
+    change_impact_source: str | None = None
+    if change_impact_path is not None:
+        impact_file = _validate_template_file_path(
+            Path(change_impact_path), label="change_impact_path"
+        )
+        try:
+            impact_text = impact_file.read_text(encoding="utf-8")
+            assert_no_secrets(impact_text)
+        except SecretExposureError as exc:
+            raise ProjectScaffoldingError(
+                "change_impact_path contains prohibited secret text"
+            ) from exc
+        except (OSError, UnicodeError) as exc:
+            raise ProjectScaffoldingError(f"Cannot read change_impact_path: {impact_file}") from exc
+        impact_bytes = impact_text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+        change_impact_sha256 = hashlib.sha256(impact_bytes).hexdigest()
+        change_impact_source = impact_file.name
+
+    plans_dir = lexical_rt / "plans"
+    approved_root = plans_dir / "approved"
+    for d in (plans_dir, approved_root):
+        _assert_lexical_chain_and_containment(lexical_rt, d, label="plans_dir", expect_dir=True)
+        d.mkdir(parents=True, exist_ok=True)
+        _assert_lexical_chain_and_containment(lexical_rt, d, label="plans_dir", expect_dir=True)
+
+    target_dir = approved_root / plan_version
+    _assert_lexical_chain_and_containment(
+        approved_root, target_dir, label="plan_version_dir", expect_dir=True
+    )
+    if _assert_not_symlink_lstat(target_dir, label="plan_version_dir") is not None:
+        raise ProjectScaffoldingError(
+            f"Approved plan version already exists (immutable): {plan_version}"
+        )
+
+    try:
+        target_dir.mkdir(parents=False, exist_ok=False)
+    except FileExistsError as exc:
+        raise ProjectScaffoldingError(
+            f"Approved plan version already exists (immutable): {plan_version}"
+        ) from exc
+    except OSError as exc:
+        raise ProjectScaffoldingError(f"Cannot create plan directory: {target_dir}") from exc
+
+    master_plan_path = target_dir / "MASTER_PLAN.md"
+    master_plan_bytes = _write_text_atomic_guarded(
+        approved_root, master_plan_path, plan_text, label="MASTER_PLAN.md"
+    )
+    master_plan_sha256 = hashlib.sha256(master_plan_bytes).hexdigest()
+
+    manifest_payload: dict[str, Any] = {
+        "schema_version": "1.0",
+        "project_id": clean_project_id,
+        "milestone_id": clean_milestone_id,
+        "plan_version": plan_version,
+        "approved_by": clean_approved_by,
+        "approved_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "master_plan_filename": "MASTER_PLAN.md",
+        "master_plan_sha256": master_plan_sha256,
+        "change_impact_source": change_impact_source,
+        "change_impact_sha256": change_impact_sha256,
+    }
+    try:
+        assert_no_secrets(manifest_payload)
+    except SecretExposureError as exc:
+        raise ProjectScaffoldingError("plan_manifest contains prohibited secret text") from exc
+
+    manifest_text = json.dumps(manifest_payload, indent=2, ensure_ascii=False, allow_nan=False)
+    manifest_text += "\n"
+    manifest_path = target_dir / "plan_manifest.json"
+    manifest_bytes = _write_text_atomic_guarded(
+        approved_root, manifest_path, manifest_text, label="plan_manifest.json"
+    )
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+
+    manifest_sha256_path = target_dir / "plan_manifest.json.sha256"
+    _write_text_atomic_guarded(
+        approved_root,
+        manifest_sha256_path,
+        f"{manifest_sha256}  plan_manifest.json\n",
+        label="plan_manifest.json.sha256",
+    )
+
+    return ApprovedPlanSnapshot(
+        plan_version=plan_version,
+        plan_dir=target_dir,
+        master_plan_path=master_plan_path,
+        manifest_path=manifest_path,
+        manifest_sha256_path=manifest_sha256_path,
+        master_plan_sha256=master_plan_sha256,
+        manifest_sha256=manifest_sha256,
+    )
+
+
+def build_short_worktree_name(task_id: str, attempt_id: str | int) -> str:
+    """Return deterministic short worktree directory name ``wt-<8-hex>`` (<=12 chars)."""
+    clean_task = _validate_nonempty_token(str(task_id), label="task_id")
+    clean_attempt = _validate_nonempty_token(str(attempt_id), label="attempt_id")
+    digest = hashlib.sha256(f"{clean_task}\x00{clean_attempt}".encode()).hexdigest()[:8]
+    return f"wt-{digest}"
+
+
+def _remove_tree_no_symlinks(root: Path, target: Path) -> None:
+    """Recursively remove a stale directory tree without following symlinks."""
+    _assert_lexical_chain_and_containment(root, target, label="stale_worktree")
+    st = _assert_not_symlink_lstat(target, label="stale_worktree")
+    if st is None:
+        return
+    if stat.S_ISDIR(st.st_mode):
+        for child in sorted(target.iterdir(), key=lambda p: p.name):
+            _remove_tree_no_symlinks(root, child)
+        target.rmdir()
+    elif stat.S_ISREG(st.st_mode):
+        target.unlink()
+    else:
+        raise ProjectScaffoldingError(f"Unsupported file type in stale worktree: {target}")
+
+
+def cleanup_stale_worktrees(
+    worktrees_dir: Path | str,
+    *,
+    active_names: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Remove stale entries under ``worktrees_dir`` while preserving ``active_names``."""
+    raw_wt = Path(worktrees_dir)
+    _check_no_traversal_or_symlink(raw_wt, label="worktrees_dir")
+    lexical_wt = raw_wt if raw_wt.is_absolute() else Path.cwd() / raw_wt
+    _check_no_traversal_or_symlink(lexical_wt, label="worktrees_dir")
+    _assert_no_ancestor_symlinks(lexical_wt, label="worktrees_dir")
+
+    wt_st = _assert_not_symlink_lstat(lexical_wt, label="worktrees_dir")
+    if wt_st is None:
+        return ()
+    if not stat.S_ISDIR(wt_st.st_mode):
+        raise ProjectScaffoldingError(f"worktrees_dir is not a directory: {lexical_wt}")
+
+    active_set: set[str] = set()
+    for name in active_names:
+        if (
+            not isinstance(name, str)
+            or not name
+            or "/" in name
+            or "\\" in name
+            or ".." in name
+            or "\x00" in name
+        ):
+            raise ProjectScaffoldingError(f"Invalid active worktree name: {name!r}")
+        active_set.add(name)
+
+    removed: list[str] = []
+    for entry in sorted(lexical_wt.iterdir(), key=lambda p: p.name):
+        _assert_not_symlink_lstat(entry, label="worktree_entry")
+        _assert_lexical_chain_and_containment(lexical_wt, entry, label="worktree_entry")
+        if entry.name in active_set:
+            continue
+        _remove_tree_no_symlinks(lexical_wt, entry)
+        removed.append(entry.name)
+    return tuple(removed)
+
+
+def _extract_queue_tasks(queue_data: Any) -> list[dict[str, Any]]:
+    if isinstance(queue_data, dict):
+        raw_tasks = queue_data.get("tasks")
+        if raw_tasks is None:
+            raw_tasks = queue_data.get("items", [])
+        if isinstance(raw_tasks, dict):
+            return [v for v in raw_tasks.values() if isinstance(v, dict)]
+        if isinstance(raw_tasks, list):
+            return [v for v in raw_tasks if isinstance(v, dict)]
+    elif isinstance(queue_data, list):
+        return [v for v in queue_data if isinstance(v, dict)]
+    return []
+
+
+def _list_safe_json_files(directory: Path, *, label: str) -> list[Path]:
+    _check_no_traversal_or_symlink(directory, label=label)
+    lexical_dir = directory if directory.is_absolute() else Path.cwd() / directory
+    _assert_no_ancestor_symlinks(lexical_dir, label=label)
+    st = _assert_not_symlink_lstat(lexical_dir, label=label)
+    if st is None:
+        return []
+    if not stat.S_ISDIR(st.st_mode):
+        raise ProjectScaffoldingError(f"{label} is not a directory: {lexical_dir}")
+    files: list[Path] = []
+    for entry in sorted(lexical_dir.iterdir(), key=lambda p: p.name):
+        entry_st = _assert_not_symlink_lstat(entry, label=f"{label}_entry")
+        if entry_st is not None and stat.S_ISREG(entry_st.st_mode) and entry.suffix == ".json":
+            files.append(entry)
+    return files
+
+
+def render_current_status_md(
+    project_root: Path | str,
+    *,
+    queue_path: Path | str,
+    budget_ledger_path: Path | str | None = None,
+    project_state_path: Path | str | None = None,
+    approvals_dir: Path | str | None = None,
+    receipts_dir: Path | str | None = None,
+) -> Path:
+    """Render deterministic LF ``CURRENT_STATUS.md`` from read-only Controller JSON stores."""
+    raw_root = Path(project_root)
+    _check_no_traversal_or_symlink(raw_root, label="project_root")
+    lexical_root = raw_root if raw_root.is_absolute() else Path.cwd() / raw_root
+    _check_no_traversal_or_symlink(lexical_root, label="project_root")
+    _assert_no_ancestor_symlinks(lexical_root, label="project_root")
+    root_st = _assert_not_symlink_lstat(lexical_root, label="project_root")
+    if root_st is None or not stat.S_ISDIR(root_st.st_mode):
+        raise ProjectScaffoldingError(f"project_root must be an existing directory: {lexical_root}")
+
+    validated_queue = _validate_template_file_path(Path(queue_path), label="queue_path")
+    queue_data = load_json(validated_queue)
+    tasks = _extract_queue_tasks(queue_data)
+
+    status_counts: dict[str, int] = {}
+    task_rows: list[tuple[str, str, str]] = []
+    for idx, task in enumerate(tasks):
+        tid = str(task.get("task_id") or task.get("id") or f"task-{idx}")
+        status = str(task.get("status") or "UNKNOWN")
+        phase = str(task.get("phase_id") or task.get("milestone_id") or "-")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        task_rows.append((tid, status, phase))
+    task_rows.sort(key=lambda row: (row[0], row[1], row[2]))
+
+    lines: list[str] = [
+        "# Current Project Status",
+        "",
+        "> **DERIVED / NON-AUTHORITATIVE**: This file is a read-only derived view from "
+        "Controller JSON state. Do not edit manually or treat as authoritative.",
+        "",
+    ]
+
+    if project_state_path is not None:
+        state_file = _validate_template_file_path(
+            Path(project_state_path), label="project_state_path"
+        )
+        state_data = load_json(state_file)
+        if isinstance(state_data, dict):
+            lines.extend(["## Project State", ""])
+            for key in sorted(state_data):
+                val = state_data[key]
+                if isinstance(val, str | int | float | bool) or val is None:
+                    lines.append(f"- `{key}`: `{val}`")
+            lines.append("")
+
+    lines.extend(
+        [
+            "## Queue Summary",
+            "",
+            f"- Total tasks: `{len(tasks)}`",
+        ]
+    )
+    for status_name in sorted(status_counts):
+        lines.append(f"- `{status_name}`: `{status_counts[status_name]}`")
+    if task_rows:
+        lines.extend(["", "| Task ID | Status | Phase |", "| --- | --- | --- |"])
+        for tid, status, phase in task_rows:
+            lines.append(f"| `{tid}` | `{status}` | `{phase}` |")
+    lines.append("")
+
+    if budget_ledger_path is not None:
+        ledger_file = _validate_template_file_path(
+            Path(budget_ledger_path), label="budget_ledger_path"
+        )
+        ledger_data = load_json(ledger_file)
+        if isinstance(ledger_data, dict):
+            lines.extend(["## Repair Budget", ""])
+            for key in sorted(ledger_data):
+                val = ledger_data[key]
+                if isinstance(val, str | int | float | bool) or val is None:
+                    lines.append(f"- `{key}`: `{val}`")
+            lines.append("")
+
+    if approvals_dir is not None:
+        approval_files = _list_safe_json_files(Path(approvals_dir), label="approvals_dir")
+        lines.extend(
+            [
+                "## Approvals",
+                "",
+                f"- Approval records: `{len(approval_files)}`",
+            ]
+        )
+        for af in approval_files:
+            lines.append(f"- `{af.name}`")
+        lines.append("")
+
+    if receipts_dir is not None:
+        receipt_files = _list_safe_json_files(Path(receipts_dir), label="receipts_dir")
+        lines.extend(
+            [
+                "## Receipts",
+                "",
+                f"- Receipt records: `{len(receipt_files)}`",
+            ]
+        )
+        for rf in receipt_files:
+            lines.append(f"- `{rf.name}`")
+        lines.append("")
+
+    rendered = "\n".join(lines).rstrip("\n") + "\n"
+    try:
+        assert_no_secrets(rendered)
+    except SecretExposureError as exc:
+        raise ProjectScaffoldingError(
+            "Rendered CURRENT_STATUS.md contains prohibited secret text"
+        ) from exc
+
+    target = lexical_root / "CURRENT_STATUS.md"
+    _write_text_atomic_guarded(lexical_root, target, rendered, label="CURRENT_STATUS.md")
+    return target
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
