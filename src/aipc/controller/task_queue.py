@@ -611,11 +611,70 @@ class ApprovedTaskContract(CanonicalRecord):
                 raise ValueError(
                     f"phase_id {self.phase_id!r} is outside authorized Milestone D D01-D03 scope"
                 )
-            if self.approval_evidence_path is not None:
+            if self.approval_evidence_path is None or not self.approval_evidence_path.strip():
                 raise ValueError(
-                    "Milestone D task contract must be authorized via Controller-owned "
-                    "milestone_trust_context, not legacy approval_evidence_path"
+                    "Milestone D task contract requires an explicit approval_evidence_path "
+                    "to persisted authorization evidence"
                 )
+            from aipc.controller.milestone_authorization import (
+                ControllerMilestoneAuthorizationRecord,
+                _is_phase_allowed,
+                _matches_prefix,
+                _normalize_milestone_id,
+                _normalize_rel_path,
+            )
+
+            evidence_path = Path(self.approval_evidence_path.strip())
+            if not evidence_path.is_file():
+                raise ValueError(
+                    f"Milestone authorization evidence file not found: {evidence_path}"
+                )
+            if evidence_path.suffix.lower() in (".yaml", ".yml"):
+                raise ValueError("YAML-only milestone authorization records are prohibited")
+            try:
+                raw_obj = load_json(evidence_path)
+                assert_no_secrets(raw_obj)
+                record = ControllerMilestoneAuthorizationRecord.model_validate(raw_obj)
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise ValueError(f"Invalid Milestone D authorization evidence: {exc}") from exc
+            if record.decision != "APPROVED":
+                raise ValueError(
+                    f"Milestone D authorization is not APPROVED (decision={record.decision})"
+                )
+            if record.approval_id != self.approval_id:
+                raise ValueError(
+                    f"approval_id mismatch: expected {self.approval_id!r}, "
+                    f"got {record.approval_id!r}"
+                )
+            if _normalize_milestone_id(record.milestone_id) != _normalize_milestone_id(
+                self.milestone_id
+            ):
+                raise ValueError(
+                    f"milestone_id mismatch: expected {self.milestone_id!r}, "
+                    f"got {record.milestone_id!r}"
+                )
+            if not _is_phase_allowed(self.phase_id, record):
+                raise ValueError(
+                    f"phase_id {self.phase_id!r} is outside authorized Milestone D workstream scope"
+                )
+            for raw_path in self.in_scope:
+                norm = _normalize_rel_path(raw_path, label="in_scope")
+                if any(
+                    _matches_prefix(norm, out_p)
+                    for out_p in record.approved_scope.out_of_scope_paths
+                ):
+                    raise ValueError(
+                        f"Path {raw_path!r} is explicitly out_of_scope in Milestone D authorization"
+                    )
+                if not any(
+                    _matches_prefix(norm, allowed_p)
+                    for allowed_p in record.approved_scope.allowed_path_prefixes
+                ):
+                    raise ValueError(
+                        f"Path {raw_path!r} is outside authorized Milestone D path prefixes"
+                    )
         elif is_c5:
             if self.milestone_id.strip().lower() not in _AUTHORIZED_MILESTONE_C5_IDS:
                 raise ValueError(

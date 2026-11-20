@@ -147,7 +147,11 @@ def test_milestone_d_workstreams_allowed_with_valid_external_trust_context(
     assert verified.milestone_id == "milestone-d"
     assert verified.project_id == "proj-d"
 
-    contract = _d_contract(task_id=f"task-{workstream}-01", phase_id=workstream)
+    contract = _d_contract(
+        task_id=f"task-{workstream}-01",
+        phase_id=workstream,
+        approval_evidence_path=str(trust_ctx.record_path),
+    )
     queue = PersistentTaskQueue(tmp_path / "queue.json", milestone_trust_context=trust_ctx)
     snap = queue.initialize(
         project_id="proj-d",
@@ -199,7 +203,8 @@ def test_milestone_d_rejected_when_trust_context_missing_or_yaml_claimed(
         encoding="utf-8",
     )
 
-    contract = _d_contract()
+    trust_ctx = _issue_d_trust_context(tmp_path)
+    contract = _d_contract(approval_evidence_path=str(trust_ctx.record_path))
     queue = PersistentTaskQueue(tmp_path / "queue.json")
     with pytest.raises(
         ControllerError,
@@ -240,7 +245,6 @@ def test_milestone_d_rejected_when_trust_context_missing_or_yaml_claimed(
             milestone_id="milestone-d",
         )
 
-    trust_ctx = _issue_d_trust_context(tmp_path)
     yaml_path = trust_ctx.trusted_external_root / "self_claimed_d.yaml"
     yaml_path.write_text(
         "milestone_id: milestone-d\ndecision: APPROVED\nworkstreams: [d01, d02, d03]\n",
@@ -271,7 +275,7 @@ def test_milestone_d_rejects_wrong_milestone_wrong_project_tampered_digest_and_s
         PersistentTaskQueue(tmp_path / "q_c7.json", milestone_trust_context=c7_ctx).initialize(
             project_id="proj-d",
             milestone_id="milestone-d",
-            contracts=[_d_contract()],
+            contracts=[_d_contract(approval_evidence_path=str(d_ctx.record_path))],
             approval_id="ktritod-d-20261120",
         )
     with pytest.raises(ValueError, match="milestone_trust_context verification failed"):
@@ -295,7 +299,7 @@ def test_milestone_d_rejects_wrong_milestone_wrong_project_tampered_digest_and_s
         PersistentTaskQueue(tmp_path / "q_proj.json", milestone_trust_context=d_ctx).initialize(
             project_id="wrong-project",
             milestone_id="milestone-d",
-            contracts=[_d_contract()],
+            contracts=[_d_contract(approval_evidence_path=str(d_ctx.record_path))],
             approval_id="ktritod-d-20261120",
         )
     with pytest.raises(ValueError, match="milestone_trust_context verification failed"):
@@ -372,6 +376,7 @@ def test_milestone_e_plus_strictly_rejected_even_with_external_grant(tmp_path: P
                 task_id=f"task-{bad_phase}",
                 milestone_id=bad_ms,
                 phase_id=bad_phase,
+                approval_evidence_path=str(d_ctx.record_path),
             )
         with pytest.raises(ValueError, match=UNAUTHORIZED_MILESTONE_D_BLOCKED):
             assert_milestone_c_scope_authorized(
@@ -380,3 +385,17 @@ def test_milestone_e_plus_strictly_rejected_even_with_external_grant(tmp_path: P
                 project_id="proj-d",
                 milestone_trust_context=d_ctx,
             )
+
+
+@pytest.mark.parametrize("bad_evidence_path", [None, "", "   "])
+def test_milestone_d_bare_contract_without_approval_evidence_path_raises(
+    bad_evidence_path: str | None,
+) -> None:
+    with pytest.raises(ValueError, match="requires an explicit approval_evidence_path"):
+        _d_contract(
+            task_id="task-bad-future",
+            phase_id="d01",
+            milestone_id="milestone-d",
+            approval_id="appr-c6-01",
+            approval_evidence_path=bad_evidence_path,
+        )
