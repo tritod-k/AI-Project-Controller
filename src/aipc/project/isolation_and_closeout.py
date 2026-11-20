@@ -609,7 +609,7 @@ def _compute_symlink_target_sha256(path: Path) -> str:
 
 
 def compute_sealed_archive_manifest(archive_root: Path | str) -> tuple[str, int]:
-    """Read-only ``os.scandir`` + ``os.lstat`` content-hashed walk returning ``(sha256, file_count)``."""
+    """Read-only ``os.scandir`` + ``os.lstat`` content-hashed walk."""
     root_lex = _validate_clean_path(archive_root, label="archive_root")
     root_st = _assert_not_symlink_lstat(root_lex, label="archive_root")
     if root_st is None or not stat.S_ISDIR(root_st.st_mode):
@@ -636,7 +636,12 @@ def compute_sealed_archive_manifest(archive_root: Path | str) -> tuple[str, int]
             relpath = entry_path.relative_to(root_resolved).as_posix()
             if stat.S_ISLNK(st.st_mode):
                 records.append(
-                    (relpath, int(st.st_size), "symlink", _compute_symlink_target_sha256(entry_path))
+                    (
+                        relpath,
+                        int(st.st_size),
+                        "symlink",
+                        _compute_symlink_target_sha256(entry_path),
+                    )
                 )
             elif stat.S_ISDIR(st.st_mode):
                 stack.append(entry_path)
@@ -684,7 +689,8 @@ def write_sealed_archive_baseline_manifest(
     out_resolved = out_lex.resolve(strict=False)
     if _paths_overlap(out_lex, root_lex) or _paths_overlap(out_resolved, root_resolved):
         raise IsolationPolicyError(
-            f"baseline_manifest_path ({out_resolved}) cannot reside inside or alias archive_root ({root_resolved})"
+            f"baseline_manifest_path ({out_resolved}) cannot reside inside "
+            f"or alias archive_root ({root_resolved})"
         )
 
     digest, file_count = compute_sealed_archive_manifest(root_resolved)

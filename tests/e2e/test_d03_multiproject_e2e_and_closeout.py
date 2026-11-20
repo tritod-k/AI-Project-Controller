@@ -533,7 +533,7 @@ def test_c_final05_minimal_docker_argv_and_level_c_disclosure(tmp_path: Path) ->
             forbidden_mount_roots=(sibling_proj,),
         )
 
-    # Forbidden state/, audit/approvals/, ledger, queue, *.key, .aipc_operator (including inside .git/)
+    # Forbidden state/, audit/approvals/, ledger, queue, *.key, .aipc_operator (incl. .git/)
     for rel in (
         "state",
         "audit/approvals",
@@ -652,7 +652,7 @@ def test_e_sealed_archive_untouched_pass_and_tamper_detection(tmp_path: Path) ->
 def test_e2_sealed_archive_same_size_mtime_preserved_tamper_and_dest_containment(
     tmp_path: Path,
 ) -> None:
-    """(e2) Same-size 1-byte tamper with preserved st_mtime_ns fails; manifest inside archive rejected."""
+    """(e2) Same-size 1-byte tamper with preserved mtime fails; dest inside archive rejected."""
     archive = tmp_path / "sealed_archive"
     (archive / "sub").mkdir(parents=True)
     target_file = archive / "sub" / "payload.txt"
