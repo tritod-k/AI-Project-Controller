@@ -1,0 +1,419 @@
+"""Comprehensive tests for Milestone D D02 Read-Only Multi-Project Dashboard & Monitor."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from aipc.dashboard import (
+    DashboardApplication,
+    DashboardHttpServer,
+    DashboardService,
+    MultiProjectDashboardSnapshot,
+    classify_raw_evidence,
+    discover_and_aggregate_projects,
+    render_multi_project_html,
+)
+from aipc.dashboard.multi_project import main as multi_project_main
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+
+def _snapshot_tree(root: Path) -> tuple[set[str], dict[str, bytes]]:
+    dirs: set[str] = set()
+    files: dict[str, bytes] = {}
+    for entry in sorted(root.rglob("*")):
+        rel = str(entry.relative_to(root)).replace("\\", "/")
+        if entry.is_dir():
+            dirs.add(rel)
+        elif entry.is_file():
+            files[rel] = entry.read_bytes()
+    return dirs, files
+
+
+def _seed_project(
+    projects_root: Path,
+    project_id: str,
+    *,
+    phase_id: str = "d02-monitor",
+    status: str = "RUNNING",
+    review_verdict: str = "PASS",
+    tasks: list[dict[str, Any]] | None = None,
+    budget: dict[str, Any] | None = None,
+    receipts: dict[str, dict[str, Any]] | None = None,
+    raw_logs: dict[str, bytes] | None = None,
+) -> Path:
+    proj_dir = projects_root / project_id
+    state_dir = proj_dir / "runtime" / "state"
+    receipt_dir = proj_dir / "runtime" / "audit" / "receipts"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_json(
+        state_dir / "project_state.json",
+        {
+            "schema_version": "1.0",
+            "project_id": project_id,
+            "run_id": f"run-{project_id}-01",
+            "current_phase": phase_id,
+            "current_attempt": 1,
+            "status": status,
+            "completed_phases": [],
+            "blocked_phases": [],
+            "active_task_id": None,
+            "last_review": {
+                "verdict": review_verdict,
+            },
+        },
+    )
+
+    if tasks is not None:
+        _write_json(
+            state_dir / "canonical_queue.json",
+            {
+                "schema_version": "1.0",
+                "project_id": project_id,
+                "milestone_id": "milestone-d",
+                "tasks": tasks,
+            },
+        )
+
+    if budget is not None:
+        _write_json(state_dir / "repair_budget_ledger.json", budget)
+
+    if raw_logs:
+        for rel_path, content in raw_logs.items():
+            target = proj_dir / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+
+    if receipts:
+        for filename, payload in receipts.items():
+            _write_json(receipt_dir / filename, payload)
+
+    return proj_dir
+
+
+def test_classify_raw_evidence_all_five_states(tmp_path: Path) -> None:
+    log_bytes = b"dummy log line 1\ndummy log line 2\n"
+    log_sha = _sha256_bytes(log_bytes)
+    log_file = tmp_path / "runtime" / "logs" / "ok.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_bytes(log_bytes)
+
+    verified_receipt = {"raw_log_path": "runtime/logs/ok.log", "raw_sha256": log_sha}
+    pruned_receipt_flag = {
+        "raw_log_path": "runtime/logs/pruned.log",
+        "raw_sha256": "0" * 64,
+        "raw_pruned": True,
+    }
+    pruned_receipt_status = {
+        "raw_log_path": "runtime/logs/pruned2.log",
+        "raw_sha256": "0" * 64,
+        "status": "PRUNED",
+    }
+    missing_receipt = {"raw_log_path": "runtime/logs/missing.log", "raw_sha256": "1" * 64}
+    mismatch_receipt = {"raw_log_path": "runtime/logs/ok.log", "raw_sha256": "f" * 64}
+
+    # Fast path (default verify_evidence=False) always returns NOT_CHECKED
+    assert classify_raw_evidence(verified_receipt, base_dir=tmp_path) == "NOT_CHECKED"
+    assert classify_raw_evidence(missing_receipt, base_dir=tmp_path) == "NOT_CHECKED"
+    assert classify_raw_evidence(mismatch_receipt, base_dir=tmp_path) == "NOT_CHECKED"
+
+    # Verified path (verify_evidence=True)
+    assert (
+        classify_raw_evidence(verified_receipt, base_dir=tmp_path, verify_evidence=True)
+        == "PRESENT_VERIFIED"
+    )
+    assert (
+        classify_raw_evidence(pruned_receipt_flag, base_dir=tmp_path, verify_evidence=True)
+        == "PRUNED"
+    )
+    assert (
+        classify_raw_evidence(pruned_receipt_status, base_dir=tmp_path, verify_evidence=True)
+        == "PRUNED"
+    )
+    assert (
+        classify_raw_evidence(missing_receipt, base_dir=tmp_path, verify_evidence=True) == "MISSING"
+    )
+    assert (
+        classify_raw_evidence(mismatch_receipt, base_dir=tmp_path, verify_evidence=True)
+        == "HASH_MISMATCH"
+    )
+
+
+def test_discover_and_aggregate_projects_and_zero_mutation(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    # Non-project entries that must be ignored
+    (projects_root / "README.txt").write_text("ignore me\n", encoding="utf-8")
+    (projects_root / ".hidden_dir").mkdir()
+
+    ok_bytes = b"alpha verified output\n"
+    ok_sha = _sha256_bytes(ok_bytes)
+    bad_bytes = b"beta tampered output\n"
+
+    _seed_project(
+        projects_root,
+        "alpha",
+        phase_id="d02",
+        status="RUNNING",
+        review_verdict="PASS",
+        tasks=[
+            {"contract": {"task_id": "t1", "phase_id": "d01"}, "status": "COMPLETED"},
+            {"contract": {"task_id": "t2", "phase_id": "d02"}, "status": "RUNNING"},
+            {"contract": {"task_id": "t3", "phase_id": "d02"}, "status": "PENDING"},
+            {
+                "contract": {"task_id": "t4", "phase_id": "d02"},
+                "status": "BLOCKED",
+                "reconciliation_required": True,
+            },
+        ],
+        budget={
+            "milestone_consumed": 3,
+            "milestone_limit": 10,
+            "max_inner_corrections_per_outer_attempt": 2,
+            "milestone_worker_invocations_consumed": 5,
+            "milestone_worker_invocations_limit": 20,
+            "registered_roots": {
+                "root-a": {
+                    "inner_corrections_by_attempt": {"1": 1, "2": 2},
+                    "max_inner_corrections_per_outer_attempt": 4,
+                }
+            },
+        },
+        raw_logs={"runtime/logs/alpha.log": ok_bytes},
+        receipts={
+            "r1_ok.json": {
+                "receipt_id": "rec-ok",
+                "raw_log_path": "runtime/logs/alpha.log",
+                "raw_sha256": ok_sha,
+                "model_states": {"gemini-4-hydrogen-medium": "QUALIFIED"},
+            },
+            "r2_pruned.json": {
+                "receipt_id": "rec-pruned",
+                "raw_log_path": "runtime/logs/gone.log",
+                "raw_sha256": "0" * 64,
+                "raw_pruned": True,
+                "selected_model": "gpt-5.3-codex",
+            },
+        },
+    )
+
+    _seed_project(
+        projects_root,
+        "beta",
+        phase_id="d03",
+        status="PAUSED",
+        review_verdict="REVISE",
+        tasks=[
+            {
+                "contract": {"task_id": "b1", "phase_id": "d03"},
+                "status": "RECONCILIATION_REQUIRED",
+            },
+        ],
+        raw_logs={"runtime/logs/beta.log": bad_bytes},
+        receipts={
+            "r1_missing.json": {
+                "receipt_id": "rec-missing",
+                "raw_log_path": "runtime/logs/absent.log",
+                "raw_sha256": "2" * 64,
+            },
+            "r2_mismatch.json": {
+                "receipt_id": "rec-mismatch",
+                "raw_log_path": "runtime/logs/beta.log",
+                "raw_sha256": "a" * 64,
+            },
+        },
+    )
+
+    dirs_before, files_before = _snapshot_tree(projects_root)
+
+    # 1. Fast path (default verify_evidence=False)
+    fast_snap = discover_and_aggregate_projects(projects_root)
+    assert isinstance(fast_snap, MultiProjectDashboardSnapshot)
+    assert fast_snap.read_only is True
+    assert fast_snap.verify_evidence is False
+    assert fast_snap.total_projects == 2
+    assert [p.project_id for p in fast_snap.projects] == ["alpha", "beta"]
+
+    alpha_fast = fast_snap.projects[0]
+    assert alpha_fast.current_phase == "d02"
+    assert alpha_fast.latest_review_verdict == "PASS"
+    assert alpha_fast.queue.total == 4
+    assert alpha_fast.queue.pending == 1
+    assert alpha_fast.queue.in_progress == 1
+    assert alpha_fast.queue.completed == 1
+    assert alpha_fast.queue.failed == 1
+    assert alpha_fast.queue.reconciliation_required == 1
+    assert alpha_fast.repair_budget.present is True
+    assert alpha_fast.repair_budget.outer_used == 3
+    assert alpha_fast.repair_budget.outer_limit == 10
+    assert alpha_fast.repair_budget.outer_remaining == 7
+    assert alpha_fast.repair_budget.inner_used == 3
+    assert alpha_fast.repair_budget.inner_limit == 4
+    assert alpha_fast.repair_budget.inner_remaining == 1
+    assert alpha_fast.repair_budget.worker_invocations_consumed == 5
+    assert alpha_fast.repair_budget.worker_invocations_remaining == 15
+    assert alpha_fast.model_eligibility == {
+        "gemini-4-hydrogen-medium": "QUALIFIED",
+        "gpt-5.3-codex": "UNOBSERVED",
+    }
+    assert [e.state for e in alpha_fast.evidence_items] == ["NOT_CHECKED", "NOT_CHECKED"]
+
+    beta_fast = fast_snap.projects[1]
+    assert beta_fast.queue.reconciliation_required == 1
+    assert beta_fast.model_eligibility == {}
+    assert [e.state for e in beta_fast.evidence_items] == ["NOT_CHECKED", "NOT_CHECKED"]
+
+    # 2. Verified path (verify_evidence=True) + observed_model_eligibility override
+    verified_snap = discover_and_aggregate_projects(
+        projects_root,
+        verify_evidence=True,
+        observed_model_eligibility={"beta": {"gemini-3.8-flash-medium": "QUOTA_EXHAUSTED"}},
+    )
+    assert verified_snap.verify_evidence is True
+    alpha_ver, beta_ver = verified_snap.projects
+    assert [e.state for e in alpha_ver.evidence_items] == ["PRESENT_VERIFIED", "PRUNED"]
+    assert [e.state for e in beta_ver.evidence_items] == ["MISSING", "HASH_MISMATCH"]
+    assert beta_ver.model_eligibility == {"gemini-3.8-flash-medium": "QUOTA_EXHAUSTED"}
+
+    # 3. HTML render and strict zero-mutation check
+    html_out = render_multi_project_html(verified_snap)
+    assert "READ-ONLY" in html_out
+    assert "<style>" in html_out
+    assert "http://" not in html_out
+    assert "https://" not in html_out
+
+    dirs_after, files_after = _snapshot_tree(projects_root)
+    assert dirs_after == dirs_before
+    assert files_after == files_before
+
+
+def test_render_multi_project_html_escapes_xss(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    _seed_project(
+        projects_root,
+        "xss-check",
+        phase_id="d02",
+        review_verdict="<script>alert(1)</script>",
+        receipts={
+            "r1.json": {
+                "receipt_id": "<img src=x onerror=alert(2)>",
+                "raw_log_path": "logs/<svg/onload=alert(3)>.log",
+                "raw_sha256": "0" * 64,
+            }
+        },
+    )
+    snap = discover_and_aggregate_projects(projects_root)
+    rendered = render_multi_project_html(snap)
+    assert "<script>alert(1)</script>" not in rendered
+    assert "<img src=x onerror=alert(2)>" not in rendered
+    assert "<svg/onload=alert(3)>" not in rendered
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+    assert "READ-ONLY" in rendered
+    assert "http://" not in rendered
+    assert "https://" not in rendered
+
+
+def test_http_server_multi_project_routes_and_read_only_405(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    log_bytes = b"http check log\n"
+    _seed_project(
+        projects_root,
+        "srv-proj",
+        raw_logs={"runtime/logs/srv.log": log_bytes},
+        receipts={
+            "r1.json": {
+                "receipt_id": "rec-srv",
+                "raw_log_path": "runtime/logs/srv.log",
+                "raw_sha256": _sha256_bytes(log_bytes),
+            }
+        },
+    )
+    dirs_before, files_before = _snapshot_tree(projects_root)
+
+    service = DashboardService()
+    app = DashboardApplication(service, projects_root=projects_root)
+    with DashboardHttpServer(app) as srv:
+        # Existing route preserved
+        with urllib.request.urlopen(f"{srv.base_url}/api/v1/health") as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read().decode("utf-8"))["status"] == "ok"
+
+        # HTML multi-project route
+        with urllib.request.urlopen(f"{srv.base_url}/multi-project") as resp:
+            assert resp.status == 200
+            html_body = resp.read().decode("utf-8")
+            assert "READ-ONLY" in html_body
+            assert "srv-proj" in html_body
+            assert "NOT_CHECKED" in html_body
+
+        # JSON multi-project route (fast path)
+        with urllib.request.urlopen(f"{srv.base_url}/api/multi-project") as resp:
+            assert resp.status == 200
+            data = json.loads(resp.read().decode("utf-8"))
+            assert data["read_only"] is True
+            assert data["verify_evidence"] is False
+            assert data["projects"][0]["evidence_items"][0]["state"] == "NOT_CHECKED"
+
+        # JSON multi-project route (?verify_evidence=1)
+        with urllib.request.urlopen(f"{srv.base_url}/api/multi-project?verify_evidence=1") as resp:
+            assert resp.status == 200
+            data_ver = json.loads(resp.read().decode("utf-8"))
+            assert data_ver["verify_evidence"] is True
+            assert data_ver["projects"][0]["evidence_items"][0]["state"] == "PRESENT_VERIFIED"
+
+        # Non-GET/HEAD requests strictly return HTTP 405
+        for method in ("POST", "PUT", "DELETE", "PATCH"):
+            for route in ("/multi-project", "/api/multi-project"):
+                req = urllib.request.Request(f"{srv.base_url}{route}", data=b"{}", method=method)
+                try:
+                    urllib.request.urlopen(req)
+                    raise AssertionError(f"Expected 405 for {method} {route}")
+                except urllib.error.HTTPError as exc:
+                    assert exc.code == 405
+
+        # HEAD is allowed
+        head_req = urllib.request.Request(f"{srv.base_url}/api/multi-project", method="HEAD")
+        with urllib.request.urlopen(head_req) as resp:
+            assert resp.status == 200
+
+    # Default constructor without projects_root preserves 404 on /multi-project
+    default_app = DashboardApplication(service)
+    assert default_app.handle_request("GET", "/multi-project").status_code == 404
+    assert default_app.handle_request("GET", "/api/multi-project").status_code == 404
+
+    dirs_after, files_after = _snapshot_tree(projects_root)
+    assert dirs_after == dirs_before
+    assert files_after == files_before
+
+
+def test_cli_entrypoint_json_and_html(tmp_path: Path, capsys: Any) -> None:
+    projects_root = tmp_path / "projects"
+    _seed_project(projects_root, "cli-proj")
+
+    rc_json = multi_project_main(["--projects-root", str(projects_root), "--format", "json"])
+    assert rc_json == 0
+    out_json = json.loads(capsys.readouterr().out)
+    assert out_json["total_projects"] == 1
+    assert out_json["projects"][0]["project_id"] == "cli-proj"
+
+    rc_html = multi_project_main(
+        ["--projects-root", str(projects_root), "--verify-evidence", "--format", "html"]
+    )
+    assert rc_html == 0
+    out_html = capsys.readouterr().out
+    assert "READ-ONLY" in out_html
+    assert "cli-proj" in out_html

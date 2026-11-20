@@ -5,14 +5,27 @@ import json
 import re
 import threading
 import urllib.parse
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Self
 
 from aipc.dashboard.errors import DashboardError, ProjectNotFoundError
 from aipc.dashboard.html import render_dashboard_html, render_projects_index_html
+from aipc.dashboard.multi_project import (
+    discover_and_aggregate_projects,
+    render_multi_project_html,
+)
 from aipc.dashboard.service import DashboardService
 from aipc.domain.models import CanonicalRecord
 
 _SAFE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def _parse_verify_evidence(query: str) -> bool:
+    """Parse ?verify_evidence=1|true query parameter."""
+    params = urllib.parse.parse_qs(query)
+    values = params.get("verify_evidence", [])
+    return any(v.strip().lower() in {"1", "true", "yes"} for v in values)
 
 
 class DashboardResponse(CanonicalRecord):
@@ -26,12 +39,19 @@ class DashboardResponse(CanonicalRecord):
 class DashboardApplication:
     """Read-only request router dispatching API and HTML requests."""
 
-    def __init__(self, service: DashboardService):
+    def __init__(
+        self,
+        service: DashboardService,
+        projects_root: Path | str | None = None,
+        observed_model_eligibility: Mapping[str, Any] | None = None,
+    ):
         self.service = service
+        self.projects_root = Path(projects_root) if projects_root is not None else None
+        self.observed_model_eligibility = observed_model_eligibility
 
     def handle_request(self, method: str, raw_path: str) -> DashboardResponse:
-        """Route request and return a DashboardResponse; fail closed on non-GET."""
-        if method.upper() != "GET":
+        """Route request and return a DashboardResponse; fail closed on non-GET/HEAD."""
+        if method.upper() not in {"GET", "HEAD"}:
             return DashboardResponse(
                 status_code=405,
                 content_type="application/json",
@@ -45,6 +65,33 @@ class DashboardApplication:
         path = parsed.path.rstrip("/")
         if not path:
             path = "/"
+
+        # 0. Optional read-only Multi-Project Monitor routes (Milestone D D02)
+        if self.projects_root is not None:
+            if path == "/multi-project":
+                verify = _parse_verify_evidence(parsed.query)
+                snapshot = discover_and_aggregate_projects(
+                    self.projects_root,
+                    verify_evidence=verify,
+                    observed_model_eligibility=self.observed_model_eligibility,
+                )
+                return DashboardResponse(
+                    status_code=200,
+                    content_type="text/html; charset=utf-8",
+                    body=render_multi_project_html(snapshot),
+                )
+            if path == "/api/multi-project":
+                verify = _parse_verify_evidence(parsed.query)
+                snapshot = discover_and_aggregate_projects(
+                    self.projects_root,
+                    verify_evidence=verify,
+                    observed_model_eligibility=self.observed_model_eligibility,
+                )
+                return DashboardResponse(
+                    status_code=200,
+                    content_type="application/json",
+                    body=json.dumps(snapshot.model_dump(mode="json"), indent=2),
+                )
 
         # 1. Health check
         if path == "/api/v1/health":
@@ -225,29 +272,36 @@ def _make_handler(app: DashboardApplication):
     """Create a stdlib request handler dispatching all methods to the application."""
 
     class _Handler(http.server.BaseHTTPRequestHandler):
-        def _dispatch(self) -> None:
+        def _dispatch(self, *, send_body: bool = True) -> None:
             resp = app.handle_request(self.command, self.path)
             self.send_response(resp.status_code)
             self.send_header("Content-Type", resp.content_type)
             body_bytes = resp.body.encode("utf-8")
             self.send_header("Content-Length", str(len(body_bytes)))
             self.end_headers()
-            self.wfile.write(body_bytes)
+            if send_body:
+                self.wfile.write(body_bytes)
 
         def do_GET(self) -> None:
-            self._dispatch()
+            self._dispatch(send_body=True)
+
+        def do_HEAD(self) -> None:
+            self._dispatch(send_body=False)
 
         def do_POST(self) -> None:
-            self._dispatch()
+            self._dispatch(send_body=True)
 
         def do_PUT(self) -> None:
-            self._dispatch()
+            self._dispatch(send_body=True)
 
         def do_DELETE(self) -> None:
-            self._dispatch()
+            self._dispatch(send_body=True)
 
         def do_PATCH(self) -> None:
-            self._dispatch()
+            self._dispatch(send_body=True)
+
+        def do_OPTIONS(self) -> None:
+            self._dispatch(send_body=True)
 
         def log_message(self, format: str, *args: Any) -> None:
             # Suppress default noisy stderr logging during test runs
