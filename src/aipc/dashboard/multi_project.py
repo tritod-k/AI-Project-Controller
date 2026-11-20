@@ -23,12 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import Field, StrictBool, StrictStr, ValidationError, model_validator
+from pydantic import ConfigDict, Field, StrictBool, StrictStr, ValidationError, model_validator
 
-from aipc.adapters.subscription_qualification import (
-    ModelEligibilityState,
-    ProviderRuntimeQualificationReport,
-)
 from aipc.dashboard.security import redact_secrets
 from aipc.domain.models import CanonicalRecord, NonBlank, NonNegativeInt, Timestamp
 
@@ -38,6 +34,13 @@ EvidenceState = Literal[
     "PRUNED",
     "MISSING",
     "HASH_MISMATCH",
+]
+ModelEligibilityState = Literal[
+    "QUALIFIED",
+    "BLOCKED",
+    "UNAVAILABLE",
+    "RATE_LIMITED",
+    "QUOTA_EXHAUSTED",
 ]
 ModelEligibilityDisplayState = Literal[
     "QUALIFIED",
@@ -51,11 +54,26 @@ ModelEligibilityDisplayState = Literal[
 _CANONICAL_MODEL_ELIGIBILITY_STATES: frozenset[str] = frozenset(
     {"QUALIFIED", "BLOCKED", "UNAVAILABLE", "RATE_LIMITED", "QUOTA_EXHAUSTED"}
 )
-_ALLOWED_DISPLAY_ELIGIBILITY_STATES: frozenset[str] = (
-    _CANONICAL_MODEL_ELIGIBILITY_STATES | {"UNOBSERVED"}
-)
+_ALLOWED_DISPLAY_ELIGIBILITY_STATES: frozenset[str] = _CANONICAL_MODEL_ELIGIBILITY_STATES | {
+    "UNOBSERVED"
+}
 
 _SHA256_CHUNK_BYTES = 65536
+
+
+class _QualificationReportProvenanceView(CanonicalRecord):
+    """Provider-neutral schema view validating qualification-report provenance."""
+
+    model_config = ConfigDict(extra="allow", frozen=True, str_strip_whitespace=True)
+
+    provider_id: NonBlank
+    provider_family: Literal["openai_codex", "google_antigravity"]
+    operating_profile: Literal["subscription_only"]
+    auth_mode: Literal["codex_subscription", "antigravity_subscription"]
+    eligibility_state: Literal["QUALIFIED", "BLOCKED", "UNAVAILABLE"]
+    available: StrictBool
+    subscription_auth_present: StrictBool
+    model_eligibility: dict[NonBlank, ModelEligibilityState] = Field(default_factory=dict)
 
 
 class ModelEligibilityObservation(CanonicalRecord):
@@ -71,9 +89,7 @@ class ModelEligibilityObservation(CanonicalRecord):
     @model_validator(mode="after")
     def validate_provider_provenance(self) -> Self:
         if self.provider_id is None and self.provider_family is None:
-            raise ValueError(
-                "ModelEligibilityObservation requires provider_id or provider_family"
-            )
+            raise ValueError("ModelEligibilityObservation requires provider_id or provider_family")
         return self
 
 
@@ -403,11 +419,14 @@ def _extract_from_qualification_report(
     candidate: Any,
     model_states: dict[str, str],
 ) -> bool:
-    """Populate model_states from a schema-validated ProviderRuntimeQualificationReport."""
-    if not isinstance(candidate, ProviderRuntimeQualificationReport | Mapping):
+    """Populate model_states from a schema-validated qualification report."""
+    raw: Any = candidate
+    if hasattr(candidate, "model_dump") and callable(candidate.model_dump):
+        raw = candidate.model_dump(mode="python")
+    if not isinstance(raw, Mapping):
         return False
     try:
-        report = ProviderRuntimeQualificationReport.model_validate(candidate)
+        report = _QualificationReportProvenanceView.model_validate(raw)
     except ValidationError:
         return False
     for model_id, state in report.model_eligibility.items():

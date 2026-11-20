@@ -25,6 +25,8 @@ from aipc.dashboard import (
 )
 from aipc.dashboard.multi_project import (
     ModelEligibilityObservation,
+)
+from aipc.dashboard.multi_project import (
     main as multi_project_main,
 )
 
