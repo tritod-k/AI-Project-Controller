@@ -9,6 +9,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from aipc.adapters.subscription_qualification import (
+    ProviderRuntimeQualificationReport,
+    SandboxConstraintSummary,
+    SurfaceCapabilitySummary,
+)
 from aipc.dashboard import (
     DashboardApplication,
     DashboardHttpServer,
@@ -18,7 +23,53 @@ from aipc.dashboard import (
     discover_and_aggregate_projects,
     render_multi_project_html,
 )
-from aipc.dashboard.multi_project import main as multi_project_main
+from aipc.dashboard.multi_project import (
+    ModelEligibilityObservation,
+    main as multi_project_main,
+)
+
+
+def _make_qualification_report(
+    *,
+    model_eligibility: dict[str, str],
+    provider_id: str = "google_antigravity",
+    provider_family: str = "google_antigravity",
+    auth_mode: str = "antigravity_subscription",
+) -> dict[str, Any]:
+    report = ProviderRuntimeQualificationReport(
+        provider_id=provider_id,
+        provider_family=provider_family,  # type: ignore[arg-type]
+        auth_mode=auth_mode,  # type: ignore[arg-type]
+        eligibility_state="QUALIFIED",
+        available=True,
+        subscription_auth_present=True,
+        supported_model_ids=tuple(model_eligibility.keys()),
+        model_eligibility=model_eligibility,  # type: ignore[arg-type]
+        account_independent_metadata={"secret_read_performed": False},
+        surfaces=SurfaceCapabilitySummary(
+            desktop_ui_present=False,
+            cli_headless_present=True,
+            sdk_present=False,
+            headless_worker_supported=True,
+            headless_reviewer_supported=True,
+            headless_planner_supported=True,
+        ),
+        sandbox_constraints=SandboxConstraintSummary(
+            os_kernel_sandbox_verified=True,
+            workspace_isolation_mode="git_worktree",
+            allowed_modes=("read_only", "workspace_write"),
+            shell_execution="AVAILABLE",
+            git_execution="AVAILABLE",
+            network_access="SANDBOXED",
+        ),
+        capability_evidence={"headless_cli": "AVAILABLE"},
+        role_eligibility={
+            "planner": "QUALIFIED",
+            "worker": "QUALIFIED",
+            "reviewer": "QUALIFIED",
+        },
+    )
+    return report.model_dump(mode="json")
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -199,7 +250,9 @@ def test_discover_and_aggregate_projects_and_zero_mutation(tmp_path: Path) -> No
                 "receipt_id": "rec-ok",
                 "raw_log_path": "runtime/logs/alpha.log",
                 "raw_sha256": ok_sha,
-                "model_states": {"gemini-4-hydrogen-medium": "QUALIFIED"},
+                "qualification_report": _make_qualification_report(
+                    model_eligibility={"gemini-4-hydrogen-medium": "QUALIFIED"}
+                ),
             },
             "r2_pruned.json": {
                 "receipt_id": "rec-pruned",
@@ -417,3 +470,123 @@ def test_cli_entrypoint_json_and_html(tmp_path: Path, capsys: Any) -> None:
     out_html = capsys.readouterr().out
     assert "READ-ONLY" in out_html
     assert "cli-proj" in out_html
+
+
+def test_model_eligibility_accepts_validated_observations_with_provenance(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    obs = ModelEligibilityObservation(
+        model_id="gemini-3.8-flash-medium",
+        provider_id="google_antigravity",
+        provider_family="google_antigravity",
+        state="RATE_LIMITED",
+        source="qualify_antigravity_subscription_runtime",
+        observed_at="2026-11-20T21:30:00Z",
+    )
+    _seed_project(
+        projects_root,
+        "obs-proj",
+        receipts={
+            "r1_obs_list.json": {
+                "receipt_id": "rec-obs-1",
+                "model_eligibility_observations": [obs.model_dump(mode="json")],
+            },
+            "r2_obs_dict.json": {
+                "receipt_id": "rec-obs-2",
+                "observed_model_eligibility": {
+                    "gpt-5.3-codex": {
+                        "provider_family": "openai_codex",
+                        "state": "QUALIFIED",
+                        "source": "qualify_codex_subscription_runtime",
+                        "observed_at": "2026-11-20T21:35:00Z",
+                    }
+                },
+            },
+        },
+    )
+
+    snap = discover_and_aggregate_projects(projects_root)
+    assert snap.projects[0].model_eligibility == {
+        "gemini-3.8-flash-medium": "RATE_LIMITED",
+        "gpt-5.3-codex": "QUALIFIED",
+    }
+
+
+def test_model_eligibility_rejects_generic_state_and_unvalidated_provenance(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    _seed_project(
+        projects_root,
+        "neg-proj",
+        receipts={
+            "r1_generic_qual.json": {
+                "receipt_id": "rec-generic-1",
+                "selected_model": "gemini-4-hydrogen-medium",
+                "qualification_state": "QUALIFIED",
+            },
+            "r2_generic_runtime.json": {
+                "receipt_id": "rec-generic-2",
+                "model_id": "gpt-5.3-codex",
+                "runtime_state": "QUALIFIED",
+                "model_state": "QUALIFIED",
+            },
+            "r3_bare_unvalidated.json": {
+                "receipt_id": "rec-bare",
+                "model_eligibility": {
+                    "bare-model-ok": "QUALIFIED",
+                    "arbitrary-model": "ARBITRARY_OK",
+                    "supported-model": "SUPPORTED",
+                },
+                "model_states": {
+                    "totally-fine-model": "TOTALLY_FINE",
+                },
+            },
+            "r4_malformed_obs.json": {
+                "receipt_id": "rec-bad-obs",
+                "model_eligibility_observations": [
+                    {
+                        "model_id": "missing-provider",
+                        "state": "QUALIFIED",
+                        "source": "unit-test",
+                        "observed_at": "2026-11-20T21:40:00Z",
+                    },
+                    {
+                        "model_id": "bad-state-obs",
+                        "provider_id": "google_antigravity",
+                        "state": "TOTALLY_FINE",
+                        "source": "unit-test",
+                        "observed_at": "2026-11-20T21:40:00Z",
+                    },
+                    {
+                        "model_id": "bad-ts-obs",
+                        "provider_id": "google_antigravity",
+                        "state": "QUALIFIED",
+                        "source": "unit-test",
+                        "observed_at": "not-an-iso-timestamp",
+                    },
+                ],
+            },
+        },
+    )
+
+    snap = discover_and_aggregate_projects(
+        projects_root,
+        observed_model_eligibility={
+            "neg-proj": {
+                "external-arbitrary": "ARBITRARY_OK",
+                "external-valid": "BLOCKED",
+            }
+        },
+    )
+    eligibility = snap.projects[0].model_eligibility
+    assert eligibility == {
+        "arbitrary-model": "UNOBSERVED",
+        "bad-state-obs": "UNOBSERVED",
+        "bad-ts-obs": "UNOBSERVED",
+        "bare-model-ok": "UNOBSERVED",
+        "external-arbitrary": "UNOBSERVED",
+        "external-valid": "BLOCKED",
+        "gemini-4-hydrogen-medium": "UNOBSERVED",
+        "gpt-5.3-codex": "UNOBSERVED",
+        "missing-provider": "UNOBSERVED",
+        "supported-model": "UNOBSERVED",
+        "totally-fine-model": "UNOBSERVED",
+    }

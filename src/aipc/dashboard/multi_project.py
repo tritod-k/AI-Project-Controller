@@ -21,10 +21,14 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import Field, StrictBool, StrictStr
+from pydantic import Field, StrictBool, StrictStr, ValidationError, model_validator
 
+from aipc.adapters.subscription_qualification import (
+    ModelEligibilityState,
+    ProviderRuntimeQualificationReport,
+)
 from aipc.dashboard.security import redact_secrets
 from aipc.domain.models import CanonicalRecord, NonBlank, NonNegativeInt, Timestamp
 
@@ -35,8 +39,42 @@ EvidenceState = Literal[
     "MISSING",
     "HASH_MISMATCH",
 ]
+ModelEligibilityDisplayState = Literal[
+    "QUALIFIED",
+    "BLOCKED",
+    "UNAVAILABLE",
+    "RATE_LIMITED",
+    "QUOTA_EXHAUSTED",
+    "UNOBSERVED",
+]
+
+_CANONICAL_MODEL_ELIGIBILITY_STATES: frozenset[str] = frozenset(
+    {"QUALIFIED", "BLOCKED", "UNAVAILABLE", "RATE_LIMITED", "QUOTA_EXHAUSTED"}
+)
+_ALLOWED_DISPLAY_ELIGIBILITY_STATES: frozenset[str] = (
+    _CANONICAL_MODEL_ELIGIBILITY_STATES | {"UNOBSERVED"}
+)
 
 _SHA256_CHUNK_BYTES = 65536
+
+
+class ModelEligibilityObservation(CanonicalRecord):
+    """Schema-validated per-model eligibility observation with explicit provenance."""
+
+    model_id: NonBlank
+    provider_id: NonBlank | None = None
+    provider_family: NonBlank | None = None
+    state: ModelEligibilityState
+    source: NonBlank
+    observed_at: Timestamp
+
+    @model_validator(mode="after")
+    def validate_provider_provenance(self) -> Self:
+        if self.provider_id is None and self.provider_family is None:
+            raise ValueError(
+                "ModelEligibilityObservation requires provider_id or provider_family"
+            )
+        return self
 
 
 class QueueCountsView(CanonicalRecord):
@@ -84,7 +122,7 @@ class MultiProjectItemView(CanonicalRecord):
     queue: QueueCountsView = Field(default_factory=QueueCountsView)
     latest_review_verdict: NonBlank | None = None
     repair_budget: RepairBudgetSummaryView = Field(default_factory=RepairBudgetSummaryView)
-    model_eligibility: dict[NonBlank, NonBlank] = Field(default_factory=dict)
+    model_eligibility: dict[NonBlank, ModelEligibilityDisplayState] = Field(default_factory=dict)
     evidence_items: tuple[EvidenceItemView, ...] = ()
     warnings: tuple[StrictStr, ...] = ()
 
@@ -352,32 +390,104 @@ def _aggregate_repair_budget(budget_data: Any) -> RepairBudgetSummaryView:
     )
 
 
+def _normalize_display_eligibility_state(raw_state: Any) -> ModelEligibilityDisplayState:
+    """Validate an eligibility state against canonical ModelEligibilityState | {'UNOBSERVED'}."""
+    if isinstance(raw_state, str):
+        cleaned = raw_state.strip()
+        if cleaned in _ALLOWED_DISPLAY_ELIGIBILITY_STATES:
+            return cleaned  # type: ignore[return-value]
+    return "UNOBSERVED"
+
+
+def _extract_from_qualification_report(
+    candidate: Any,
+    model_states: dict[str, str],
+) -> bool:
+    """Populate model_states from a schema-validated ProviderRuntimeQualificationReport."""
+    if not isinstance(candidate, ProviderRuntimeQualificationReport | Mapping):
+        return False
+    try:
+        report = ProviderRuntimeQualificationReport.model_validate(candidate)
+    except ValidationError:
+        return False
+    for model_id, state in report.model_eligibility.items():
+        if isinstance(model_id, str) and model_id.strip():
+            model_states[model_id.strip()] = _normalize_display_eligibility_state(state)
+    return True
+
+
+def _extract_from_observation_entry(
+    entry: Any,
+    model_states: dict[str, str],
+    *,
+    expected_model_id: str | None = None,
+) -> None:
+    """Populate model_states from a validated ModelEligibilityObservation or record UNOBSERVED."""
+    candidate: Any = entry
+    if isinstance(entry, Mapping) and expected_model_id is not None and "model_id" not in entry:
+        candidate = {"model_id": expected_model_id, **entry}
+
+    if isinstance(candidate, ModelEligibilityObservation | Mapping):
+        try:
+            obs = ModelEligibilityObservation.model_validate(candidate)
+        except ValidationError:
+            raw_id = (
+                expected_model_id
+                if expected_model_id is not None
+                else (candidate.get("model_id") if isinstance(candidate, Mapping) else None)
+            )
+            if isinstance(raw_id, str) and raw_id.strip():
+                model_states.setdefault(raw_id.strip(), "UNOBSERVED")
+            return
+        clean_id = obs.model_id.strip()
+        if expected_model_id is not None and clean_id != expected_model_id:
+            model_states.setdefault(expected_model_id, "UNOBSERVED")
+            return
+        model_states[clean_id] = obs.state
+        return
+
+    if expected_model_id is not None:
+        model_states.setdefault(expected_model_id, "UNOBSERVED")
+
+
 def _extract_receipt_model_eligibility(
     receipt: Mapping[str, Any],
     model_states: dict[str, str],
 ) -> None:
-    """Populate genuinely observed model eligibility from a runtime receipt."""
-    for key in ("model_states", "model_eligibility", "observed_model_eligibility"):
-        mapping = receipt.get(key)
-        if isinstance(mapping, Mapping):
-            for model_id, state in mapping.items():
-                if isinstance(model_id, str) and model_id.strip():
-                    if isinstance(state, str) and state.strip():
-                        model_states[model_id.strip()] = state.strip()
-                    else:
-                        model_states.setdefault(model_id.strip(), "UNOBSERVED")
+    """Populate model eligibility strictly from validated qualification reports or observations."""
+    _extract_from_qualification_report(receipt, model_states)
+    for report_key in (
+        "qualification_report",
+        "runtime_qualification",
+        "provider_qualification",
+        "provider_runtime_qualification",
+    ):
+        _extract_from_qualification_report(receipt.get(report_key), model_states)
 
+    for obs_key in (
+        "model_eligibility_observations",
+        "model_observations",
+        "observed_model_eligibility",
+        "model_eligibility",
+        "model_states",
+    ):
+        raw_val = receipt.get(obs_key)
+        if isinstance(raw_val, Sequence) and not isinstance(raw_val, str | bytes | bytearray):
+            for item in raw_val:
+                _extract_from_observation_entry(item, model_states)
+        elif isinstance(raw_val, Mapping):
+            for model_id, entry in raw_val.items():
+                if isinstance(model_id, str) and model_id.strip():
+                    _extract_from_observation_entry(
+                        entry,
+                        model_states,
+                        expected_model_id=model_id.strip(),
+                    )
+
+    # Never map generic adapter/provider qualification_state or runtime_state onto selected_model.
     single_model = receipt.get("selected_model") or receipt.get("model_id")
     if isinstance(single_model, str) and single_model.strip():
-        state_val = (
-            receipt.get("model_state")
-            or receipt.get("qualification_state")
-            or receipt.get("runtime_state")
-        )
-        if isinstance(state_val, str) and state_val.strip():
-            model_states[single_model.strip()] = state_val.strip()
-        else:
-            model_states.setdefault(single_model.strip(), "UNOBSERVED")
+        model_states.setdefault(single_model.strip(), "UNOBSERVED")
 
 
 def _resolve_project_model_eligibility(
@@ -385,20 +495,38 @@ def _resolve_project_model_eligibility(
     observed_model_eligibility: Mapping[str, Any] | None,
     receipt_models: dict[str, str],
 ) -> dict[str, str]:
-    """Combine observed model eligibility without ever inventing QUALIFIED."""
-    resolved: dict[str, str] = dict(receipt_models)
+    """Combine observed model eligibility with strict canonical state validation."""
+    resolved: dict[str, str] = {
+        model_id: _normalize_display_eligibility_state(state)
+        for model_id, state in receipt_models.items()
+        if isinstance(model_id, str) and model_id.strip()
+    }
     if observed_model_eligibility is not None:
         per_project = observed_model_eligibility.get(project_id)
         if isinstance(per_project, Mapping):
-            for model_id, state in per_project.items():
+            for model_id, entry in per_project.items():
                 if isinstance(model_id, str) and model_id.strip():
-                    resolved[model_id.strip()] = (
-                        state.strip() if isinstance(state, str) and state.strip() else "UNOBSERVED"
-                    )
+                    clean_id = model_id.strip()
+                    if isinstance(entry, ModelEligibilityObservation | Mapping):
+                        _extract_from_observation_entry(
+                            entry,
+                            resolved,
+                            expected_model_id=clean_id,
+                        )
+                    else:
+                        resolved[clean_id] = _normalize_display_eligibility_state(entry)
         else:
-            for model_id, state in observed_model_eligibility.items():
-                if isinstance(model_id, str) and model_id.strip() and isinstance(state, str):
-                    resolved[model_id.strip()] = state.strip() if state.strip() else "UNOBSERVED"
+            for model_id, entry in observed_model_eligibility.items():
+                if isinstance(model_id, str) and model_id.strip():
+                    clean_id = model_id.strip()
+                    if isinstance(entry, ModelEligibilityObservation):
+                        _extract_from_observation_entry(
+                            entry,
+                            resolved,
+                            expected_model_id=clean_id,
+                        )
+                    elif isinstance(entry, str):
+                        resolved[clean_id] = _normalize_display_eligibility_state(entry)
     return {k: resolved[k] for k in sorted(resolved)}
 
 
