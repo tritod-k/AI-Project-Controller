@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,7 +28,9 @@ from aipc.controller.repair_budget import DurableRepairBudgetLedger, RepairBudge
 from aipc.controller.task_queue import (
     ApprovedTaskContract,
     PersistentTaskQueue,
+    QueuedTaskRecord,
     QueuedTaskStatus,
+    TaskQueueSnapshot,
     reconcile_queue_and_budget_consistency,
 )
 from aipc.hardening.env_isolation import (
@@ -523,3 +527,219 @@ def test_reconcile_idempotent_repeated_calls_preserves_reserved_budget(tmp_path:
             operation_id="op-repeat-02",
             attempt_id="att-02-task-01",
         )
+
+
+def test_reconcile_preserves_reserved_and_escalates_interrupted_task(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-int-01",
+        attempt_id="att-01-task-01",
+    )
+    queue.begin_dispatch(
+        "task-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-int-01",
+    )
+    queue.mark_interrupted("task-01", reason="worker_crash", quota_exhausted=False)
+    assert queue.load().tasks[0].status == QueuedTaskStatus.INTERRUPTED
+
+    outcome = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome.status == "RECONCILIATION_REQUIRED"
+    assert outcome.released_reservation_ids == ()
+    assert outcome.escalated_task_ids == ("task-01",)
+
+    state = ledger.load()
+    assert state.milestone_consumed == 1
+    assert state.registered_roots["task-01"].consumed == 1
+    assert state.reservations[res.reservation_id].status == "RESERVED"
+
+    snap = queue.load()
+    assert snap.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+    assert snap.tasks[0].reconciliation_required is True
+    assert snap.tasks[0].reconciliation_reason is not None
+    assert snap.tasks[0].blocker_reason is not None
+
+
+def test_reconcile_preserves_reserved_and_escalates_waiting_provider_task(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-wp-01",
+        attempt_id="att-01-task-01",
+    )
+    queue.begin_dispatch(
+        "task-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-wp-01",
+    )
+    queue.mark_interrupted("task-01", reason="quota_exhausted", quota_exhausted=True)
+    assert queue.load().tasks[0].status == QueuedTaskStatus.WAITING_PROVIDER
+
+    outcome = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome.status == "RECONCILIATION_REQUIRED"
+    assert outcome.released_reservation_ids == ()
+    assert outcome.escalated_task_ids == ("task-01",)
+
+    state = ledger.load()
+    assert state.milestone_consumed == 1
+    assert state.registered_roots["task-01"].consumed == 1
+    assert state.reservations[res.reservation_id].status == "RESERVED"
+
+    snap = queue.load()
+    assert snap.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+    assert snap.tasks[0].reconciliation_required is True
+
+
+def test_reconcile_running_requires_exact_non_empty_attempt_id_and_operation_id(
+    tmp_path: Path,
+) -> None:
+    contract = _make_contract("task-01")
+    for task_att, res_att, res_consumed_att in (
+        (None, None, None),
+        (None, "att-01-task-01", "att-01-task-01"),
+        ("att-01-task-01", None, None),
+    ):
+        task = QueuedTaskRecord.model_construct(
+            contract=contract,
+            status=QueuedTaskStatus.RUNNING,
+            current_attempt=1,
+            active_attempt_id=task_att,
+            operation_id="op-run-01",
+            attempts=(),
+            reconciliation_required=False,
+            reconciliation_reason=None,
+        )
+        snap = TaskQueueSnapshot.model_construct(
+            schema_version="1.0",
+            project_id="proj-d01",
+            milestone_id="phase-24",
+            stop_at_milestone_boundary=True,
+            tasks=(task,),
+            updated_at=_fixed_now(),
+        )
+        saved: list[TaskQueueSnapshot] = []
+        queue_stub = SimpleNamespace(
+            load=lambda s=snap: s,
+            _save=lambda updated, out=saved: out.append(updated),
+            _clock=_fixed_now,
+        )
+        res = SimpleNamespace(
+            reservation_id="res-01",
+            task_id="task-01",
+            status="CONSUMED",
+            operation_id="op-run-01",
+            attempt_id=res_att,
+            consumed_attempt_id=res_consumed_att,
+        )
+        ledger_stub = SimpleNamespace(
+            load=lambda r=res: SimpleNamespace(reservations={"res-01": r}),
+        )
+
+        outcome = reconcile_queue_and_budget_consistency(
+            queue_stub,  # type: ignore[arg-type]
+            ledger_stub,
+        )
+        assert outcome.status == "RECONCILIATION_REQUIRED"
+        assert outcome.escalated_task_ids == ("task-01",)
+        assert len(saved) == 1
+        assert saved[0].tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+        assert saved[0].tasks[0].reconciliation_required is True
+
+    # Matching non-empty operation_id and attempt_id returns CONSISTENT
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-run-ok",
+        attempt_id="att-01-task-01",
+    )
+    queue.begin_dispatch(
+        "task-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-run-ok",
+    )
+    ledger.finalize_attempt_budget(
+        operation_id="op-run-ok",
+        attempt_id="att-01-task-01",
+        worker_id="w-01",
+        provider="mock",
+    )
+
+    ok_outcome = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert ok_outcome.status == "CONSISTENT"
+    assert ok_outcome.released_reservation_ids == ()
+    assert ok_outcome.escalated_task_ids == ()
+
+
+def test_load_operator_hmac_key_rejects_symlinked_ancestor_deterministic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_dir = tmp_path / "trusted_parent"
+    nested_dir = parent_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    key_file = nested_dir / "operator.key"
+    key_file.write_bytes(b"e" * 32)
+
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self == parent_dir)
+    with pytest.raises(MilestoneAuthorizationError, match="symlink"):
+        load_operator_hmac_key(key_file)
+
+
+def test_load_operator_hmac_key_rejects_real_os_symlink_ancestor(tmp_path: Path) -> None:
+    real_dir = tmp_path / "real_trusted"
+    real_dir.mkdir()
+    real_key = real_dir / "operator.key"
+    real_key.write_bytes(b"f" * 32)
+
+    sym_parent = tmp_path / "sym_trusted"
+    try:
+        os.symlink(real_dir, sym_parent, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege (winerror 1314) unavailable")
+        raise
+
+    with pytest.raises(MilestoneAuthorizationError, match="symlink"):
+        load_operator_hmac_key(sym_parent / "operator.key")

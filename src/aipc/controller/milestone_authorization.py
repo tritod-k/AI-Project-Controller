@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -538,6 +539,34 @@ def _coerce_payload_mapping(payload: Mapping[str, Any] | BaseModel) -> dict[str,
     raise MilestoneAuthorizationError("Approval HMAC payload must be a mapping or record model")
 
 
+def _assert_no_symlink_in_path(raw_path: Path) -> None:
+    """Reject any symlink at the leaf path or any ancestor directory before root/anchor."""
+    paths_to_check = [raw_path]
+    if not raw_path.is_absolute():
+        paths_to_check.append(Path.cwd() / raw_path)
+
+    for target in paths_to_check:
+        for candidate in (target, *target.parents):
+            if candidate == candidate.parent:
+                break
+            if candidate.is_symlink():
+                raise MilestoneAuthorizationError(
+                    f"Operator HMAC key path must not contain a symlink: {candidate}"
+                )
+            try:
+                st = os.lstat(candidate)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise MilestoneAuthorizationError(
+                    f"Cannot inspect operator HMAC key path '{candidate}': {exc}"
+                ) from exc
+            if stat.S_ISLNK(st.st_mode):
+                raise MilestoneAuthorizationError(
+                    f"Operator HMAC key path must not contain a symlink: {candidate}"
+                )
+
+
 def load_operator_hmac_key(
     key_path: Path | str,
     *,
@@ -545,8 +574,7 @@ def load_operator_hmac_key(
 ) -> bytes:
     """Load operator HMAC key bytes, failing closed on forbidden roots, symlinks, or empty."""
     path = Path(key_path)
-    if path.is_symlink():
-        raise MilestoneAuthorizationError(f"Operator HMAC key path must not be a symlink: {path}")
+    _assert_no_symlink_in_path(path)
     for raw_root in forbidden_roots:
         root_path = Path(raw_root)
         res_root = root_path.resolve()

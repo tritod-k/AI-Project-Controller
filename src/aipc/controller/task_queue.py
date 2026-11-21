@@ -1846,32 +1846,54 @@ class ConsistencyReconciliationResult(CanonicalRecord):
     reasons: tuple[str, ...] = ()
 
 
+def _clean_non_empty_str(value: object) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else None
+    return None
+
+
+def _task_never_dispatched(task: QueuedTaskRecord | None) -> bool:
+    """Return True only when canonical queue state proves dispatch never occurred."""
+    if task is None:
+        return True
+    status_val = (
+        task.status.value if isinstance(task.status, QueuedTaskStatus) else str(task.status)
+    )
+    return (
+        status_val in (QueuedTaskStatus.PENDING.value, QueuedTaskStatus.ELIGIBLE.value, "QUEUED")
+        and task.current_attempt == 0
+        and not task.attempts
+        and task.active_attempt_id is None
+        and task.operation_id is None
+        and not task.reconciliation_required
+    )
+
+
 def reconcile_queue_and_budget_consistency(
     queue: PersistentTaskQueue,
     ledger: object,
 ) -> ConsistencyReconciliationResult:
     """Reconcile PersistentTaskQueue and DurableRepairBudgetLedger state fail-closed.
 
-    - Releases orphan RESERVED ledger entries when the queue task is missing or
-      neither RUNNING nor RECONCILIATION_REQUIRED (and reconciliation_required is False).
-    - Escalates RUNNING tasks with RESERVED, ambiguous, or missing/mismatched
-      operation_id entries to RECONCILIATION_REQUIRED without auto-resetting budget.
+    - Releases orphan RESERVED ledger entries ONLY when canonical queue state proves
+      dispatch never occurred (missing task or pre-dispatch with zero attempt/claim history).
+    - Escalates RUNNING or post-dispatch tasks with RESERVED, ambiguous, or
+      missing/mismatched operation_id or attempt_id entries to RECONCILIATION_REQUIRED
+      without releasing RESERVED budget or auto-resetting counters.
     - Leaves healthy COMPLETED/CONSUMED pairs consistent.
     """
     snap = queue.load()
     ledger_state = ledger.load()  # type: ignore[attr-defined]
     tasks_by_id = {t.contract.task_id: t for t in snap.tasks}
 
+    reserved_by_task_id: dict[str, list[str]] = {}
     released_ids: list[str] = []
     reasons: list[str] = []
     for res_id, res in ledger_state.reservations.items():
         if res.status == "RESERVED":
             task = tasks_by_id.get(res.task_id)
-            if task is None or (
-                task.status
-                not in (QueuedTaskStatus.RUNNING, QueuedTaskStatus.RECONCILIATION_REQUIRED)
-                and not task.reconciliation_required
-            ):
+            if _task_never_dispatched(task):
                 ledger.release_attempt_budget(  # type: ignore[attr-defined]
                     reservation_id=res_id,
                     reason="orphan_reserved_task_not_in_progress",
@@ -1880,6 +1902,8 @@ def reconcile_queue_and_budget_consistency(
                 reasons.append(
                     f"Released orphan RESERVED reservation '{res_id}' for task '{res.task_id}'"
                 )
+            else:
+                reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
 
     if released_ids:
         ledger_state = ledger.load()  # type: ignore[attr-defined]
@@ -1904,8 +1928,12 @@ def reconcile_queue_and_budget_consistency(
                 if r.task_id == tid and r.status in ("RESERVED", "CONSUMED")
             ]
             reserved_res = [r for r in active_res if r.status == "RESERVED"]
-            op_id = task.operation_id or (task.attempts[-1].operation_id if task.attempts else None)
-            att_id = task.active_attempt_id
+            op_id = _clean_non_empty_str(task.operation_id) or (
+                _clean_non_empty_str(task.attempts[-1].operation_id) if task.attempts else None
+            )
+            att_id = _clean_non_empty_str(task.active_attempt_id) or (
+                _clean_non_empty_str(task.attempts[-1].attempt_id) if task.attempts else None
+            )
 
             esc_reason: str | None = None
             if reserved_res:
@@ -1917,6 +1945,10 @@ def reconcile_queue_and_budget_consistency(
             elif not op_id:
                 esc_reason = (
                     f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' is missing operation_id"
+                )
+            elif not att_id:
+                esc_reason = (
+                    f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' is missing attempt_id"
                 )
             else:
                 matching = [
@@ -1933,8 +1965,15 @@ def reconcile_queue_and_budget_consistency(
                         f"multiple ledger entries for operation_id '{op_id}'"
                     )
                 else:
-                    res_att = matching[0].attempt_id or matching[0].consumed_attempt_id
-                    if att_id is not None and res_att is not None and res_att != att_id:
+                    res_att = _clean_non_empty_str(matching[0].attempt_id) or _clean_non_empty_str(
+                        matching[0].consumed_attempt_id
+                    )
+                    if not res_att:
+                        esc_reason = (
+                            f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' ledger entry "
+                            f"'{matching[0].reservation_id}' is missing attempt_id"
+                        )
+                    elif res_att != att_id:
                         esc_reason = (
                             f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' attempt_id "
                             f"'{att_id}' mismatches ledger '{res_att}'"
@@ -1956,6 +1995,25 @@ def reconcile_queue_and_budget_consistency(
                 )
             else:
                 updated_tasks.append(task)
+        elif tid in reserved_by_task_id:
+            res_list = reserved_by_task_id[tid]
+            esc_reason = (
+                f"RECONCILIATION_REQUIRED: task '{tid}' (status={task.status}) has unfinalized "
+                f"RESERVED ledger entries {res_list}"
+            )
+            queue_dirty = True
+            escalated_ids.append(tid)
+            reasons.append(esc_reason)
+            updated_tasks.append(
+                task.model_copy(
+                    update={
+                        "status": QueuedTaskStatus.RECONCILIATION_REQUIRED,
+                        "reconciliation_required": True,
+                        "reconciliation_reason": esc_reason,
+                        "blocker_reason": esc_reason,
+                    }
+                )
+            )
         else:
             updated_tasks.append(task)
 
