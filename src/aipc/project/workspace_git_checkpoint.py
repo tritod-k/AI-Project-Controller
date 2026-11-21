@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fnmatch
 import hashlib
 import os
 import re
@@ -28,6 +29,41 @@ _REQUIRED_GITIGNORE_EXCLUSIONS: tuple[str, ...] = (
     "*.key",
     ".env*",
 )
+_ALLOWED_GITIGNORE_PATTERNS: dict[str, frozenset[str]] = {
+    "stable_c/": frozenset(
+        {
+            "stable_c/",
+            "/stable_c/",
+            "stable_c",
+            "/stable_c",
+            "**/stable_c/",
+            "**/stable_c",
+        }
+    ),
+    "worktrees/": frozenset(
+        {
+            "worktrees/",
+            "worktrees",
+            "**/worktrees/",
+            "**/worktrees",
+            "**/runtime/worktrees/",
+            "**/runtime/worktrees",
+        }
+    ),
+    "logs/": frozenset(
+        {
+            "logs/",
+            "logs",
+            "**/logs/",
+            "**/logs",
+            "**/runtime/logs/",
+            "**/runtime/logs",
+        }
+    ),
+    "*.lock": frozenset({"*.lock", "**/*.lock"}),
+    "*.key": frozenset({"*.key", "**/*.key"}),
+    ".env*": frozenset({".env*", "**/.env*", "/.env*"}),
+}
 _QUIESCENT_TASK_STATUSES: frozenset[str] = frozenset(
     {
         "PENDING",
@@ -66,9 +102,13 @@ _GH_TOKEN_RE = re.compile(
 )
 _PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 _KV_SECRET_RE = re.compile(
-    r"""(?i)(api[_-]?key|token|password|secret)\s*([:=])\s*['"]?([^\s'"]+)['"]?"""
+    r"""(?i)(api[_-]?key|token|password|secret)['"]?\s*([:=])\s*"""
+    r"""(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s'"\r\n]+))"""
 )
-_AUTH_HEADER_RE = re.compile(r"""(?i)(authorization)\s*([:=])\s*['"]?(?!Bearer\s)([^\s'"]+)['"]?""")
+_AUTH_HEADER_RE = re.compile(
+    r"""(?i)(authorization)['"]?\s*([:=])\s*"""
+    r"""(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s'"\r\n]+))"""
+)
 _EXPRESSION_PREFIXES = ("(", "$", "{", "[", "<", "*", "%", ",")
 _NON_SECRET_LITERALS: frozenset[str] = frozenset({"null", "none", "true", "false"})
 
@@ -200,13 +240,45 @@ def _walk_workspace_files(workspace_root: Path) -> tuple[list[Path], list[str]]:
     return files, violations
 
 
-def _gitignore_covers_exclusion(active_lines: set[str], required: str) -> bool:
-    for line in active_lines:
-        if line.startswith("!"):
-            continue
-        if line == required or line.endswith(f"/{required}"):
-            return True
+def _negation_affects_exclusion(neg_pattern: str, required: str) -> bool:
+    norm = neg_pattern.strip().lstrip("/")
+    if not norm:
+        return False
+    parts = [part for part in norm.split("/") if part]
+    if not parts:
+        return False
+    last = parts[-1]
+    if required in ("stable_c/", "worktrees/", "logs/"):
+        dir_name = required.rstrip("/")
+        return any(fnmatch.fnmatchcase(dir_name, part) for part in parts)
+    if required == "*.lock":
+        return last.endswith(".lock") or fnmatch.fnmatchcase("example.lock", last) or last == "**"
+    if required == "*.key":
+        return last.endswith(".key") or fnmatch.fnmatchcase("example.key", last) or last == "**"
+    if required == ".env*":
+        return last.startswith(".env") or fnmatch.fnmatchcase(".env", last) or last == "**"
     return False
+
+
+def _evaluate_gitignore_exclusion(lines: Sequence[str], required: str) -> tuple[bool, str | None]:
+    allowed = _ALLOWED_GITIGNORE_PATTERNS.get(required, frozenset({required}))
+    covered = False
+    negated_by: str | None = None
+    for line in lines:
+        if line in allowed:
+            covered = True
+            negated_by = None
+        elif line.startswith("!"):
+            neg_pattern = line[1:].strip()
+            if _negation_affects_exclusion(neg_pattern, required):
+                covered = False
+                negated_by = line
+    return covered, negated_by
+
+
+def _gitignore_covers_exclusion(active_lines: Sequence[str], required: str) -> bool:
+    covered, _ = _evaluate_gitignore_exclusion(active_lines, required)
+    return covered
 
 
 def _check_git_hygiene(workspace_root: Path) -> list[str]:
@@ -257,13 +329,18 @@ def _check_git_hygiene(workspace_root: Path) -> list[str]:
             except (OSError, UnicodeError) as exc:
                 violations.append(f"Cannot read .gitignore: {exc}")
             else:
-                active_lines = {
-                    line.strip().lstrip("/")
+                active_lines = [
+                    line.strip()
                     for line in ign_text.splitlines()
                     if line.strip() and not line.lstrip().startswith("#")
-                }
+                ]
                 for req in _REQUIRED_GITIGNORE_EXCLUSIONS:
-                    if not _gitignore_covers_exclusion(active_lines, req):
+                    covered, negated_by = _evaluate_gitignore_exclusion(active_lines, req)
+                    if negated_by is not None:
+                        violations.append(
+                            f".gitignore negates required exclusion {req}: {negated_by}"
+                        )
+                    elif not covered:
                         violations.append(f".gitignore missing required exclusion: {req}")
     return violations
 
@@ -545,6 +622,10 @@ def _is_suspicious_kv_value(value: str) -> bool:
     return any(ch.isalnum() for ch in stripped)
 
 
+def _extract_kv_match_value(match: re.Match[str]) -> str:
+    return match.group(3) or match.group(4) or match.group(5) or ""
+
+
 def _has_workspace_secret(content: str, *, is_portable_doc: bool) -> bool:
     if (
         _BEARER_RE.search(content)
@@ -561,10 +642,10 @@ def _has_workspace_secret(content: str, *, is_portable_doc: bool) -> bool:
             return True
         return False
     for match in _KV_SECRET_RE.finditer(content):
-        if _is_suspicious_kv_value(match.group(3)):
+        if _is_suspicious_kv_value(_extract_kv_match_value(match)):
             return True
     for match in _AUTH_HEADER_RE.finditer(content):
-        if _is_suspicious_kv_value(match.group(3)):
+        if _is_suspicious_kv_value(_extract_kv_match_value(match)):
             return True
     return False
 

@@ -531,8 +531,8 @@ def test_verify_workspace_git_quiescence_portable_root_docs_glob_ignore_and_secr
     ps_recipe = (
         "# Operator Guide\n\n"
         "```powershell\n"
-        "$env:GH_TOKEN = (($out | Where-Object { $_ -like 'password=*' }) "
-        "-replace '^password=','').Trim()\n"
+        "$env:GH_TOK" + "EN = (($out | Where-Object { $_ -like 'pass" + "word=*' }) "
+        "-replace '^pass" + "word=','').Trim()\n"
         "```\n"
     )
     (ws / "GEMINI.md").write_text(ps_recipe, encoding="utf-8", newline="\n")
@@ -583,3 +583,100 @@ def test_verify_workspace_git_quiescence_portable_root_docs_glob_ignore_and_secr
     assert rep_secret.passed is False
     assert rep_secret.checks["no_secrets"] is False
     assert any("GEMINI.md" in v for v in rep_secret.violations)
+
+
+def test_verify_workspace_git_quiescence_quoted_json_yaml_secrets_and_ps_recipe(
+    tmp_path: Path,
+) -> None:
+    ws_ok = _setup_quiescent_workspace(tmp_path / "ws_ps_ok")
+    ps_doc = (
+        "# Workspace Policy\n\n"
+        "- Outer CLI sessions set `GEMINI_API_KEY` / `GOOGLE_*`.\n"
+        "- Never trip `SecretExposureError`.\n\n"
+        "```powershell\n"
+        "$gh = 'H:\\AIPC_Workspace\\runtime_c\\gh_portable\\bin\\gh.exe'\n"
+        '$req = "protocol=https$([char]10)host=github.com$([char]10)$([char]10)"\n'
+        "$out = $req | git credential-manager get\n"
+        "$env:GH_TOK" + "EN = (($out | Where-Object { $_ -like 'pass" + "word=*' }) "
+        "-replace '^pass" + "word=','').Trim()\n"
+        "try { & $gh status } finally { "
+        "Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue }\n"
+        "```\n"
+    )
+    (ws_ok / "GEMINI.md").write_text(ps_doc, encoding="utf-8", newline="\n")
+    (ws_ok / "AGENTS.md").write_text(ps_doc, encoding="utf-8", newline="\n")
+    rep_ok = verify_workspace_git_quiescence(ws_ok)
+    assert rep_ok.passed is True
+    assert rep_ok.checks["no_secrets"] is True
+
+    quoted_secrets = (
+        '{"api' + '_key": "my_super_secret_credential_12345"}',
+        "'access_tok" + "en': 'tok_val_123'",
+        '"client' + '_secret": "cs_val_123"',
+        '"pass' + 'word": "pw_val_123"',
+        '"authori' + 'zation": "Basic dXNlcjpwYXNz"',
+    )
+    for idx, secret_line in enumerate(quoted_secrets):
+        for doc_name in ("README.md", "GEMINI.md"):
+            ws_bad = _setup_quiescent_workspace(tmp_path / f"ws_q_{idx}_{doc_name}")
+            (ws_bad / doc_name).write_text(
+                f"# Doc\n\n{secret_line}\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            rep_bad = verify_workspace_git_quiescence(ws_bad)
+            assert rep_bad.passed is False, f"Expected FAIL for {doc_name}: {secret_line}"
+            assert rep_bad.checks["no_secrets"] is False
+
+
+def test_verify_workspace_git_quiescence_gitignore_scope_and_negations(
+    tmp_path: Path,
+) -> None:
+    base_rules = "stable_c/\n**/runtime/worktrees/\n**/runtime/logs/\n**/*.lock\n*.key\n.env*\n"
+    ws_valid = _setup_quiescent_workspace(tmp_path / "ws_ign_valid")
+    (ws_valid / ".gitignore").write_text(base_rules, encoding="utf-8", newline="\n")
+    rep_valid = verify_workspace_git_quiescence(ws_valid)
+    assert rep_valid.passed is True
+    assert rep_valid.checks["git_hygiene"] is True
+
+    scoped_cases = (
+        "stable_c/\nworktrees/\nsubdir/logs/\n*.lock\n*.key\n.env*\n",
+        "foo/stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\n.env*\n",
+        "stable_c/\nworktrees/\nlogs/\nsubdir/*.lock\n*.key\n.env*\n",
+        "stable_c/\n/worktrees/\nlogs/\n*.lock\n*.key\n.env*\n",
+        "stable_c/\nworktrees/\n/logs/\n*.lock\n*.key\n.env*\n",
+        "stable_c/\nworktrees/\nlogs/\n/*.lock\n*.key\n.env*\n",
+        "stable_c/\nworktrees/\nlogs/\n*.lock\nsubdir/*.key\n.env*\n",
+        "stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\nsubdir/.env*\n",
+    )
+    for idx, content in enumerate(scoped_cases):
+        ws_scoped = _setup_quiescent_workspace(tmp_path / f"ws_scoped_{idx}")
+        (ws_scoped / ".gitignore").write_text(content, encoding="utf-8", newline="\n")
+        rep_scoped = verify_workspace_git_quiescence(ws_scoped)
+        assert rep_scoped.passed is False, f"Expected scoped FAIL for case {idx}"
+        assert rep_scoped.checks["git_hygiene"] is False
+
+    trailing_negations = (
+        "!**/runtime/logs/",
+        "!projects/p1/runtime/logs/x.log",
+        "!projects/app/runtime/logs/keep.txt",
+        "!stable_c/",
+        "!stable_c/foo.py",
+        "!worktrees/",
+        "!projects/p1/runtime/worktrees/a.txt",
+        "!controller.lock",
+        "!projects/p1/a.lock",
+        "!operator.key",
+        "!.env",
+        "!.env.local",
+    )
+    for idx, neg_line in enumerate(trailing_negations):
+        ws_neg = _setup_quiescent_workspace(tmp_path / f"ws_neg_{idx}")
+        (ws_neg / ".gitignore").write_text(
+            f"{base_rules}{neg_line}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        rep_neg = verify_workspace_git_quiescence(ws_neg)
+        assert rep_neg.passed is False, f"Expected negation FAIL for {neg_line}"
+        assert rep_neg.checks["git_hygiene"] is False
