@@ -330,16 +330,17 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   short `wt-<hash>` (`<= 12` chars) worktree names, and renders derived non-authoritative
   `CURRENT_STATUS.md` directly from canonical nested `QueuedTaskRecord.contract` fields.
   `aipc.project.workspace_git_checkpoint` holds exclusive `controller.lock` to verify LF
-  `.gitattributes`, `.gitignore`, zero secrets, valid LF `.sha256` sidecars, schema-valid
-  quiescent queues (rejecting canonical `RUNNING`, `DISPATCHING`, `IN_PROGRESS`, `CLAIMING`,
-  `RECONCILIATION_REQUIRED`, malformed queue structures, and active `RESERVED` budget ledger
+  `.gitattributes`, `.gitignore`, zero secrets (with portable root documentation/launcher policy),
+  valid LF `.sha256` sidecars, and schema-valid quiescent queues (enforcing the explicit
+  `_QUIESCENT_TASK_STATUSES` allowlist, rejecting non-quiescent/unknown statuses, truthy
+  `reconciliation_required`, malformed queue structures, and active `RESERVED` budget ledger
   entries) prior to Private Control-Plane Git checkpoints.
 - **Strictly Read-Only Multi-Project Dashboard (`D02`, `FINAL-03`):**
   `aipc.dashboard.multi_project` and read-only `server.py` endpoints (`GET /multi-project`,
   `GET /api/multi-project`, HTTP `405` on mutations) aggregate multi-project phase, queue,
-  verdict, C.5/C.6 budgets, schema-validated per-model eligibility provenance (never mapping
-  generic provider `qualification_state` onto `selected_model`, defaulting strictly to
-  `UNOBSERVED`), and 5-state raw evidence indicators (`NOT_CHECKED` default, `PRESENT_VERIFIED`,
+  verdict, C.5/C.6 budgets, provenance-bearing schema-validated per-model eligibility observations
+  (never mapping generic provider `qualification_state` onto `selected_model`, defaulting strictly
+  to `UNOBSERVED`), and 5-state raw evidence indicators (`NOT_CHECKED` default, `PRESENT_VERIFIED`,
   `PRUNED`, `MISSING`, `HASH_MISMATCH`) with proven zero mutation of canonical JSON stores.
 - **Minimal Docker Isolation, Closeout Export & 2-Project E2E (`D03`, `FINAL-05`):**
   `aipc.project.isolation_and_closeout` builds minimal-mount `--network none --read-only` Docker
@@ -347,5 +348,6 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   descendants including `.git/`, and rejecting `state/`, `approvals/`, ledgers, keys, and sibling
   mounts) with explicit Level C Windows host OS disclosure, exports/restores deterministic
   release-closeout `.zip` + `.sha256` bundles, and verifies sealed historical archives
-  (`runtime_c/`) remain untouched via mandatory full SHA-256 content hashing
-  (`scandir_lstat_content_sha256`) with strict destination-containment enforcement.
+  (`runtime_c/`) remain untouched via mandatory full regular-file SHA-256 content hashing
+  (`scandir_lstat_content_sha256`, failing closed on regular-file `OSError` and safely classifying
+  Windows NTFS/WSL reparse points) with strict destination-containment enforcement.
