@@ -616,7 +616,7 @@ def _compute_reparse_metadata_sha256(path: Path, st: os.stat_result) -> str:
     file_attributes = int(getattr(st, "st_file_attributes", 0))
     try:
         target = os.readlink(path)
-    except OSError:
+    except (OSError, ValueError):
         payload = (
             f"reparse_tag={reparse_tag}|file_attributes={file_attributes}"
             f"|st_size={int(st.st_size)}|st_mode={int(st.st_mode)}"

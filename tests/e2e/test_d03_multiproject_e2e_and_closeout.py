@@ -818,6 +818,78 @@ def test_e4_sealed_archive_reparse_point_and_wsl_symlink_handling(
         compute_sealed_archive_manifest(archive)
 
 
+def test_e5_sealed_archive_reparse_point_readlink_valueerror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(e5) Windows Python 3.13 ValueError from os.readlink on WSL reparse point falls back."""
+    archive = tmp_path / "sealed_archive"
+    archive.mkdir(parents=True)
+    reg_file = archive / "regular.txt"
+    reg_file.write_bytes(b"regular bytes\n")
+    wsl_link = archive / "wsl_lx_symlink"
+    wsl_link.write_bytes(b"")
+
+    orig_lstat = os.lstat
+    orig_readlink = os.readlink
+    orig_open = Path.open
+
+    wsl_path_str = os.path.normcase(os.path.abspath(wsl_link.resolve()))
+    reparse_attr = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    reparse_tag = 0xA000001D
+    st_mode = stat.S_IFREG | 0o644
+
+    def _fake_lstat(path: Path | str, *args: Any, **kwargs: Any) -> Any:
+        p_str = os.path.normcase(os.path.abspath(path))
+        if p_str == wsl_path_str:
+            return types.SimpleNamespace(
+                st_mode=st_mode,
+                st_size=0,
+                st_file_attributes=reparse_attr,
+                st_reparse_tag=reparse_tag,
+            )
+        return orig_lstat(path, *args, **kwargs)
+
+    def _fake_readlink(path: Path | str, *args: Any, **kwargs: Any) -> str:
+        p_str = os.path.normcase(os.path.abspath(path))
+        if p_str == wsl_path_str:
+            raise ValueError("not a symbolic link")
+        return orig_readlink(path, *args, **kwargs)
+
+    def _guarded_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        assert self.name != "wsl_lx_symlink"
+        return orig_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", _fake_lstat)
+    monkeypatch.setattr(os, "readlink", _fake_readlink)
+    monkeypatch.setattr(Path, "open", _guarded_open)
+
+    records = _collect_sealed_archive_records(archive.resolve())
+    by_name = {rec.relpath: rec for rec in records}
+    assert set(by_name) == {"regular.txt", "wsl_lx_symlink"}
+
+    expected_payload = (
+        f"reparse_tag={reparse_tag}|file_attributes={reparse_attr}|st_size=0|st_mode={st_mode}"
+    )
+    expected_meta_sha = hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
+
+    wsl_rec = by_name["wsl_lx_symlink"]
+    assert wsl_rec.entry_kind == "reparse_point"
+    assert wsl_rec.content_sha256 is None
+    assert wsl_rec.metadata_sha256 == expected_meta_sha
+
+    manifest_1 = compute_sealed_archive_manifest(archive)
+    manifest_2 = compute_sealed_archive_manifest(archive)
+    assert manifest_1 == manifest_2
+
+    manifest_path = tmp_path / "baseline_manifest.json"
+    write_sealed_archive_baseline_manifest(archive, manifest_path)
+    report_ok = verify_sealed_archive_untouched(archive, manifest_path)
+    assert report_ok.passed is True
+    assert report_ok.observed_file_count == 2
+    assert report_ok.expected_digest == report_ok.observed_digest
+
+
 def test_f_clean_git_checkout_restore_lf_and_quiescence(tmp_path: Path) -> None:
     """(f) Clean Git checkout restore with .gitattributes eol=lf, .gitignore, receipts+.sha256."""
     repo = tmp_path / "repo"
