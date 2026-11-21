@@ -9,6 +9,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from aipc.adapters.subscription_qualification import (
     ProviderRuntimeQualificationReport,
     SandboxConstraintSummary,
@@ -332,16 +335,28 @@ def test_discover_and_aggregate_projects_and_zero_mutation(tmp_path: Path) -> No
     assert beta_fast.model_eligibility == {}
     assert [e.state for e in beta_fast.evidence_items] == ["NOT_CHECKED", "NOT_CHECKED"]
 
-    # 2. Verified path (verify_evidence=True) + observed_model_eligibility override
+    # 2. Verified path (verify_evidence=True) + provenance-bearing ModelEligibilityObservation
+    beta_obs = ModelEligibilityObservation(
+        model_id="gemini-3.8-flash-medium",
+        provider_id="google_antigravity",
+        provider_family="google_antigravity",
+        state="QUOTA_EXHAUSTED",
+        source="qualify_antigravity_subscription_runtime",
+        observed_at="2026-11-20T21:45:00Z",
+    )
     verified_snap = discover_and_aggregate_projects(
         projects_root,
         verify_evidence=True,
-        observed_model_eligibility={"beta": {"gemini-3.8-flash-medium": "QUOTA_EXHAUSTED"}},
+        observed_model_eligibility={"beta": {"gemini-3.8-flash-medium": beta_obs}},
     )
     assert verified_snap.verify_evidence is True
     alpha_ver, beta_ver = verified_snap.projects
     assert [e.state for e in alpha_ver.evidence_items] == ["PRESENT_VERIFIED", "PRUNED"]
     assert [e.state for e in beta_ver.evidence_items] == ["MISSING", "HASH_MISMATCH"]
+    assert alpha_ver.model_eligibility == {
+        "gemini-4-hydrogen-medium": "QUALIFIED",
+        "gpt-5.3-codex": "UNOBSERVED",
+    }
     assert beta_ver.model_eligibility == {"gemini-3.8-flash-medium": "QUOTA_EXHAUSTED"}
 
     # 3. HTML render and strict zero-mutation check
@@ -569,12 +584,20 @@ def test_model_eligibility_rejects_generic_state_and_unvalidated_provenance(tmp_
         },
     )
 
+    external_obs = ModelEligibilityObservation(
+        model_id="external-observed",
+        provider_id="google_antigravity",
+        state="BLOCKED",
+        receipt_path="runtime/audit/receipts/ext.json",
+        observed_at="2026-11-20T21:50:00Z",
+    )
     snap = discover_and_aggregate_projects(
         projects_root,
         observed_model_eligibility={
             "neg-proj": {
                 "external-arbitrary": "ARBITRARY_OK",
-                "external-valid": "BLOCKED",
+                "external-bare-blocked": "BLOCKED",
+                "external-observed": external_obs,
             }
         },
     )
@@ -585,10 +608,141 @@ def test_model_eligibility_rejects_generic_state_and_unvalidated_provenance(tmp_
         "bad-ts-obs": "UNOBSERVED",
         "bare-model-ok": "UNOBSERVED",
         "external-arbitrary": "UNOBSERVED",
-        "external-valid": "BLOCKED",
+        "external-bare-blocked": "UNOBSERVED",
+        "external-observed": "BLOCKED",
         "gemini-4-hydrogen-medium": "UNOBSERVED",
         "gpt-5.3-codex": "UNOBSERVED",
         "missing-provider": "UNOBSERVED",
         "supported-model": "UNOBSERVED",
         "totally-fine-model": "UNOBSERVED",
     }
+
+
+def test_bare_override_strings_cannot_publish_or_overwrite_provenance(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    _seed_project(
+        projects_root,
+        "prov-proj",
+        receipts={
+            "r1_qualified.json": {
+                "receipt_id": "rec-prov-1",
+                "qualification_report": _make_qualification_report(
+                    model_eligibility={"gemini-4-hydrogen-medium": "BLOCKED"}
+                ),
+            },
+            "r2_unobserved.json": {
+                "receipt_id": "rec-prov-2",
+                "selected_model": "unobserved-model",
+            },
+        },
+    )
+
+    # Per-project bare strings cannot publish QUALIFIED or overwrite observed BLOCKED provenance
+    per_project_snap = discover_and_aggregate_projects(
+        projects_root,
+        observed_model_eligibility={
+            "prov-proj": {
+                "gemini-4-hydrogen-medium": "QUALIFIED",
+                "unobserved-model": "QUALIFIED",
+                "new-bare-per-project": "QUALIFIED",
+            }
+        },
+    )
+    assert per_project_snap.projects[0].model_eligibility == {
+        "gemini-4-hydrogen-medium": "BLOCKED",
+        "new-bare-per-project": "UNOBSERVED",
+        "unobserved-model": "UNOBSERVED",
+    }
+
+    # Top-level bare strings cannot publish QUALIFIED or overwrite observed BLOCKED provenance
+    top_level_snap = discover_and_aggregate_projects(
+        projects_root,
+        observed_model_eligibility={
+            "gemini-4-hydrogen-medium": "QUALIFIED",
+            "unobserved-model": "QUALIFIED",
+            "new-bare-top-level": "QUALIFIED",
+        },
+    )
+    assert top_level_snap.projects[0].model_eligibility == {
+        "gemini-4-hydrogen-medium": "BLOCKED",
+        "new-bare-top-level": "UNOBSERVED",
+        "unobserved-model": "UNOBSERVED",
+    }
+
+    # Observation missing both source and receipt_path is rejected
+    with pytest.raises(ValidationError):
+        ModelEligibilityObservation(
+            model_id="no-source-model",
+            provider_id="acme-cloud",
+            state="QUALIFIED",
+            observed_at="2026-11-20T22:00:00Z",
+        )
+
+
+def test_qualification_report_provider_neutral_identifiers_and_rejection(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    _seed_project(
+        projects_root,
+        "neutral-proj",
+        receipts={
+            "r1_acme_valid.json": {
+                "receipt_id": "rec-acme-ok",
+                "qualification_report": {
+                    "provider_id": "acme-cloud",
+                    "provider_family": "acme_llm",
+                    "operating_profile": "subscription_only",
+                    "auth_mode": "acme_subscription",
+                    "eligibility_state": "QUALIFIED",
+                    "available": True,
+                    "subscription_auth_present": True,
+                    "model_eligibility": {
+                        "acme-model-1": "QUALIFIED",
+                    },
+                },
+            },
+            "r2_malformed_provider.json": {
+                "receipt_id": "rec-bad-id",
+                "selected_model": "bad-acme-model",
+                "qualification_report": {
+                    "provider_id": "Acme Cloud",
+                    "provider_family": "1bad_family",
+                    "operating_profile": "a",
+                    "auth_mode": "",
+                    "eligibility_state": "QUALIFIED",
+                    "available": True,
+                    "subscription_auth_present": True,
+                    "model_eligibility": {
+                        "bad-acme-model": "QUALIFIED",
+                    },
+                },
+            },
+        },
+    )
+
+    acme_obs = ModelEligibilityObservation(
+        model_id="acme-model-2",
+        provider_id="acme-cloud",
+        provider_family="acme_llm",
+        state="RATE_LIMITED",
+        receipt_path="runtime/audit/receipts/r1_acme_valid.json",
+        observed_at="2026-11-20T22:05:00Z",
+    )
+
+    snap = discover_and_aggregate_projects(
+        projects_root,
+        observed_model_eligibility={"neutral-proj": {"acme-model-2": acme_obs}},
+    )
+    assert snap.projects[0].model_eligibility == {
+        "acme-model-1": "QUALIFIED",
+        "acme-model-2": "RATE_LIMITED",
+        "bad-acme-model": "UNOBSERVED",
+    }
+
+    with pytest.raises(ValidationError):
+        ModelEligibilityObservation(
+            model_id="acme-model-3",
+            provider_id="Acme/Cloud",
+            state="QUALIFIED",
+            source="unit-test",
+            observed_at="2026-11-20T22:05:00Z",
+        )

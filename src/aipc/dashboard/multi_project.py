@@ -21,7 +21,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import ConfigDict, Field, StrictBool, StrictStr, ValidationError, model_validator
 
@@ -59,6 +59,8 @@ _ALLOWED_DISPLAY_ELIGIBILITY_STATES: frozenset[str] = _CANONICAL_MODEL_ELIGIBILI
 }
 
 _SHA256_CHUNK_BYTES = 65536
+_CANONICAL_IDENTIFIER_PATTERN = r"^[a-z][a-z0-9_.-]{1,63}$"
+CanonicalIdentifier = Annotated[StrictStr, Field(pattern=_CANONICAL_IDENTIFIER_PATTERN)]
 
 
 class _QualificationReportProvenanceView(CanonicalRecord):
@@ -66,10 +68,10 @@ class _QualificationReportProvenanceView(CanonicalRecord):
 
     model_config = ConfigDict(extra="allow", frozen=True, str_strip_whitespace=True)
 
-    provider_id: NonBlank
-    provider_family: Literal["openai_codex", "google_antigravity"]
-    operating_profile: Literal["subscription_only"]
-    auth_mode: Literal["codex_subscription", "antigravity_subscription"]
+    provider_id: CanonicalIdentifier
+    provider_family: CanonicalIdentifier
+    operating_profile: CanonicalIdentifier
+    auth_mode: CanonicalIdentifier
     eligibility_state: Literal["QUALIFIED", "BLOCKED", "UNAVAILABLE"]
     available: StrictBool
     subscription_auth_present: StrictBool
@@ -80,16 +82,21 @@ class ModelEligibilityObservation(CanonicalRecord):
     """Schema-validated per-model eligibility observation with explicit provenance."""
 
     model_id: NonBlank
-    provider_id: NonBlank | None = None
-    provider_family: NonBlank | None = None
+    provider_id: CanonicalIdentifier | None = None
+    provider_family: CanonicalIdentifier | None = None
     state: ModelEligibilityState
-    source: NonBlank
+    source: NonBlank | None = None
+    receipt_path: NonBlank | None = None
     observed_at: Timestamp
 
     @model_validator(mode="after")
     def validate_provider_provenance(self) -> Self:
         if self.provider_id is None and self.provider_family is None:
             raise ValueError("ModelEligibilityObservation requires provider_id or provider_family")
+        if self.source is None and self.receipt_path is None:
+            raise ValueError(
+                "ModelEligibilityObservation requires source or receipt_path provenance"
+            )
         return self
 
 
@@ -509,12 +516,29 @@ def _extract_receipt_model_eligibility(
         model_states.setdefault(single_model.strip(), "UNOBSERVED")
 
 
+def _is_observation_mapping(value: Any) -> bool:
+    """Return True if value looks like an observation dict rather than a per-project mapping."""
+    if not isinstance(value, Mapping):
+        return False
+    if any(isinstance(v, ModelEligibilityObservation | Mapping) for v in value.values()):
+        return False
+    observation_keys = {
+        "state",
+        "observed_at",
+        "source",
+        "receipt_path",
+        "provider_id",
+        "provider_family",
+    }
+    return bool(observation_keys & set(value.keys()))
+
+
 def _resolve_project_model_eligibility(
     project_id: str,
     observed_model_eligibility: Mapping[str, Any] | None,
     receipt_models: dict[str, str],
 ) -> dict[str, str]:
-    """Combine observed model eligibility with strict canonical state validation."""
+    """Combine receipt observations with validated provenance-bearing observations only."""
     resolved: dict[str, str] = {
         model_id: _normalize_display_eligibility_state(state)
         for model_id, state in receipt_models.items()
@@ -522,30 +546,26 @@ def _resolve_project_model_eligibility(
     }
     if observed_model_eligibility is not None:
         per_project = observed_model_eligibility.get(project_id)
-        if isinstance(per_project, Mapping):
+        if isinstance(per_project, Mapping) and not _is_observation_mapping(per_project):
             for model_id, entry in per_project.items():
                 if isinstance(model_id, str) and model_id.strip():
-                    clean_id = model_id.strip()
-                    if isinstance(entry, ModelEligibilityObservation | Mapping):
-                        _extract_from_observation_entry(
-                            entry,
-                            resolved,
-                            expected_model_id=clean_id,
-                        )
-                    else:
-                        resolved[clean_id] = _normalize_display_eligibility_state(entry)
+                    _extract_from_observation_entry(
+                        entry,
+                        resolved,
+                        expected_model_id=model_id.strip(),
+                    )
         else:
-            for model_id, entry in observed_model_eligibility.items():
-                if isinstance(model_id, str) and model_id.strip():
-                    clean_id = model_id.strip()
-                    if isinstance(entry, ModelEligibilityObservation):
-                        _extract_from_observation_entry(
-                            entry,
-                            resolved,
-                            expected_model_id=clean_id,
-                        )
-                    elif isinstance(entry, str):
-                        resolved[clean_id] = _normalize_display_eligibility_state(entry)
+            for key, entry in observed_model_eligibility.items():
+                if not isinstance(key, str) or not key.strip():
+                    continue
+                if isinstance(entry, Mapping) and not _is_observation_mapping(entry):
+                    # Per-project mapping belonging to a different project; ignore.
+                    continue
+                _extract_from_observation_entry(
+                    entry,
+                    resolved,
+                    expected_model_id=key.strip(),
+                )
     return {k: resolved[k] for k in sorted(resolved)}
 
 
