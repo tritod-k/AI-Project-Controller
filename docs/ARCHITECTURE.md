@@ -330,18 +330,21 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   short `wt-<hash>` (`<= 12` chars) worktree names, and renders derived non-authoritative
   `CURRENT_STATUS.md` directly from canonical nested `QueuedTaskRecord.contract` fields.
   `aipc.project.workspace_git_checkpoint` holds exclusive `controller.lock` to verify LF
-  `.gitattributes`, `.gitignore`, zero secrets (with portable root documentation/launcher policy),
-  valid LF `.sha256` sidecars, and schema-valid quiescent queues (enforcing the explicit
-  `_QUIESCENT_TASK_STATUSES` allowlist, rejecting non-quiescent/unknown statuses, truthy
-  `reconciliation_required`, malformed queue structures, and active `RESERVED` budget ledger
-  entries) prior to Private Control-Plane Git checkpoints.
+  `.gitattributes`, workspace-wide `.gitignore` coverage (rejecting path-scoped exclusions and
+  trailing `!` negations), zero secrets (including quoted JSON/YAML credentials in portable root
+  docs while preserving safe PowerShell expressions), valid LF `.sha256` sidecars, and
+  schema-valid quiescent queues (enforcing `_QUIESCENT_TASK_STATUSES`, preserving uncertain
+  `RESERVED` budget entries in `RECONCILIATION_REQUIRED`, requiring exact non-empty
+  `(operation_id, attempt_id)` matches, and rejecting symlinked HMAC key ancestor directories)
+  prior to Private Control-Plane Git checkpoints.
 - **Strictly Read-Only Multi-Project Dashboard (`D02`, `FINAL-03`):**
   `aipc.dashboard.multi_project` and read-only `server.py` endpoints (`GET /multi-project`,
   `GET /api/multi-project`, HTTP `405` on mutations) aggregate multi-project phase, queue,
   verdict, C.5/C.6 budgets, provenance-bearing schema-validated per-model eligibility observations
   (never mapping generic provider `qualification_state` onto `selected_model`, defaulting strictly
   to `UNOBSERVED`), and 5-state raw evidence indicators (`NOT_CHECKED` default, `PRESENT_VERIFIED`,
-  `PRUNED`, `MISSING`, `HASH_MISMATCH`) with proven zero mutation of canonical JSON stores.
+  `PRUNED`, `MISSING`, `HASH_MISMATCH`, validating 64-char ASCII hex before `hmac.compare_digest`)
+  with proven zero mutation of canonical JSON stores.
 - **Minimal Docker Isolation, Closeout Export & 2-Project E2E (`D03`, `FINAL-05`):**
   `aipc.project.isolation_and_closeout` builds minimal-mount `--network none --read-only` Docker
   verification commands (fail-closed rejecting `read_only_root=False`, scanning all mounted

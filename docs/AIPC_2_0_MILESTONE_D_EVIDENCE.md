@@ -7,9 +7,31 @@
 **Base `master` SHA (post-PR-#10):** `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6` (CI run `44620182296` SUCCESS on Python 3.12 & 3.13)
 **Verified `tested_source_sha_d` (Cycle 0):** `b141bac948c095c96168c025b939f523816da0f1` (`frozenSHA_d`: `77ad1767ca2d88b5a1b2c7f9af17ce875b7a17db`)
 **Verified `tested_source_sha_d_r2` (Tier-2 Cycle #1 / `D-recovery01`):** `56db9cea17900d0b27de625f94506e68a81ef2f4` (`frozenSHA_d_r2`: `f4b258b5f5732d4478b23c16bdce288406a40b3c`)
-**Verified `tested_source_sha_d_r3` (Tier-2 Cycle #2 / `D-recovery02`):** `94b17e54dc355a95713445bcd4f6d079330d5093`
+**Verified `tested_source_sha_d_r3` (Tier-2 Cycle #2 / `D-recovery02`):** `94b17e54dc355a95713445bcd4f6d079330d5093` (`frozenSHA_d_r3`: `ff3ee490776e629a20bc5ec924f3013d254d5168`)
+**Verified `tested_source_sha_d_r4` (Tier-2 Cycle #3 / `D-recovery03`):** `ec67143820df45c6722bcb03d89c1dc22b322566`
 **Pinned Stable Engine (`H:/AIPC_Workspace/stable_c`):** `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6` (clean, unmodified after Section 1 fast-forward)
 **Operating Profile:** STRICT `subscription_only` (`agy.exe` + `gemini-4-hydrogen-medium` Workers, `codex.cmd` Independent Reviewers; `$0` paid API usage)
+
+---
+
+## 0B. Tier-2 Remediation Cycle #3 (`D-recovery03`) Provenance & Verbatim Receipts
+Authorized by Human Commander K.TRITOD (`d07_commander_tier2_cycle3_grant.json`, HMAC-SHA256 signed, `sha256: 82167629b58efadf858fcba7ad817e6339a67e6313ed4fe0ba101c3d435e8aad`; Tier-2 Cycle `3/3`, `0` budget resets; `job-c-r3` `D03: PASS` preserved via byte-identity proof to `ff3ee490776e629a20bc5ec924f3013d254d5168`):
+
+| Workstream | Worker Commit | Worker Provenance (`gemini-4-hydrogen-medium`) | Defects Remediated |
+| :--- | :--- | :--- | :--- |
+| `D01-A-recovery03` | `208effc84bfec01f0060843f15c7e92bc4239b97` | session `cba25311-ed25-4e1f-9691-10c584c1d5d0` | Preserve uncertain `RESERVED` budget (`INTERRUPTED`, `WAITING_PROVIDER`, etc.) -> `RECONCILIATION_REQUIRED`; require present exact `(operation_id, attempt_id)` on `RUNNING` tasks (`task_queue.py`); reject symlinked ancestors on HMAC key path (`milestone_authorization.py`); regression tests (`test_d01_hmac_and_consistency.py`) |
+| `D01-B-recovery03` | `064b891bb4daa5da79720b520c6d1967ff31fc2f` | CISL ledger `att-03`/`att-04` (`cisl_cycle2_budget_ledger.json`) | Detect quoted JSON/YAML secrets in portable root docs preserving safe PowerShell expressions; enforce workspace-wide `.gitignore` scope and sequential `!` negation precedence (`workspace_git_checkpoint.py`); regression tests (`test_d01_intake_status_and_git_quiescence.py`) |
+| `D02-recovery03` | `ec67143820df45c6722bcb03d89c1dc22b322566` | session `3f59e91f-3bd8-4002-b537-4d84c83ee0ac` | Validate 64-char lowercase ASCII hex before `hmac.compare_digest` in `classify_raw_evidence()` (`multi_project.py`); classifier + verified HTTP-route regression tests (`test_d02_multiproject_dashboard.py`) |
+
+Verbatim JSON command receipts (`argv`, `cwd`, `exit_code`, `stdout`, `stdout_sha256` + `.sha256` sidecars) at `tested_source_sha_d_r4` (`ec67143820df45c6722bcb03d89c1dc22b322566`) under `H:/AIPC_Workspace/projects/AI_Project_Controller/runtime/audit/receipts/r4_verification/`:
+- `r4_d01_pytest_receipt.json` (`sha256: 174d8643e255fa3059b4a61d91cb93ce2f6dcabbec8ce11352d5a760af3542bf`): Windows **36 passed, 0 skipped, 0 failed**; `--network none --read-only` Linux Docker **36 passed, 0 skipped, 0 failed** (per module: `test_d00_scope_bootstrap.py`=9, `test_d01_hmac_and_consistency.py`=14, `test_d01_intake_status_and_git_quiescence.py`=13).
+- `r4_d02_pytest_receipt.json` (`sha256: d1d5d57cc0a04a74f05a1932d80c5e15c3c718b1d49684b5d639b84edbf00ea1`): Windows **21 passed, 0 skipped, 0 failed**; `--network none --read-only` Linux Docker **21 passed, 0 skipped, 0 failed** (per module: `test_d02_multiproject_dashboard.py`=11, `test_dashboard.py`=10).
+- `r4_d03_pytest_receipt.json` (`sha256: c02332d1687a18c4fbb2d9c3eb2bd5a750b0a7ff935c6591654a267b6d09d222`, byte-identical to `ff3ee490776e629a20bc5ec924f3013d254d5168`): Windows **11 passed, 0 skipped, 0 failed**; `--network none --read-only` Linux Docker **11 passed, 0 skipped, 0 failed**.
+- `r4_linux_docker_suite_receipt.json` (`sha256: f312eda970ca2b06edc2a6f5f763dbb5a705f3e71a42e9a5d81bfd445c99dc44`): Combined `--network none --read-only` Linux Docker (`aipc-cisl-verify:py313-v1`) **68 passed, 0 skipped, 0 failed** (`0` symlink skips).
+- `r4_full_windows_pytest_receipt.json` (`sha256: cd41b1d87d2b8d72d54da3b387fdf66112c2ba85691acd593403afd3a92766c1`): CI-equivalent + Milestone D full Windows suite **1,619 passed, 1 skipped** (POSIX process groups), **0 failed**.
+- `r4_c03_isolated_receipt.json` (`sha256: c7a50d9097838be4287d4f3b4152cc9e070a24d1c26d309bbd59600b9f0f3c68`): Isolated C03 (`--noconftest -c NUL -o filterwarnings=default -p no:cacheprovider`) **1 passed, 0 skipped, 0 failed**.
+- `r4_static_and_wheel_receipt.json` (`sha256: f5e5c45caf6008467fa3420daf566fbb2e26987ac5532411e506fd2c514f6e50`): `ruff check src tests` (`0`), `ruff format --check src tests` (`339` files already formatted), `git diff --check` (`0`), `pip wheel` (`ai_project_controller-0.0.1-py3-none-any.whl`, `sha256: 891196cb3dec233ad0a4ae8324d76d6b4313296d3b74470eb75076607cde9db8`), `stable_c` (`6671f87c`, clean).
+- `r4_runtime_c_untouched_receipt.json` (`sha256: c6cfa11ede9d8eb3fe7b3b842b5f678634cd282f69e544ad0b45bcb6e167155f`): `107,441` files match fresh `d00` metadata baseline (`3155d13a6bf65826f489f0638c0cc3ec43317f65eca3a4dc1b3c37d2754fb2d3`) AND cryptographically bind to verified `r3_runtime_c_untouched_receipt.json` (`sha256: 0d8114388548674d9aff5d96c7a79232312d0c0f737f48649c2ed22793d42d16`) and `d06_runtime_c_content_baseline.json` (`0e173de23dae45a0520a13aa65e0ecf59f1b8828600cb81bb19713fcca59e3f0`, `scandir_lstat_content_sha256`, `regular_file_read_errors: 0`).
 
 ---
 
