@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib
 import json
 import os
 import pkgutil
+import stat
 import subprocess
+import types
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -39,7 +42,9 @@ from aipc.dashboard.multi_project import (
 from aipc.project.isolation_and_closeout import (
     IsolationLevelDisclosure,
     IsolationPolicyError,
+    _collect_sealed_archive_records,
     build_minimal_docker_verify_argv,
+    compute_sealed_archive_manifest,
     export_release_closeout_zip,
     verify_and_restore_closeout_zip,
     verify_sealed_archive_untouched,
@@ -683,6 +688,134 @@ def test_e2_sealed_archive_same_size_mtime_preserved_tamper_and_dest_containment
     report_tampered = verify_sealed_archive_untouched(archive, manifest_path)
     assert report_tampered.passed is False
     assert report_tampered.expected_digest != report_tampered.observed_digest
+
+
+@pytest.mark.parametrize("error_kind", ["permission", "eio_winerror_1920"])
+def test_e3_sealed_archive_regular_file_oserror_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_kind: str,
+) -> None:
+    """(e3) Any OSError reading a regular file must fail closed with IsolationPolicyError."""
+    archive = tmp_path / "sealed_archive"
+    (archive / "sub").mkdir(parents=True)
+    target_file = archive / "sub" / "payload.txt"
+    target_file.write_bytes(b"plain dummy payload\n")
+
+    manifest_path = tmp_path / "baseline_manifest.json"
+    write_sealed_archive_baseline_manifest(archive, manifest_path)
+
+    orig_open = Path.open
+    target_resolved = target_file.resolve()
+
+    def _failing_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if "b" in mode and self.resolve(strict=False) == target_resolved:
+            if error_kind == "permission":
+                raise PermissionError(errno.EACCES, "simulated permission denied")
+            err = OSError(errno.EIO, "simulated unreadable regular file")
+            err.winerror = 1920
+            raise err
+        return orig_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _failing_open)
+
+    with pytest.raises(IsolationPolicyError, match="Cannot read archive file"):
+        compute_sealed_archive_manifest(archive)
+
+    with pytest.raises(IsolationPolicyError, match="Cannot read archive file"):
+        verify_sealed_archive_untouched(archive, manifest_path)
+
+
+def test_e4_sealed_archive_reparse_point_and_wsl_symlink_handling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(e4) Reparse points and WSL symlinks hash metadata deterministically without file open."""
+    archive = tmp_path / "sealed_archive"
+    archive.mkdir(parents=True)
+    reg_file = archive / "regular.txt"
+    reg_file.write_bytes(b"regular bytes\n")
+    wsl_link = archive / "wsl_symlink"
+    wsl_link.write_bytes(b"")
+    std_link = archive / "std_symlink"
+    std_link.write_bytes(b"")
+
+    orig_lstat = os.lstat
+    orig_readlink = os.readlink
+    orig_open = Path.open
+
+    wsl_path_str = os.path.normcase(os.path.abspath(wsl_link.resolve()))
+    std_path_str = os.path.normcase(os.path.abspath(std_link.resolve()))
+    link_target = ["target_a"]
+    reparse_tag_box = [0xA000001D]
+    fail_lstat = [False]
+
+    def _fake_lstat(path: Path | str, *args: Any, **kwargs: Any) -> Any:
+        p_str = os.path.normcase(os.path.abspath(path))
+        if p_str == wsl_path_str:
+            if fail_lstat[0]:
+                raise OSError(errno.EIO, "simulated lstat failure")
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o644,
+                st_size=0,
+                st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+                st_reparse_tag=reparse_tag_box[0],
+            )
+        if p_str == std_path_str:
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFLNK | 0o777,
+                st_size=len(link_target[0]),
+                st_file_attributes=0,
+                st_reparse_tag=0,
+            )
+        return orig_lstat(path, *args, **kwargs)
+
+    def _fake_readlink(path: Path | str, *args: Any, **kwargs: Any) -> str:
+        p_str = os.path.normcase(os.path.abspath(path))
+        if p_str == wsl_path_str:
+            raise OSError(errno.EINVAL, "cannot readlink wsl reparse point")
+        if p_str == std_path_str:
+            return link_target[0]
+        return orig_readlink(path, *args, **kwargs)
+
+    def _guarded_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        assert self.name not in {"wsl_symlink", "std_symlink"}
+        return orig_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", _fake_lstat)
+    monkeypatch.setattr(os, "readlink", _fake_readlink)
+    monkeypatch.setattr(Path, "open", _guarded_open)
+
+    records = _collect_sealed_archive_records(archive.resolve())
+    by_name = {rec.relpath: rec for rec in records}
+    assert set(by_name) == {"regular.txt", "std_symlink", "wsl_symlink"}
+
+    assert by_name["regular.txt"].entry_kind == "regular_file"
+    assert by_name["regular.txt"].content_sha256 == hashlib.sha256(b"regular bytes\n").hexdigest()
+    assert by_name["regular.txt"].metadata_sha256 is None
+
+    for link_name in ("wsl_symlink", "std_symlink"):
+        assert by_name[link_name].entry_kind == "reparse_point"
+        assert by_name[link_name].content_sha256 is None
+        assert by_name[link_name].metadata_sha256 is not None
+        assert len(by_name[link_name].metadata_sha256) == 64
+
+    manifest_path = tmp_path / "baseline_manifest.json"
+    write_sealed_archive_baseline_manifest(archive, manifest_path)
+    report_ok = verify_sealed_archive_untouched(archive, manifest_path)
+    assert report_ok.passed is True
+    assert report_ok.observed_file_count == 3
+
+    link_target[0] = "target_b"
+    assert verify_sealed_archive_untouched(archive, manifest_path).passed is False
+
+    link_target[0] = "target_a"
+    reparse_tag_box[0] = 0xA0000003
+    assert verify_sealed_archive_untouched(archive, manifest_path).passed is False
+
+    fail_lstat[0] = True
+    with pytest.raises(IsolationPolicyError, match="Cannot lstat archive entry"):
+        compute_sealed_archive_manifest(archive)
 
 
 def test_f_clean_git_checkout_restore_lf_and_quiescence(tmp_path: Path) -> None:

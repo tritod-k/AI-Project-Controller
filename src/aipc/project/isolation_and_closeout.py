@@ -15,7 +15,6 @@ Provides:
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import hmac
 import json
@@ -25,7 +24,7 @@ import tempfile
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import StrictBool
 
@@ -582,6 +581,14 @@ def verify_and_restore_closeout_zip(
     )
 
 
+class _SealedArchiveRecord(NamedTuple):
+    relpath: str
+    size: int
+    entry_kind: Literal["regular_file", "reparse_point", "other"]
+    content_sha256: str | None
+    metadata_sha256: str | None
+
+
 def _compute_archive_file_content_sha256(path: Path) -> str:
     hasher = hashlib.sha256()
     try:
@@ -592,31 +599,35 @@ def _compute_archive_file_content_sha256(path: Path) -> str:
                     break
                 hasher.update(chunk)
     except OSError as exc:
-        winerror = getattr(exc, "winerror", None)
-        if winerror == 1920 or exc.errno in (errno.EINVAL, errno.ELOOP, errno.ENXIO):
-            return f"unopenable_os_error:{exc.errno}:{winerror}"
         raise IsolationPolicyError(f"Cannot read archive file {path}: {exc}") from exc
     return hasher.hexdigest()
 
 
-def _compute_symlink_target_sha256(path: Path) -> str:
+def _is_reparse_or_symlink(st: os.stat_result) -> bool:
+    is_reparse_attr = bool(
+        getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+    has_reparse_tag = getattr(st, "st_reparse_tag", 0) != 0
+    return stat.S_ISLNK(st.st_mode) or is_reparse_attr or has_reparse_tag
+
+
+def _compute_reparse_metadata_sha256(path: Path, st: os.stat_result) -> str:
+    reparse_tag = int(getattr(st, "st_reparse_tag", 0))
+    file_attributes = int(getattr(st, "st_file_attributes", 0))
     try:
         target = os.readlink(path)
-    except OSError as exc:
-        winerror = getattr(exc, "winerror", None)
-        return f"unreadable_symlink_os_error:{exc.errno}:{winerror}"
-    return hashlib.sha256(target.encode("utf-8", errors="surrogateescape")).hexdigest()
+    except OSError:
+        payload = (
+            f"reparse_tag={reparse_tag}|file_attributes={file_attributes}"
+            f"|st_size={int(st.st_size)}|st_mode={int(st.st_mode)}"
+        )
+    else:
+        payload = f"readlink={target}|reparse_tag={reparse_tag}|st_mode={int(st.st_mode)}"
+    return hashlib.sha256(payload.encode("utf-8", errors="surrogateescape")).hexdigest()
 
 
-def compute_sealed_archive_manifest(archive_root: Path | str) -> tuple[str, int]:
-    """Read-only ``os.scandir`` + ``os.lstat`` content-hashed walk."""
-    root_lex = _validate_clean_path(archive_root, label="archive_root")
-    root_st = _assert_not_symlink_lstat(root_lex, label="archive_root")
-    if root_st is None or not stat.S_ISDIR(root_st.st_mode):
-        raise IsolationPolicyError(f"archive_root must be an existing directory: {root_lex}")
-    root_resolved = root_lex.resolve()
-
-    records: list[tuple[str, int, str, str]] = []
+def _collect_sealed_archive_records(root_resolved: Path) -> list[_SealedArchiveRecord]:
+    records: list[_SealedArchiveRecord] = []
     stack: list[Path] = [root_resolved]
     while stack:
         current = stack.pop()
@@ -634,40 +645,58 @@ def compute_sealed_archive_manifest(archive_root: Path | str) -> tuple[str, int]
                     f"Cannot lstat archive entry {entry_path}: {exc}"
                 ) from exc
             relpath = entry_path.relative_to(root_resolved).as_posix()
-            if stat.S_ISLNK(st.st_mode):
+            if _is_reparse_or_symlink(st):
                 records.append(
-                    (
-                        relpath,
-                        int(st.st_size),
-                        "symlink",
-                        _compute_symlink_target_sha256(entry_path),
+                    _SealedArchiveRecord(
+                        relpath=relpath,
+                        size=int(st.st_size),
+                        entry_kind="reparse_point",
+                        content_sha256=None,
+                        metadata_sha256=_compute_reparse_metadata_sha256(entry_path, st),
                     )
                 )
             elif stat.S_ISDIR(st.st_mode):
                 stack.append(entry_path)
             elif stat.S_ISREG(st.st_mode):
                 records.append(
-                    (
-                        relpath,
-                        int(st.st_size),
-                        "file",
-                        _compute_archive_file_content_sha256(entry_path),
+                    _SealedArchiveRecord(
+                        relpath=relpath,
+                        size=int(st.st_size),
+                        entry_kind="regular_file",
+                        content_sha256=_compute_archive_file_content_sha256(entry_path),
+                        metadata_sha256=None,
                     )
                 )
             else:
                 records.append(
-                    (
-                        relpath,
-                        int(st.st_size),
-                        "other",
-                        f"non_regular_mode:{stat.S_IFMT(st.st_mode)}",
+                    _SealedArchiveRecord(
+                        relpath=relpath,
+                        size=int(st.st_size),
+                        entry_kind="other",
+                        content_sha256=None,
+                        metadata_sha256=hashlib.sha256(
+                            f"non_regular_mode:{stat.S_IFMT(st.st_mode)}".encode()
+                        ).hexdigest(),
                     )
                 )
 
-    records.sort(key=lambda item: item[0])
+    records.sort(key=lambda item: item.relpath)
+    return records
+
+
+def compute_sealed_archive_manifest(archive_root: Path | str) -> tuple[str, int]:
+    """Read-only ``os.scandir`` + ``os.lstat`` content-hashed walk."""
+    root_lex = _validate_clean_path(archive_root, label="archive_root")
+    root_st = _assert_not_symlink_lstat(root_lex, label="archive_root")
+    if root_st is None or not stat.S_ISDIR(root_st.st_mode):
+        raise IsolationPolicyError(f"archive_root must be an existing directory: {root_lex}")
+    root_resolved = root_lex.resolve()
+
+    records = _collect_sealed_archive_records(root_resolved)
     manifest_lines = "".join(
-        f"{relpath}\t{size}\t{kind}\t{content_sha256}\n"
-        for relpath, size, kind, content_sha256 in records
+        f"{rec.relpath}\t{rec.size}\t{rec.entry_kind}\t"
+        f"{rec.content_sha256 or ''}\t{rec.metadata_sha256 or ''}\n"
+        for rec in records
     )
     digest = hashlib.sha256(manifest_lines.encode("utf-8")).hexdigest()
     return digest, len(records)
