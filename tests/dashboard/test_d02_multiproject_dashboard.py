@@ -746,3 +746,59 @@ def test_qualification_report_provider_neutral_identifiers_and_rejection(tmp_pat
             source="unit-test",
             observed_at="2026-11-20T22:05:00Z",
         )
+
+
+def test_classify_raw_evidence_non_ascii_and_non_hex_sha256(tmp_path: Path) -> None:
+    log_file = tmp_path / "runtime" / "logs" / "ok.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_bytes(b"dummy log line\n")
+
+    non_ascii_receipt = {"raw_log_path": "runtime/logs/ok.log", "raw_sha256": "\u00e9" * 64}
+    non_hex_receipt = {"raw_log_path": "runtime/logs/ok.log", "raw_sha256": "z" * 64}
+
+    assert (
+        classify_raw_evidence(non_ascii_receipt, base_dir=tmp_path, verify_evidence=True)
+        == "HASH_MISMATCH"
+    )
+    assert (
+        classify_raw_evidence(non_hex_receipt, base_dir=tmp_path, verify_evidence=True)
+        == "HASH_MISMATCH"
+    )
+
+
+def test_http_server_multi_project_non_ascii_sha256_returns_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    _seed_project(
+        projects_root,
+        "non-ascii-proj",
+        raw_logs={"runtime/logs/srv.log": b"http non-ascii check log\n"},
+        receipts={
+            "r1.json": {
+                "receipt_id": "rec-non-ascii",
+                "raw_log_path": "runtime/logs/srv.log",
+                "raw_sha256": "\u00e9" * 64,
+            }
+        },
+    )
+    dirs_before, files_before = _snapshot_tree(projects_root)
+
+    service = DashboardService()
+    app = DashboardApplication(service, projects_root=projects_root)
+    with DashboardHttpServer(app) as srv:
+        with urllib.request.urlopen(f"{srv.base_url}/api/multi-project?verify_evidence=1") as resp:
+            assert resp.status == 200
+            data = json.loads(resp.read().decode("utf-8"))
+            assert data["verify_evidence"] is True
+            assert data["projects"][0]["evidence_items"][0]["state"] == "HASH_MISMATCH"
+
+        with urllib.request.urlopen(f"{srv.base_url}/multi-project?verify_evidence=1") as resp:
+            assert resp.status == 200
+            html_body = resp.read().decode("utf-8")
+            assert "non-ascii-proj" in html_body
+            assert "HASH_MISMATCH" in html_body
+
+    dirs_after, files_after = _snapshot_tree(projects_root)
+    assert dirs_after == dirs_before
+    assert files_after == files_before

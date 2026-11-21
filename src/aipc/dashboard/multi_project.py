@@ -16,6 +16,7 @@ import hmac
 import html
 import json
 import os
+import re
 import stat
 import sys
 from collections.abc import Mapping, Sequence
@@ -59,6 +60,7 @@ _ALLOWED_DISPLAY_ELIGIBILITY_STATES: frozenset[str] = _CANONICAL_MODEL_ELIGIBILI
 }
 
 _SHA256_CHUNK_BYTES = 65536
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_IDENTIFIER_PATTERN = r"^[a-z][a-z0-9_.-]{1,63}$"
 CanonicalIdentifier = Annotated[StrictStr, Field(pattern=_CANONICAL_IDENTIFIER_PATTERN)]
 
@@ -269,7 +271,11 @@ def classify_raw_evidence(
         return "PRUNED" if is_pruned else "MISSING"
 
     expected_sha = _extract_expected_sha256(receipt_payload)
-    if not expected_sha or len(expected_sha) != 64:
+    if (
+        not expected_sha
+        or not expected_sha.isascii()
+        or _SHA256_HEX_RE.fullmatch(expected_sha) is None
+    ):
         return "HASH_MISMATCH"
 
     try:
