@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fnmatch
 import hashlib
 import os
 import re
@@ -62,7 +61,13 @@ _ALLOWED_GITIGNORE_PATTERNS: dict[str, frozenset[str]] = {
     ),
     "*.lock": frozenset({"*.lock", "**/*.lock"}),
     "*.key": frozenset({"*.key", "**/*.key"}),
-    ".env*": frozenset({".env*", "**/.env*", "/.env*"}),
+    ".env*": frozenset({".env*", "**/.env*"}),
+}
+_GLOB_ALPHABET: frozenset[str] = frozenset(chr(c).lower() for c in range(32, 127) if chr(c) != "/")
+_PROTECTED_FILE_GLOBS: dict[str, tuple[str, ...]] = {
+    "*.lock": ("*.lock", "controller.lock"),
+    "*.key": ("*.key", "*.pem", "*secret*", "*credential*", "*token*"),
+    ".env*": (".env*",),
 }
 _QUIESCENT_TASK_STATUSES: frozenset[str] = frozenset(
     {
@@ -240,8 +245,160 @@ def _walk_workspace_files(workspace_root: Path) -> tuple[list[Path], list[str]]:
     return files, violations
 
 
+def _read_class_char(pat: str, idx: int, end: int) -> tuple[str, int]:
+    if pat[idx] == "\\" and idx + 1 < end:
+        return pat[idx + 1], idx + 2
+    return pat[idx], idx + 1
+
+
+def _tokenize_segment_glob(pat: str) -> list[tuple[str, frozenset[str]]]:
+    tokens: list[tuple[str, frozenset[str]]] = []
+    i = 0
+    n = len(pat)
+    while i < n:
+        ch = pat[i]
+        if ch == "*":
+            if not tokens or tokens[-1][0] != "star":
+                tokens.append(("star", _GLOB_ALPHABET))
+            i += 1
+        elif ch == "?":
+            tokens.append(("char", _GLOB_ALPHABET))
+            i += 1
+        elif ch == "\\":
+            if i + 1 < n:
+                lit = pat[i + 1].lower()
+                i += 2
+            else:
+                lit = "\\"
+                i += 1
+            tokens.append(("char", frozenset({lit})))
+        elif ch == "[":
+            j = i + 1
+            negated = False
+            if j < n and pat[j] in ("!", "^"):
+                negated = True
+                j += 1
+            content_start = j
+            if j < n and pat[j] == "]":
+                j += 1
+            while j < n and pat[j] != "]":
+                if pat[j] == "\\" and j + 1 < n:
+                    j += 2
+                else:
+                    j += 1
+            if j >= n:
+                tokens.append(("char", frozenset({"["})))
+                i += 1
+                continue
+            class_chars: set[str] = set()
+            k = content_start
+            while k < j:
+                lo_ch, next_k = _read_class_char(pat, k, j)
+                if next_k + 1 < j and pat[next_k] == "-":
+                    hi_ch, k = _read_class_char(pat, next_k + 1, j)
+                    if ord(lo_ch) <= ord(hi_ch):
+                        for code in range(ord(lo_ch), ord(hi_ch) + 1):
+                            c_low = chr(code).lower()
+                            if c_low in _GLOB_ALPHABET:
+                                class_chars.add(c_low)
+                else:
+                    c_low = lo_ch.lower()
+                    if c_low in _GLOB_ALPHABET:
+                        class_chars.add(c_low)
+                    k = next_k
+            matched = _GLOB_ALPHABET - class_chars if negated else frozenset(class_chars)
+            if not matched:
+                matched = _GLOB_ALPHABET
+            tokens.append(("char", matched))
+            i = j + 1
+        else:
+            tokens.append(("char", frozenset({ch.lower()})))
+            i += 1
+    return tokens
+
+
+def _segment_globs_intersect(pat_a: str, pat_b: str) -> bool:
+    tokens_a = _tokenize_segment_glob(pat_a)
+    tokens_b = _tokenize_segment_glob(pat_b)
+    len_a = len(tokens_a)
+    len_b = len(tokens_b)
+    dp = [[False] * (len_b + 1) for _ in range(len_a + 1)]
+    dp[len_a][len_b] = True
+
+    for i in range(len_a, -1, -1):
+        for j in range(len_b, -1, -1):
+            if i == len_a and j == len_b:
+                continue
+            can_match = False
+            if i < len_a and tokens_a[i][0] == "star":
+                if dp[i + 1][j]:
+                    can_match = True
+                elif j < len_b:
+                    if tokens_b[j][0] == "star":
+                        if dp[i][j + 1] or dp[i + 1][j + 1]:
+                            can_match = True
+                    elif tokens_a[i][1] & tokens_b[j][1] and dp[i][j + 1]:
+                        can_match = True
+            if not can_match and j < len_b and tokens_b[j][0] == "star":
+                if dp[i][j + 1]:
+                    can_match = True
+                elif i < len_a:
+                    if tokens_a[i][0] == "star":
+                        if dp[i + 1][j] or dp[i + 1][j + 1]:
+                            can_match = True
+                    elif tokens_b[j][1] & tokens_a[i][1] and dp[i + 1][j]:
+                        can_match = True
+            if (
+                not can_match
+                and i < len_a
+                and j < len_b
+                and tokens_a[i][0] == "char"
+                and tokens_b[j][0] == "char"
+                and tokens_a[i][1] & tokens_b[j][1]
+                and dp[i + 1][j + 1]
+            ):
+                can_match = True
+            dp[i][j] = can_match
+    return dp[0][0]
+
+
+def _path_globs_intersect(seq_a: Sequence[str], seq_b: Sequence[str]) -> bool:
+    len_a = len(seq_a)
+    len_b = len(seq_b)
+    dp = [[False] * (len_b + 1) for _ in range(len_a + 1)]
+    dp[len_a][len_b] = True
+
+    for i in range(len_a, -1, -1):
+        for j in range(len_b, -1, -1):
+            if i == len_a and j == len_b:
+                continue
+            can_match = False
+            if i < len_a and seq_a[i] == "**":
+                if dp[i + 1][j]:
+                    can_match = True
+                elif j < len_b and dp[i][j + 1]:
+                    can_match = True
+            if not can_match and j < len_b and seq_b[j] == "**":
+                if dp[i][j + 1]:
+                    can_match = True
+                elif i < len_a and dp[i + 1][j]:
+                    can_match = True
+            if (
+                not can_match
+                and i < len_a
+                and j < len_b
+                and seq_a[i] != "**"
+                and seq_b[j] != "**"
+                and _segment_globs_intersect(seq_a[i], seq_b[j])
+                and dp[i + 1][j + 1]
+            ):
+                can_match = True
+            dp[i][j] = can_match
+    return dp[0][0]
+
+
 def _negation_affects_exclusion(neg_pattern: str, required: str) -> bool:
-    norm = neg_pattern.strip().lstrip("/")
+    norm = neg_pattern.strip().strip("/")
     if not norm:
         return False
     parts = [part for part in norm.split("/") if part]
@@ -250,13 +407,22 @@ def _negation_affects_exclusion(neg_pattern: str, required: str) -> bool:
     last = parts[-1]
     if required in ("stable_c/", "worktrees/", "logs/"):
         dir_name = required.rstrip("/")
-        return any(fnmatch.fnmatchcase(dir_name, part) for part in parts)
-    if required == "*.lock":
-        return last.endswith(".lock") or fnmatch.fnmatchcase("example.lock", last) or last == "**"
-    if required == "*.key":
-        return last.endswith(".key") or fnmatch.fnmatchcase("example.key", last) or last == "**"
-    if required == ".env*":
-        return last.startswith(".env") or fnmatch.fnmatchcase(".env", last) or last == "**"
+        if any(_segment_globs_intersect(part, dir_name) for part in parts):
+            return True
+        if _path_globs_intersect(parts, (dir_name, "**")):
+            return True
+        return _path_globs_intersect(parts, ("**", dir_name, "**"))
+    if required in _PROTECTED_FILE_GLOBS:
+        if last == "**":
+            return True
+        for prot in _PROTECTED_FILE_GLOBS[required]:
+            if _segment_globs_intersect(last, prot):
+                return True
+            if _path_globs_intersect(parts, ("**", prot)):
+                return True
+            if _path_globs_intersect(parts, (prot,)):
+                return True
+        return False
     return False
 
 

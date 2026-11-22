@@ -633,11 +633,17 @@ def test_verify_workspace_git_quiescence_gitignore_scope_and_negations(
     tmp_path: Path,
 ) -> None:
     base_rules = "stable_c/\n**/runtime/worktrees/\n**/runtime/logs/\n**/*.lock\n*.key\n.env*\n"
-    ws_valid = _setup_quiescent_workspace(tmp_path / "ws_ign_valid")
-    (ws_valid / ".gitignore").write_text(base_rules, encoding="utf-8", newline="\n")
-    rep_valid = verify_workspace_git_quiescence(ws_valid)
-    assert rep_valid.passed is True
-    assert rep_valid.checks["git_hygiene"] is True
+    for idx, valid_rules in enumerate(
+        (
+            base_rules,
+            "stable_c/\n**/runtime/worktrees/\n**/runtime/logs/\n**/*.lock\n*.key\n**/.env*\n",
+        )
+    ):
+        ws_valid = _setup_quiescent_workspace(tmp_path / f"ws_ign_valid_{idx}")
+        (ws_valid / ".gitignore").write_text(valid_rules, encoding="utf-8", newline="\n")
+        rep_valid = verify_workspace_git_quiescence(ws_valid)
+        assert rep_valid.passed is True
+        assert rep_valid.checks["git_hygiene"] is True
 
     scoped_cases = (
         "stable_c/\nworktrees/\nsubdir/logs/\n*.lock\n*.key\n.env*\n",
@@ -648,6 +654,7 @@ def test_verify_workspace_git_quiescence_gitignore_scope_and_negations(
         "stable_c/\nworktrees/\nlogs/\n/*.lock\n*.key\n.env*\n",
         "stable_c/\nworktrees/\nlogs/\n*.lock\nsubdir/*.key\n.env*\n",
         "stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\nsubdir/.env*\n",
+        "stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\n/.env*\n",
     )
     for idx, content in enumerate(scoped_cases):
         ws_scoped = _setup_quiescent_workspace(tmp_path / f"ws_scoped_{idx}")
@@ -669,6 +676,12 @@ def test_verify_workspace_git_quiescence_gitignore_scope_and_negations(
         "!operator.key",
         "!.env",
         "!.env.local",
+        "!a.l?ck",
+        "!a.k?y",
+        "!.en?",
+        "!*[l]ock",
+        "!**/s?able_c/*",
+        "!*",
     )
     for idx, neg_line in enumerate(trailing_negations):
         ws_neg = _setup_quiescent_workspace(tmp_path / f"ws_neg_{idx}")
