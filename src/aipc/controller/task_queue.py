@@ -1559,6 +1559,15 @@ class PersistentTaskQueue:
                         eff_ledger_path = candidate_path.resolve()
                         break
 
+            if (
+                self._repair_budget_path is not None
+                and budget_ledger_path is not None
+                and Path(budget_ledger_path).resolve() != self._repair_budget_path
+            ):
+                raise ControllerError(
+                    "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
+                )
+
             if budget_ledger_path is not None and (
                 eff_ledger_path is None or not eff_ledger_path.is_file()
             ):
