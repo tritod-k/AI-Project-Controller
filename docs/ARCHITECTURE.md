@@ -331,16 +331,18 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   `CURRENT_STATUS.md` directly from canonical nested `QueuedTaskRecord.contract` fields.
   `aipc.project.workspace_git_checkpoint` holds exclusive `controller.lock` to verify LF
   `.gitattributes`, workspace-wide `.gitignore` coverage (rejecting path-scoped or root-only
-  `.env*` exclusions and Unicode-complete glob-vs-glob overlapping trailing `!` negations),
-  zero secrets (including quoted JSON/YAML credentials starting with expression-prefix
-  characters in portable root docs while preserving safe unquoted PowerShell expressions and
-  pure placeholders), valid LF `.sha256` sidecars, and schema-valid quiescent queues
-  (enforcing `_QUIESCENT_TASK_STATUSES`, unifying `repair_budget.py` and `task_queue.py`
-  reservation/dispatch/reconciliation under a shared exclusive lock, persisting durable
-  queue-level `reconciliation_required` / `unresolved_reservation_ids` blockers on missing-task
-  or uncertain `RESERVED` budget entries, requiring exact non-empty `(operation_id, attempt_id)`
-  matches, and rejecting symlinked HMAC key ancestor directories) prior to Private
-  Control-Plane Git checkpoints.
+  `.env*` exclusions and exact elementary interval-partition Unicode glob-vs-glob overlapping
+  trailing `!` negations over `U+0000..U+10FFFF`), zero secrets (including quoted JSON/YAML
+  credentials starting with expression-prefix characters in portable root docs while preserving
+  safe unquoted PowerShell expressions and pure placeholders), valid LF `.sha256` sidecars, and
+  schema-valid quiescent queues (enforcing `_QUIESCENT_TASK_STATUSES`, unifying
+  `repair_budget.py` and `task_queue.py` reservation/dispatch/reconciliation under a shared
+  exclusive lock, failing closed on missing ledgers or missing active `RESERVED` entries for
+  exact `(task_id, operation_id, attempt_id)` with zero historical `CONSUMED` bypasses,
+  persisting durable queue-level `reconciliation_required` / `unresolved_reservation_ids`
+  blockers on missing-task or uncertain `RESERVED` entries, stripping all `AIPC_HMAC_*` and
+  `AIPC_OPERATOR_HMAC_*` env vars, and rejecting symlinked HMAC key ancestor directories) prior
+  to Private Control-Plane Git checkpoints.
 - **Strictly Read-Only Multi-Project Dashboard (`D02`, `FINAL-03`):**
   `aipc.dashboard.multi_project` and read-only `server.py` endpoints (`GET /multi-project`,
   `GET /api/multi-project`, HTTP `405` on mutations) aggregate multi-project phase, queue,
