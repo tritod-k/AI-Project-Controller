@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import re
@@ -23,7 +24,11 @@ from aipc.project.scaffolding import (
 )
 from aipc.project.workspace_git_checkpoint import (
     WorkspaceGitQuiescenceError,
+    _case_key,
+    _collect_pattern_boundaries,
     _segment_globs_intersect,
+    _tokenize_segment_glob,
+    _unicode_case_tables,
     acquire_controller_lock,
     verify_workspace_git_quiescence,
 )
@@ -760,3 +765,112 @@ def test_segment_globs_intersect_exact_unicode_interval_partition_counterexample
     assert rep.passed is False
     assert rep.checks["git_hygiene"] is False
     assert any(neg_line in v for v in rep.violations)
+
+
+def test_segment_globs_intersect_unicode_inverse_case_discontinuities() -> None:
+    # Latin small letter long s (U+017F) case-folds to 's'/'S'
+    assert _segment_globs_intersect("S", "[\u0170-\u0180]") is True
+    assert _segment_globs_intersect("[\u0170-\u0180]", "S") is True
+
+    # Interior-to-interior range intersection via U+017F <-> 's'
+    assert _segment_globs_intersect("[r-t]", "[\u0170-\u0180]") is True
+    assert _segment_globs_intersect("[\u0170-\u0180]", "[r-t]") is True
+
+    # Kelvin sign (U+212A) case-folds to 'k'/'K'
+    assert _segment_globs_intersect("K", "[\u2120-\u2130]") is True
+    assert _segment_globs_intersect("[\u2120-\u2130]", "K") is True
+
+    # Negated class excludes S when U+017F is covered, and includes S when stopped at U+017E
+    assert _segment_globs_intersect("[!\u0170-\u0180]", "S") is False
+    assert _segment_globs_intersect("S", "[!\u0170-\u0180]") is False
+    assert _segment_globs_intersect("[!\u0170-\u017e]", "S") is True
+    assert _segment_globs_intersect("S", "[!\u0170-\u017e]") is True
+
+
+def test_unicode_elementary_interval_partition_constancy_invariant() -> None:
+    _, all_cased_cps = _unicode_case_tables()
+    pattern_pairs: tuple[tuple[str, str], ...] = (
+        ("S[\u0170-\u0180][!S]", "[a-z][\u2120-\u2130][!\u0170-\u0180]"),
+        ("[\u0370-\u03ff]K[!\u0170-\u0180]", "[!S][\u2120-\u2130][a-z]"),
+    )
+    for pat_a, pat_b in pattern_pairs:
+        boundaries = (
+            {0, ord("/"), ord("/") + 1, 0xD800, 0xE000, 0x110000}
+            | _collect_pattern_boundaries(pat_a)
+            | _collect_pattern_boundaries(pat_b)
+        )
+        sorted_b = sorted(b for b in boundaries if 0 <= b <= 0x110000)
+
+        interval_samples: list[tuple[int, int, list[int]]] = []
+        sample_chars: set[str] = set()
+        for b_i, b_next in zip(sorted_b, sorted_b[1:], strict=False):
+            if b_i >= b_next or b_i == ord("/") or 0xD800 <= b_i < 0xE000:
+                continue
+            c_start = bisect.bisect_left(all_cased_cps, b_i)
+            c_end = bisect.bisect_left(all_cased_cps, b_next)
+            mid = (b_i + b_next - 1) // 2
+            cps = sorted({b_i, b_next - 1, mid, *all_cased_cps[c_start:c_end]})
+            interval_samples.append((b_i, b_next, cps))
+            for cp in cps:
+                sample_chars.add(chr(cp))
+
+        sample_alphabet = frozenset(sample_chars)
+        all_tokens = [
+            *_tokenize_segment_glob(pat_a, sample_alphabet),
+            *_tokenize_segment_glob(pat_b, sample_alphabet),
+        ]
+        for b_i, b_next, cps in interval_samples:
+            rep_sig = tuple(chr(b_i) in chars for _, chars in all_tokens)
+            for cp in cps:
+                cp_sig = tuple(chr(cp) in chars for _, chars in all_tokens)
+                assert cp_sig == rep_sig, f"Mismatch in [{b_i:#x}, {b_next:#x}) at {cp:#x}"
+
+    def _ref_single_token_keys(pat: str) -> tuple[bool, frozenset[str]]:
+        if pat.startswith("[") and pat.endswith("]"):
+            inner = pat[1:-1]
+            negated = inner.startswith(("!", "^"))
+            if negated:
+                inner = inner[1:]
+            keys: set[str] = set()
+            idx = 0
+            while idx < len(inner):
+                if idx + 2 < len(inner) and inner[idx + 1] == "-":
+                    lo_ord = ord(inner[idx])
+                    hi_ord = ord(inner[idx + 2])
+                    for c in range(lo_ord, hi_ord + 1):
+                        if c != 0x2F:
+                            keys.add(_case_key(chr(c)))
+                    idx += 3
+                else:
+                    if inner[idx] != "/":
+                        keys.add(_case_key(inner[idx]))
+                    idx += 1
+            return negated, frozenset(keys)
+        return False, frozenset({_case_key(pat)})
+
+    def _ref_intersects_0_to_2200(pat_a: str, pat_b: str) -> bool:
+        neg_a, keys_a = _ref_single_token_keys(pat_a)
+        neg_b, keys_b = _ref_single_token_keys(pat_b)
+        for cp in range(0x2201):
+            if cp == 0x2F:
+                continue
+            key = _case_key(chr(cp))
+            in_a = key not in keys_a if neg_a else key in keys_a
+            in_b = key not in keys_b if neg_b else key in keys_b
+            if in_a and in_b:
+                return True
+        return False
+
+    reference_pairs: tuple[tuple[str, str], ...] = (
+        ("S", "[\u0170-\u0180]"),
+        ("[\u0170-\u0180]", "S"),
+        ("[r-t]", "[\u0170-\u0180]"),
+        ("[\u0170-\u0180]", "[r-t]"),
+        ("K", "[\u2120-\u2130]"),
+        ("[\u2120-\u2130]", "K"),
+        ("[!\u0170-\u0180]", "S"),
+        ("[!\u0170-\u017e]", "S"),
+    )
+    for pat_a, pat_b in reference_pairs:
+        expected = _ref_intersects_0_to_2200(pat_a, pat_b)
+        assert _segment_globs_intersect(pat_a, pat_b) is expected

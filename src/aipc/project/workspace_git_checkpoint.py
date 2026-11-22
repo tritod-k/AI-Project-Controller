@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import contextlib
+import functools
 import hashlib
 import os
 import re
@@ -255,19 +257,38 @@ def _read_class_char(pat: str, idx: int, end: int) -> tuple[str, int]:
     return pat[idx], idx + 1
 
 
-def _single_cp_case_variants(ch: str) -> tuple[str, ...]:
-    variants: list[str] = []
-    for candidate in (ch, ch.lower(), ch.upper(), ch.casefold()):
-        if len(candidate) == 1 and candidate not in variants:
-            variants.append(candidate)
-    return tuple(variants)
+def _case_key(ch: str) -> str:
+    cf = ch.casefold()
+    return cf if len(cf) == 1 else ch.lower()
+
+
+@functools.lru_cache(maxsize=1)
+def _unicode_case_tables() -> tuple[dict[str, tuple[int, ...]], tuple[int, ...]]:
+    buckets: dict[str, list[int]] = {}
+    for cp in range(0x110000):
+        if cp == 0x2F or 0xD800 <= cp < 0xE000:
+            continue
+        key = _case_key(chr(cp))
+        buckets.setdefault(key, []).append(cp)
+    equiv_groups: dict[str, tuple[int, ...]] = {}
+    cased_cps: list[int] = []
+    for key, cps in buckets.items():
+        if len(cps) >= 2:
+            tup = tuple(cps)
+            equiv_groups[key] = tup
+            cased_cps.extend(tup)
+    cased_cps.sort()
+    return equiv_groups, tuple(cased_cps)
 
 
 def _add_char_boundaries(boundaries: set[int], ch: str) -> None:
-    for variant in _single_cp_case_variants(ch):
-        v_ord = ord(variant)
-        boundaries.add(max(0, min(v_ord, 0x110000)))
-        boundaries.add(max(0, min(v_ord + 1, 0x110000)))
+    ch_ord = ord(ch)
+    boundaries.add(max(0, min(ch_ord, 0x110000)))
+    boundaries.add(max(0, min(ch_ord + 1, 0x110000)))
+    equiv_groups, _ = _unicode_case_tables()
+    for member in equiv_groups.get(_case_key(ch), ()):
+        boundaries.add(max(0, min(member, 0x110000)))
+        boundaries.add(max(0, min(member + 1, 0x110000)))
 
 
 def _add_range_boundaries(boundaries: set[int], lo_ch: str, hi_ch: str) -> None:
@@ -277,22 +298,15 @@ def _add_range_boundaries(boundaries: set[int], lo_ch: str, hi_ch: str) -> None:
         return
     boundaries.add(max(0, min(lo_ord, 0x110000)))
     boundaries.add(max(0, min(hi_ord + 1, 0x110000)))
-    _add_char_boundaries(boundaries, lo_ch)
-    _add_char_boundaries(boundaries, hi_ch)
-    for fn in (str.lower, str.upper, str.casefold):
-        t_lo = fn(lo_ch)
-        t_hi = fn(hi_ch)
-        if len(t_lo) == 1 and len(t_hi) == 1 and ord(t_lo) <= ord(t_hi):
-            boundaries.add(max(0, min(ord(t_lo), 0x110000)))
-            boundaries.add(max(0, min(ord(t_hi) + 1, 0x110000)))
-    upper_lo = max(lo_ord, ord("A"))
-    upper_hi = min(hi_ord, ord("Z"))
-    if upper_lo <= upper_hi:
-        boundaries.update((upper_lo, upper_hi + 1, upper_lo + 32, upper_hi + 33))
-    lower_lo = max(lo_ord, ord("a"))
-    lower_hi = min(hi_ord, ord("z"))
-    if lower_lo <= lower_hi:
-        boundaries.update((lower_lo, lower_hi + 1, lower_lo - 32, lower_hi - 31))
+    equiv_groups, all_cased_cps = _unicode_case_tables()
+    start = bisect.bisect_left(all_cased_cps, lo_ord)
+    end = bisect.bisect_right(all_cased_cps, hi_ord)
+    for cp in all_cased_cps[start:end]:
+        boundaries.add(max(0, min(cp, 0x110000)))
+        boundaries.add(max(0, min(cp + 1, 0x110000)))
+        for member in equiv_groups[_case_key(chr(cp))]:
+            boundaries.add(max(0, min(member, 0x110000)))
+            boundaries.add(max(0, min(member + 1, 0x110000)))
 
 
 def _collect_pattern_boundaries(pat: str) -> set[int]:
@@ -357,17 +371,16 @@ def _build_comparison_alphabet(pat_a: str, pat_b: str) -> frozenset[str]:
 
 
 def _char_matches_literal(rep: str, lit: str) -> bool:
-    if rep == "/":
-        return False
-    if rep == lit or rep.lower() == lit.lower() or rep.upper() == lit.upper():
-        return True
-    rep_cf = rep.casefold()
-    lit_cf = lit.casefold()
-    return len(rep_cf) == 1 and len(lit_cf) == 1 and rep_cf == lit_cf
+    return rep != "/" and _case_key(rep) == _case_key(lit)
 
 
 def _char_matches_range(rep: str, lo_ord: int, hi_ord: int) -> bool:
-    return rep != "/" and any(lo_ord <= ord(v) <= hi_ord for v in _single_cp_case_variants(rep))
+    if rep == "/" or lo_ord > hi_ord:
+        return False
+    if lo_ord <= ord(rep) <= hi_ord:
+        return True
+    equiv_groups, _ = _unicode_case_tables()
+    return any(lo_ord <= cp <= hi_ord for cp in equiv_groups.get(_case_key(rep), ()))
 
 
 def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str, frozenset[str]]]:
@@ -438,10 +451,33 @@ def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str
     return tokens
 
 
+def _deduplicate_token_alphabet(
+    alphabet: frozenset[str],
+    tokens_a: list[tuple[str, frozenset[str]]],
+    tokens_b: list[tuple[str, frozenset[str]]],
+) -> tuple[list[tuple[str, frozenset[str]]], list[tuple[str, frozenset[str]]]]:
+    char_sets = [chars for kind, chars in (*tokens_a, *tokens_b) if kind == "char"]
+    if not char_sets:
+        rep_alphabet = frozenset({min(alphabet)}) if alphabet else frozenset()
+    else:
+        seen_signatures: set[tuple[bool, ...]] = set()
+        kept: list[str] = []
+        for ch in sorted(alphabet):
+            sig = tuple(ch in chars for chars in char_sets)
+            if sig not in seen_signatures:
+                seen_signatures.add(sig)
+                kept.append(ch)
+        rep_alphabet = frozenset(kept)
+    dedup_a = [(kind, chars & rep_alphabet) for kind, chars in tokens_a]
+    dedup_b = [(kind, chars & rep_alphabet) for kind, chars in tokens_b]
+    return dedup_a, dedup_b
+
+
 def _segment_globs_intersect(pat_a: str, pat_b: str) -> bool:
     alphabet = _build_comparison_alphabet(pat_a, pat_b)
     tokens_a = _tokenize_segment_glob(pat_a, alphabet)
     tokens_b = _tokenize_segment_glob(pat_b, alphabet)
+    tokens_a, tokens_b = _deduplicate_token_alphabet(alphabet, tokens_a, tokens_b)
     len_a = len(tokens_a)
     len_b = len(tokens_b)
     dp = [[False] * (len_b + 1) for _ in range(len_a + 1)]
