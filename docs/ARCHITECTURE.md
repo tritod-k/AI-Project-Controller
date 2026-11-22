@@ -337,9 +337,12 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   safe unquoted PowerShell expressions and pure placeholders), valid LF `.sha256` sidecars, and
   schema-valid quiescent queues (enforcing `_QUIESCENT_TASK_STATUSES`, unifying
   `repair_budget.py` and `task_queue.py` reservation/dispatch/reconciliation under a shared
-  exclusive lock, validating canonical `expected_attempt_id` prior to reservation, requiring a
-  non-blank `operation_id` and exact active `RESERVED` entry on all budget-backed dispatches
-  with zero historical `CONSUMED` bypasses, persisting durable queue-level
+  exclusive lock, validating canonical `expected_attempt_id` prior to reservation, accurately
+  attributing and charging `BASE` vs. `GRANT` extension capacity in `reserve_attempt_budget()`,
+  strictly cross-checking `(reservation_id, operation_id)` pairs in `release_attempt_budget()`,
+  enforcing `^plan-v[0-9]{4,}$` in `snapshot_approved_plan()`, and requiring a non-blank
+  `operation_id` and exact active `RESERVED` entry on all budget-backed and sibling-ledger
+  dispatches with zero historical `CONSUMED` bypasses, persisting durable queue-level
   `reconciliation_required` / `unresolved_reservation_ids` blockers on missing-task or
   uncertain `RESERVED` entries, stripping all `AIPC_HMAC_*` and `AIPC_OPERATOR_HMAC_*` env
   vars, and rejecting symlinked HMAC key ancestor directories) prior to Private Control-Plane
