@@ -1396,13 +1396,21 @@ class PersistentTaskQueue:
                     f"task '{task_id}' is not eligible for dispatch (status={target.status})"
                 )
             next_attempt_num = target.current_attempt + 1
-            eff_attempt_id = (
-                attempt_id if attempt_id is not None else f"att-{next_attempt_num:02d}-{task_id}"
-            )
+            expected_attempt_id = f"att-{next_attempt_num:02d}-{task_id}"
 
             clean_op = operation_id.strip() if isinstance(operation_id, str) else ""
+            if not clean_op:
+                raise ValueError("operation_id must be a non-empty string")
+            if attempt_id is not None and (
+                not isinstance(attempt_id, str) or attempt_id.strip() != expected_attempt_id
+            ):
+                raise ValueError(
+                    f"attempt_id '{attempt_id}' does not match canonical next "
+                    f"attempt_id '{expected_attempt_id}'"
+                )
+
             already_reserved = False
-            if clean_op and hasattr(ledger, "load"):
+            if hasattr(ledger, "load"):
                 existing_state = ledger.load()  # type: ignore[attr-defined]
                 already_reserved = any(
                     r.operation_id == clean_op for r in existing_state.reservations.values()
@@ -1417,8 +1425,8 @@ class PersistentTaskQueue:
 
             reservation = ledger.reserve_attempt_budget(  # type: ignore[attr-defined]
                 task_id=task_id,
-                operation_id=operation_id,
-                attempt_id=eff_attempt_id,
+                operation_id=clean_op,
+                attempt_id=expected_attempt_id,
                 attempt=next_attempt_num,
                 candidate_sha=candidate_sha,
                 review_id=review_id,
@@ -1431,7 +1439,8 @@ class PersistentTaskQueue:
                     worker_id=worker_id,
                     provider=provider,
                     target_paths=target_paths,
-                    operation_id=operation_id,
+                    operation_id=clean_op,
+                    expected_attempt_id=expected_attempt_id,
                     budget_ledger_path=budget_ledger_path,
                 )
             except Exception:
@@ -1459,6 +1468,7 @@ class PersistentTaskQueue:
         target_paths: tuple[str, ...] | None = None,
         repair_reservation_id: str | None = None,
         operation_id: str | None = None,
+        expected_attempt_id: str | None = None,
         budget_ledger_path: Path | None = None,
         policy_trust_context: PolicyTrustContext | None = None,
         milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
@@ -1546,13 +1556,23 @@ class PersistentTaskQueue:
                 )
 
             attempt_id = f"att-{next_attempt_num:02d}-{task_id}"
+            if expected_attempt_id is not None and (
+                not isinstance(expected_attempt_id, str)
+                or expected_attempt_id.strip() != attempt_id
+            ):
+                raise ControllerError(
+                    f"Cannot dispatch task '{task_id}': expected_attempt_id "
+                    f"'{expected_attempt_id}' does not match canonical attempt_id '{attempt_id}'"
+                )
 
             eff_ledger_path: Path | None = (
                 Path(budget_ledger_path).resolve()
                 if budget_ledger_path is not None
                 else self._repair_budget_path
             )
-            if eff_ledger_path is None and operation_id is not None:
+            if eff_ledger_path is None and (
+                operation_id is not None or expected_attempt_id is not None
+            ):
                 for candidate_name in ("repair_budget_ledger.json", "budget.json"):
                     candidate_path = self._path.parent / candidate_name
                     if candidate_path.is_file():
@@ -1567,59 +1587,6 @@ class PersistentTaskQueue:
                 raise ControllerError(
                     "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
                 )
-
-            if budget_ledger_path is not None and (
-                eff_ledger_path is None or not eff_ledger_path.is_file()
-            ):
-                raise ControllerError(
-                    f"Cannot dispatch task '{task_id}': "
-                    f"budget ledger file not found: {eff_ledger_path}"
-                )
-
-            if operation_id is not None:
-                clean_op_id = operation_id.strip()
-                if not clean_op_id:
-                    raise ControllerError(
-                        f"Cannot dispatch task '{task_id}': operation_id must not be blank"
-                    )
-                if eff_ledger_path is None or not eff_ledger_path.is_file():
-                    raise ControllerError(
-                        f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': "
-                        "budget ledger is missing or unavailable"
-                    )
-                lock_stack.enter_context(_acquire_queue_ledger_lock(None, eff_ledger_path))
-                from aipc.controller.repair_budget import (
-                    DurableRepairBudgetLedger,
-                    RepairBudgetError,
-                )
-
-                try:
-                    budget_state = DurableRepairBudgetLedger(
-                        eff_ledger_path, clock=self._clock
-                    ).load()
-                except RepairBudgetError as exc:
-                    raise ControllerError(
-                        f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': {exc}"
-                    ) from exc
-                matching_res = [
-                    r for r in budget_state.reservations.values() if r.operation_id == clean_op_id
-                ]
-                if len(matching_res) != 1:
-                    raise ControllerError(
-                        f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': "
-                        "budget reservation is missing or not in RESERVED state"
-                    )
-                res = matching_res[0]
-                if (
-                    res.status != "RESERVED"
-                    or res.task_id != task_id
-                    or res.attempt_id is None
-                    or res.attempt_id.strip() != attempt_id
-                ):
-                    raise ControllerError(
-                        f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': "
-                        "budget reservation is missing or not in RESERVED state"
-                    )
 
             is_c5 = any(
                 _is_milestone_c5_scope(val)
@@ -1648,6 +1615,85 @@ class PersistentTaskQueue:
                     target.contract.task_id,
                 )
             )
+            is_legacy_c567_initial = (
+                (is_c5 or is_c6 or is_c7)
+                and target.status == QueuedTaskStatus.ELIGIBLE
+                and operation_id is None
+                and expected_attempt_id is None
+                and (
+                    budget_ledger_path is None
+                    or (
+                        self._repair_budget_path is not None
+                        and Path(budget_ledger_path).resolve() == self._repair_budget_path
+                    )
+                )
+            )
+            is_legacy_c567_repair = (
+                (is_c5 or is_c6 or is_c7)
+                and target.status == QueuedTaskStatus.REPAIR_REQUIRED
+                and operation_id is None
+                and expected_attempt_id is None
+            )
+            requires_op_reservation = (
+                operation_id is not None
+                or expected_attempt_id is not None
+                or (
+                    (budget_ledger_path is not None or self._repair_budget_path is not None)
+                    and not is_legacy_c567_initial
+                    and not is_legacy_c567_repair
+                )
+            )
+
+            clean_op_id: str | None = None
+            if requires_op_reservation:
+                if eff_ledger_path is None or not eff_ledger_path.is_file():
+                    if budget_ledger_path is not None:
+                        raise ControllerError(
+                            f"Cannot dispatch task '{task_id}': "
+                            f"budget ledger file not found: {eff_ledger_path}"
+                        )
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}': budget ledger is missing or unavailable"
+                    )
+                if not isinstance(operation_id, str) or not operation_id.strip():
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}': "
+                        "budget-backed dispatch requires a non-blank operation_id"
+                    )
+                clean_op_id = operation_id.strip()
+                lock_stack.enter_context(_acquire_queue_ledger_lock(None, eff_ledger_path))
+                from aipc.controller.repair_budget import (
+                    DurableRepairBudgetLedger,
+                    RepairBudgetError,
+                )
+
+                try:
+                    budget_state = DurableRepairBudgetLedger(
+                        eff_ledger_path, clock=self._clock
+                    ).load()
+                except RepairBudgetError as exc:
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}' for operation_id '{clean_op_id}': {exc}"
+                    ) from exc
+                matching_res = [
+                    r for r in budget_state.reservations.values() if r.operation_id == clean_op_id
+                ]
+                if len(matching_res) != 1:
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}' for operation_id '{clean_op_id}': "
+                        "budget reservation is missing or not in RESERVED state"
+                    )
+                res = matching_res[0]
+                if (
+                    res.status != "RESERVED"
+                    or res.task_id != task_id
+                    or res.attempt_id is None
+                    or res.attempt_id.strip() != attempt_id
+                ):
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}' for operation_id '{clean_op_id}': "
+                        "budget reservation is missing or not in RESERVED state"
+                    )
             if target.status == QueuedTaskStatus.REPAIR_REQUIRED and (is_c5 or is_c6 or is_c7):
                 scope_label = (
                     "Milestone C.7" if is_c7 else "Milestone C.6" if is_c6 else "Milestone C.5"
@@ -1722,7 +1768,7 @@ class PersistentTaskQueue:
             ledger = TaskAttemptLedger(
                 attempt=next_attempt_num,
                 attempt_id=attempt_id,
-                operation_id=operation_id,
+                operation_id=clean_op_id,
                 worker_id=worker_id,
                 provider=provider,
                 dispatch_stage="DISPATCHED",
@@ -1739,7 +1785,7 @@ class PersistentTaskQueue:
                     "status": QueuedTaskStatus.RUNNING,
                     "current_attempt": next_attempt_num,
                     "active_attempt_id": attempt_id,
-                    "operation_id": operation_id,
+                    "operation_id": clean_op_id,
                     "attempts": (*target.attempts, ledger),
                     "interruption_reason": None,
                 }

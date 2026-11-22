@@ -1417,3 +1417,166 @@ def test_begin_dispatch_rejects_unreserved_attempt_despite_historical_consumed_e
     state_after = ledger.load()
     assert state_after.milestone_consumed == 1
     assert state_after.registered_roots["task-01"].consumed == 1
+
+
+def test_reserve_and_begin_dispatch_rejects_mismatched_attempt_id_before_reserving(
+    tmp_path: Path,
+) -> None:
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, repair_budget_path=ledger_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    for bad_attempt_id in ("att-99-wrong", "   "):
+        with pytest.raises(ValueError, match="does not match canonical next attempt_id"):
+            queue.reserve_and_begin_dispatch(
+                "task-01",
+                ledger=ledger,
+                worker_id="w-01",
+                provider="mock",
+                operation_id="op-bad-attempt",
+                attempt_id=bad_attempt_id,
+            )
+        state = ledger.load()
+        assert len(state.reservations) == 0
+        assert state.milestone_consumed == 0
+        assert state.registered_roots["task-01"].consumed == 0
+        task_state = queue.load().tasks[0]
+        assert task_state.status == QueuedTaskStatus.ELIGIBLE
+        assert task_state.current_attempt == 0
+
+    with pytest.raises(ValueError, match="operation_id must be a non-empty string"):
+        queue.reserve_and_begin_dispatch(
+            "task-01",
+            ledger=ledger,
+            worker_id="w-01",
+            provider="mock",
+            operation_id="   ",
+            attempt_id="att-01-task-01",
+        )
+    assert len(ledger.load().reservations) == 0
+    assert ledger.load().milestone_consumed == 0
+
+    reservation, dispatched = queue.reserve_and_begin_dispatch(
+        "task-01",
+        ledger=ledger,
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-canonical-01",
+        attempt_id="att-01-task-01",
+    )
+    assert getattr(reservation, "attempt_id", None) == "att-01-task-01"
+    assert dispatched.status == QueuedTaskStatus.RUNNING
+    assert dispatched.current_attempt == 1
+    assert dispatched.active_attempt_id == "att-01-task-01"
+    assert dispatched.operation_id == "op-canonical-01"
+    assert dispatched.attempts[0].attempt_id == "att-01-task-01"
+    state_after = ledger.load()
+    assert len(state_after.reservations) == 1
+    assert state_after.milestone_consumed == 1
+    assert state_after.registered_roots["task-01"].consumed == 1
+
+
+def test_begin_dispatch_rejects_missing_or_blank_operation_id_on_budget_backed_queue(
+    tmp_path: Path,
+) -> None:
+    policy = _make_loaded_policy()
+
+    # 1. Bound repair_budget_path queue rejects operation_id=None and blank operation_id
+    bound_dir = tmp_path / "bound"
+    bound_ledger_path = bound_dir / "budget.json"
+    bound_ledger = DurableRepairBudgetLedger(bound_ledger_path, clock=_fixed_now)
+    bound_ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    bound_queue = PersistentTaskQueue(
+        bound_dir / "queue.json",
+        repair_budget_path=bound_ledger_path,
+        clock=_fixed_now,
+    )
+    bound_queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    for bad_op in (None, "   "):
+        with pytest.raises(
+            ControllerError,
+            match="budget-backed dispatch requires a non-blank operation_id",
+        ):
+            bound_queue.begin_dispatch(
+                "task-01",
+                worker_id="w-01",
+                provider="mock",
+                operation_id=bad_op,
+            )
+        task_state = bound_queue.load().tasks[0]
+        assert task_state.status == QueuedTaskStatus.ELIGIBLE
+        assert task_state.status != QueuedTaskStatus.RUNNING
+        assert task_state.current_attempt == 0
+        assert task_state.attempts == ()
+
+    # 2. Unbound queue with explicit budget_ledger_path and operation_id=None fails closed
+    unbound_dir = tmp_path / "unbound"
+    unbound_queue = PersistentTaskQueue(unbound_dir / "queue.json", clock=_fixed_now)
+    unbound_queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+    with pytest.raises(
+        ControllerError,
+        match="budget-backed dispatch requires a non-blank operation_id",
+    ):
+        unbound_queue.begin_dispatch(
+            "task-01",
+            worker_id="w-01",
+            provider="mock",
+            budget_ledger_path=bound_ledger_path,
+            operation_id=None,
+        )
+    unbound_task = unbound_queue.load().tasks[0]
+    assert unbound_task.status == QueuedTaskStatus.ELIGIBLE
+    assert unbound_task.current_attempt == 0
+    assert unbound_task.attempts == ()
+
+    # 3. Mismatched expected_attempt_id fails closed even with a valid reservation
+    bound_ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-valid-01",
+        attempt_id="att-01-task-01",
+    )
+    with pytest.raises(ControllerError, match="does not match canonical attempt_id"):
+        bound_queue.begin_dispatch(
+            "task-01",
+            worker_id="w-01",
+            provider="mock",
+            operation_id="op-valid-01",
+            expected_attempt_id="att-99-wrong",
+        )
+    assert bound_queue.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+    assert bound_queue.load().tasks[0].current_attempt == 0
+
+    # 4. Alternate budget_ledger_path on a bound queue fails closed
+    alt_ledger_path = tmp_path / "alt" / "budget.json"
+    alt_ledger = DurableRepairBudgetLedger(alt_ledger_path, clock=_fixed_now)
+    alt_ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+    with pytest.raises(ControllerError, match="Alternate budget_ledger_path rejected"):
+        bound_queue.begin_dispatch(
+            "task-01",
+            worker_id="w-01",
+            provider="mock",
+            operation_id="op-valid-01",
+            budget_ledger_path=alt_ledger_path,
+        )
+    assert bound_queue.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+    assert bound_queue.load().tasks[0].current_attempt == 0
