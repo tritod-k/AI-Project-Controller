@@ -1930,6 +1930,7 @@ class DurableRepairBudgetLedger:
         loaded_policy: LoadedReviewGovernancePolicy | None = None,
         trust_context: PolicyTrustContext | None = None,
         target_paths: Sequence[str] | None = None,
+        grant_approval_id: str | None = None,
     ) -> BudgetReservationRecord:
         """Reserve an operation-correlated attempt budget slot (RESERVED)."""
         clean_op = operation_id.strip() if isinstance(operation_id, str) else ""
@@ -1940,6 +1941,11 @@ class DurableRepairBudgetLedger:
             raise RepairBudgetError("reserve_attempt_budget requires a non-blank attempt_id")
         if attempt < 1:
             raise RepairBudgetError("attempt must be >= 1")
+        clean_grant_id: str | None = None
+        if grant_approval_id is not None:
+            if not isinstance(grant_approval_id, str) or not grant_approval_id.strip():
+                raise RepairBudgetError("grant_approval_id must be a non-blank string")
+            clean_grant_id = grant_approval_id.strip()
         norm_paths = _normalize_target_paths(target_paths)
         event_id = f"op-{clean_op}"
 
@@ -1959,6 +1965,8 @@ class DurableRepairBudgetLedger:
                     existing.task_id != task_id
                     or existing.operation_id != clean_op
                     or existing.attempt_id != clean_att
+                    or existing.target_paths != norm_paths
+                    or (clean_grant_id is not None and existing.grant_approval_id != clean_grant_id)
                 ):
                     raise RepairBudgetError(
                         f"Conflicting replay for operation_id '{clean_op}' rejected"
@@ -1981,6 +1989,41 @@ class DurableRepairBudgetLedger:
                 )
 
             now = self._clock()
+            base_used = (
+                counter.base_consumed if counter.base_consumed is not None else counter.consumed
+            )
+            funding_source: Literal["BASE", "GRANT"] = "BASE"
+            selected_idx: int | None = None
+            selected_grant: AppliedExtensionRecord | None = None
+            if (
+                clean_grant_id is None
+                and base_used < counter.base_limit
+                and state.milestone_consumed < state.base_milestone_limit
+            ):
+                funding_source = "BASE"
+                new_base = base_used + 1
+            else:
+                match = self._find_eligible_grant(
+                    state,
+                    root_task=root_task,
+                    task_id=task_id,
+                    now=now,
+                    target_paths=norm_paths,
+                    grant_approval_id=clean_grant_id,
+                )
+                if match is None:
+                    raise RepairBudgetError(
+                        f"Root lineage '{root_task}' base repair budget exhausted and "
+                        "no eligible active extension grant is available"
+                    )
+                selected_idx, selected_grant = match
+                if not norm_paths:
+                    raise RepairBudgetError(
+                        "Grant-funded attempt reservation requires non-empty target_paths"
+                    )
+                funding_source = "GRANT"
+                new_base = base_used
+
             op_digest = hashlib.sha256(clean_op.encode("utf-8")).hexdigest()[:12]
             res_id = f"res-op-{root_task}-att-{attempt:02d}-{op_digest}"
             record = BudgetReservationRecord(
@@ -1996,7 +2039,11 @@ class DurableRepairBudgetLedger:
                 status="RESERVED",
                 operation_id=clean_op,
                 attempt_id=clean_att,
-                funding_source="BASE",
+                funding_source=funding_source,
+                grant_approval_id=(
+                    selected_grant.approval_id if selected_grant is not None else None
+                ),
+                grant_sha256=(selected_grant.grant_sha256 if selected_grant is not None else None),
                 target_paths=norm_paths,
                 approval_id=(
                     loaded_policy.approval_id if loaded_policy is not None else state.approval_id
@@ -2008,10 +2055,6 @@ class DurableRepairBudgetLedger:
                 ),
                 created_at=now,
             )
-            base_used = (
-                counter.base_consumed if counter.base_consumed is not None else counter.consumed
-            )
-            new_base = base_used + 1 if base_used < counter.base_limit else base_used
             new_counter = counter.model_copy(
                 update={
                     "consumed": counter.consumed + 1,
@@ -2024,6 +2067,22 @@ class DurableRepairBudgetLedger:
             new_reservations[res_id] = record
             new_events = dict(state.event_to_reservation)
             new_events[event_id] = res_id
+            new_grants = list(state.applied_grants)
+            if selected_idx is not None and selected_grant is not None:
+                if (
+                    selected_grant.consumed_repairs is None
+                    or selected_grant.remaining_repairs is None
+                    or selected_grant.remaining_repairs < 1
+                ):
+                    raise RepairBudgetError(
+                        f"Grant '{selected_grant.approval_id}' capacity invariant invalid"
+                    )
+                new_grants[selected_idx] = selected_grant.model_copy(
+                    update={
+                        "consumed_repairs": selected_grant.consumed_repairs + 1,
+                        "remaining_repairs": selected_grant.remaining_repairs - 1,
+                    }
+                )
 
             updated = _with_digest(
                 state.model_copy(
@@ -2032,6 +2091,7 @@ class DurableRepairBudgetLedger:
                         "registered_roots": new_roots,
                         "reservations": new_reservations,
                         "event_to_reservation": new_events,
+                        "applied_grants": tuple(new_grants),
                         "updated_at": now,
                     }
                 )
@@ -2131,6 +2191,16 @@ class DurableRepairBudgetLedger:
             raise RepairBudgetError(
                 "release_attempt_budget requires operation_id or reservation_id"
             )
+        clean_res_id: str | None = None
+        if reservation_id is not None:
+            if not isinstance(reservation_id, str) or not reservation_id.strip():
+                raise RepairBudgetError("reservation_id must be a non-blank string")
+            clean_res_id = reservation_id.strip()
+        clean_op: str | None = None
+        if operation_id is not None:
+            if not isinstance(operation_id, str) or not operation_id.strip():
+                raise RepairBudgetError("operation_id must be a non-blank string")
+            clean_op = operation_id.strip()
         clean_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
         if clean_reason is None:
             raise RepairBudgetError("release_attempt_budget requires a non-blank reason")
@@ -2138,14 +2208,30 @@ class DurableRepairBudgetLedger:
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
             res: BudgetReservationRecord | None = None
-            if reservation_id is not None:
-                res = state.reservations.get(reservation_id)
-            elif operation_id is not None:
-                clean_op = operation_id.strip()
-                res = next(
-                    (r for r in state.reservations.values() if r.operation_id == clean_op),
-                    None,
-                )
+            if clean_res_id is not None and clean_op is not None:
+                res_by_id = state.reservations.get(clean_res_id)
+                res_by_op = [r for r in state.reservations.values() if r.operation_id == clean_op]
+                if (
+                    res_by_id is None
+                    or len(res_by_op) != 1
+                    or res_by_id.reservation_id != res_by_op[0].reservation_id
+                    or res_by_id.operation_id != clean_op
+                ):
+                    raise RepairBudgetError(
+                        "Mismatched or unknown reservation_id/operation_id pair "
+                        "in release_attempt_budget"
+                    )
+                res = res_by_id
+            elif clean_res_id is not None:
+                res = state.reservations.get(clean_res_id)
+            elif clean_op is not None:
+                res_by_op = [r for r in state.reservations.values() if r.operation_id == clean_op]
+                if len(res_by_op) == 1:
+                    res = res_by_op[0]
+                elif len(res_by_op) > 1:
+                    raise RepairBudgetError(
+                        f"Ambiguous multiple reservations for operation_id '{clean_op}'"
+                    )
             if res is None:
                 raise RepairBudgetError(
                     "Unknown or missing budget reservation for release_attempt_budget"

@@ -1570,9 +1570,7 @@ class PersistentTaskQueue:
                 if budget_ledger_path is not None
                 else self._repair_budget_path
             )
-            if eff_ledger_path is None and (
-                operation_id is not None or expected_attempt_id is not None
-            ):
+            if eff_ledger_path is None:
                 for candidate_name in ("repair_budget_ledger.json", "budget.json"):
                     candidate_path = self._path.parent / candidate_name
                     if candidate_path.is_file():
@@ -1638,7 +1636,7 @@ class PersistentTaskQueue:
                 operation_id is not None
                 or expected_attempt_id is not None
                 or (
-                    (budget_ledger_path is not None or self._repair_budget_path is not None)
+                    eff_ledger_path is not None
                     and not is_legacy_c567_initial
                     and not is_legacy_c567_repair
                 )

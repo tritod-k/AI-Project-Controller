@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import aipc
 from aipc.controller.errors import ControllerError
@@ -31,13 +32,16 @@ from aipc.controller.milestone_authorization import (
 )
 from aipc.controller.repair_budget import DurableRepairBudgetLedger, RepairBudgetError
 from aipc.controller.task_queue import (
+    _MILESTONE_C5_BASELINE_SHA,
     ApprovedTaskContract,
     ConsistencyReconciliationResult,
+    MilestoneAuthorizationEvidence,
     PersistentTaskQueue,
     QueuedTaskRecord,
     QueuedTaskStatus,
     TaskAttemptLedger,
     TaskQueueSnapshot,
+    persist_milestone_authorization_evidence,
     reconcile_queue_and_budget_consistency,
 )
 from aipc.hardening.env_isolation import (
@@ -48,8 +52,11 @@ from aipc.hardening.env_isolation import (
 )
 from aipc.review.governance_policy import (
     LoadedReviewGovernancePolicy,
+    PolicyTrustContext,
     RepairBudgetPolicyConfig,
     ReviewGovernancePolicy,
+    default_review_governance_policy,
+    load_review_governance_policy,
 )
 
 
@@ -1580,3 +1587,291 @@ def test_begin_dispatch_rejects_missing_or_blank_operation_id_on_budget_backed_q
         )
     assert bound_queue.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
     assert bound_queue.load().tasks[0].current_attempt == 0
+
+
+def test_reserve_attempt_budget_grant_funding_accounting_exhaustion_and_release(
+    tmp_path: Path,
+) -> None:
+    trusted_root = tmp_path / "trusted"
+    workspace_root = tmp_path / "workspace"
+    trusted_root.mkdir()
+    workspace_root.mkdir()
+
+    policy_model = default_review_governance_policy(
+        owner="K.TRITOD",
+        default_auto_code_repairs_per_task=2,
+        total_auto_code_repairs_per_milestone=4,
+    )
+    policy_path = trusted_root / "policy.yaml"
+    policy_bytes = (
+        yaml.safe_dump(policy_model.model_dump(mode="json"), sort_keys=False)
+        .replace("\r\n", "\n")
+        .encode("utf-8")
+    )
+    policy_path.write_bytes(policy_bytes)
+    policy_sha = hashlib.sha256(policy_bytes).hexdigest()
+
+    approval_path = trusted_root / "c5_approval.json"
+    persist_milestone_authorization_evidence(
+        approval_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-d01-grant-base",
+            project_id="proj-d01",
+            milestone_id="milestone-c5",
+            decision="APPROVED",
+            authorized_by="K.TRITOD",
+            baseline_commit_sha=_MILESTONE_C5_BASELINE_SHA,
+            authorized_workstreams=("rg03",),
+        ),
+    )
+    trust_ctx = PolicyTrustContext(
+        policy_path=policy_path.resolve(),
+        expected_sha256=policy_sha,
+        trusted_external_root=trusted_root.resolve(),
+        excluded_roots=(workspace_root.resolve(),),
+        approval_path=approval_path.resolve(),
+        expected_approval_id="appr-d01-grant-base",
+        expected_owner="K.TRITOD",
+        expected_project_id="proj-d01",
+        expected_milestone_id="milestone-c5",
+    )
+    loaded_policy = load_review_governance_policy(trust_ctx)
+
+    ledger = DurableRepairBudgetLedger(trusted_root / "budget.json", clock=_fixed_now)
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["task-rg03-01"],
+        trust_context=trust_ctx,
+    )
+
+    # Exhaust base per-root limit (2/2)
+    for idx in (1, 2):
+        base_res = ledger.reserve_attempt_budget(
+            task_id="task-rg03-01",
+            operation_id=f"op-base-{idx:02d}",
+            attempt_id=f"att-{idx:02d}-task-rg03-01",
+            attempt=idx,
+        )
+        assert base_res.funding_source == "BASE"
+        assert base_res.grant_approval_id is None
+    assert ledger.load().registered_roots["task-rg03-01"].base_consumed == 2
+    assert ledger.load().milestone_consumed == 2
+
+    contract = ApprovedTaskContract(
+        task_id="task-rg03-01",
+        phase_id="rg03",
+        milestone_id="milestone-c5",
+        title="D01 grant accounting task",
+        objective="Verify grant-funded attempt budget accounting.",
+        in_scope=("src/app.py",),
+        validation_commands=("pytest -q",),
+        approval_id="appr-d01-grant-base",
+        approval_evidence_path=str(approval_path),
+    )
+
+    grant_path = trusted_root / "ext_grant.json"
+    grant_payload = {
+        "schema_version": "1.0",
+        "approval_id": "ktritod-d01-ext-01",
+        "authorized_by": "K.TRITOD",
+        "decision": "APPROVED",
+        "milestone_id": "milestone-c5",
+        "root_task": "task-rg03-01",
+        "task_id": "task-rg03-01",
+        "max_additional_repairs": 1,
+        "scope_paths": ["src/app.py"],
+        "issued_at": _fixed_now().isoformat(),
+        "expires_at": (_fixed_now() + timedelta(hours=4)).isoformat(),
+        "single_use": True,
+        "counter_reset": False,
+    }
+    grant_bytes = json.dumps(grant_payload, indent=2).encode("utf-8")
+    grant_path.write_bytes(grant_bytes)
+    grant_sha = hashlib.sha256(grant_bytes).hexdigest()
+    Path(f"{grant_path}.sha256").write_text(f"{grant_sha}  {grant_path.name}\n", encoding="utf-8")
+
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=contract,
+        expected_grant_sha256=grant_sha,
+    )
+
+    # Out-of-scope target_paths fails closed without consuming the grant
+    with pytest.raises(RepairBudgetError, match="no eligible active extension grant"):
+        ledger.reserve_attempt_budget(
+            task_id="task-rg03-01",
+            operation_id="op-grant-wrong-path",
+            attempt_id="att-03-task-rg03-01",
+            attempt=3,
+            target_paths=("src/other.py",),
+        )
+
+    res = ledger.reserve_attempt_budget(
+        task_id="task-rg03-01",
+        operation_id="op-grant-01",
+        attempt_id="att-03-task-rg03-01",
+        attempt=3,
+        target_paths=("src/app.py",),
+    )
+    assert res.funding_source == "GRANT"
+    assert res.grant_approval_id == "ktritod-d01-ext-01"
+    assert res.grant_sha256 == grant_sha
+
+    state_after = ledger.load()
+    assert len(state_after.applied_grants) == 1
+    assert state_after.applied_grants[0].consumed_repairs == 1
+    assert state_after.applied_grants[0].remaining_repairs == 0
+    assert state_after.milestone_consumed == 3
+    assert state_after.registered_roots["task-rg03-01"].consumed == 3
+    assert state_after.registered_roots["task-rg03-01"].base_consumed == 2
+
+    # Subsequent reservation fails closed (cannot exceed grant allowance / double-spend)
+    with pytest.raises(RepairBudgetError):
+        ledger.reserve_attempt_budget(
+            task_id="task-rg03-01",
+            operation_id="op-grant-double-spend",
+            attempt_id="att-04-task-rg03-01",
+            attempt=4,
+            target_paths=("src/app.py",),
+        )
+
+    # Releasing the RESERVED grant slot restores grant counts and budget counters
+    released = ledger.release_attempt_budget(
+        reservation_id=res.reservation_id,
+        operation_id=res.operation_id,
+    )
+    assert released.status == "RELEASED"
+
+    state_released = ledger.load()
+    assert state_released.applied_grants[0].consumed_repairs == 0
+    assert state_released.applied_grants[0].remaining_repairs == 1
+    assert state_released.milestone_consumed == 2
+    assert state_released.registered_roots["task-rg03-01"].consumed == 2
+    assert state_released.registered_roots["task-rg03-01"].base_consumed == 2
+
+    # Blank grant_approval_id fails closed
+    with pytest.raises(RepairBudgetError, match="grant_approval_id"):
+        ledger.reserve_attempt_budget(
+            task_id="task-rg03-01",
+            operation_id="op-grant-blank-id",
+            attempt_id="att-03-task-rg03-01",
+            attempt=3,
+            target_paths=("src/app.py",),
+            grant_approval_id="   ",
+        )
+
+    # A fresh reservation can now succeed using that released grant slot
+    fresh = ledger.reserve_attempt_budget(
+        task_id="task-rg03-01",
+        operation_id="op-grant-02",
+        attempt_id="att-03-task-rg03-01",
+        attempt=3,
+        target_paths=("src/app.py",),
+        grant_approval_id="ktritod-d01-ext-01",
+    )
+    assert fresh.funding_source == "GRANT"
+    assert fresh.grant_approval_id == "ktritod-d01-ext-01"
+    assert fresh.grant_sha256 == grant_sha
+    state_fresh = ledger.load()
+    assert state_fresh.applied_grants[0].consumed_repairs == 1
+    assert state_fresh.applied_grants[0].remaining_repairs == 0
+    assert state_fresh.milestone_consumed == 3
+
+
+def test_release_attempt_budget_rejects_mismatched_reservation_and_operation_id(
+    tmp_path: Path,
+) -> None:
+    ledger = DurableRepairBudgetLedger(tmp_path / "budget.json", clock=_fixed_now)
+    ledger.initialize(loaded_policy=_make_loaded_policy(), registered_roots=["task-01", "task-02"])
+
+    r1 = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-pair-01",
+        attempt_id="att-01-task-01",
+    )
+    r2 = ledger.reserve_attempt_budget(
+        task_id="task-02",
+        operation_id="op-pair-02",
+        attempt_id="att-01-task-02",
+    )
+    assert ledger.load().milestone_consumed == 2
+
+    for bad_op in ("op-pair-02", "op-unknown", "   "):
+        with pytest.raises(RepairBudgetError):
+            ledger.release_attempt_budget(
+                reservation_id=r1.reservation_id,
+                operation_id=bad_op,
+            )
+        state = ledger.load()
+        assert state.reservations[r1.reservation_id].status == "RESERVED"
+        assert state.reservations[r2.reservation_id].status == "RESERVED"
+        assert state.milestone_consumed == 2
+        assert state.registered_roots["task-01"].consumed == 1
+        assert state.registered_roots["task-02"].consumed == 1
+
+    with pytest.raises(RepairBudgetError, match="reservation_id"):
+        ledger.release_attempt_budget(
+            reservation_id="   ",
+            operation_id="op-pair-01",
+        )
+    state_after_blank = ledger.load()
+    assert state_after_blank.reservations[r1.reservation_id].status == "RESERVED"
+    assert state_after_blank.reservations[r2.reservation_id].status == "RESERVED"
+    assert state_after_blank.milestone_consumed == 2
+
+    released_r1 = ledger.release_attempt_budget(
+        reservation_id=r1.reservation_id,
+        operation_id="op-pair-01",
+    )
+    assert released_r1.status == "RELEASED"
+    assert ledger.load().milestone_consumed == 1
+
+    # Even after r1 is legitimately released, mismatched operation_id must still raise
+    with pytest.raises(RepairBudgetError, match="Mismatched or unknown"):
+        ledger.release_attempt_budget(
+            reservation_id=r1.reservation_id,
+            operation_id="op-pair-02",
+        )
+    state_final = ledger.load()
+    assert state_final.reservations[r1.reservation_id].status == "RELEASED"
+    assert state_final.reservations[r2.reservation_id].status == "RESERVED"
+    assert state_final.milestone_consumed == 1
+
+
+@pytest.mark.parametrize("ledger_filename", ("repair_budget_ledger.json", "budget.json"))
+def test_begin_dispatch_rejects_unbound_queue_with_sibling_ledger_and_omitted_operation_id(
+    tmp_path: Path,
+    ledger_filename: str,
+) -> None:
+    case_dir = tmp_path / ledger_filename.replace(".", "_")
+    ledger_path = case_dir / ledger_filename
+    queue_path = case_dir / "canonical_queue.json"
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=_make_loaded_policy(), registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    with pytest.raises(
+        ControllerError,
+        match="budget-backed dispatch requires a non-blank operation_id",
+    ):
+        queue.begin_dispatch(
+            "task-01",
+            worker_id="w1",
+            provider="mock",
+            operation_id=None,
+            expected_attempt_id=None,
+            budget_ledger_path=None,
+        )
+
+    task_after = queue.load().tasks[0]
+    assert task_after.status == QueuedTaskStatus.ELIGIBLE
+    assert task_after.current_attempt == 0
+    assert task_after.attempts == ()
