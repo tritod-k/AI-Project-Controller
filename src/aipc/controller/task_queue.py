@@ -1583,11 +1583,22 @@ class PersistentTaskQueue:
                     r for r in budget_state.reservations.values() if r.operation_id == clean_op_id
                 ]
                 res = matching_res[0] if len(matching_res) == 1 else None
+                task_res = [r for r in budget_state.reservations.values() if r.task_id == task_id]
+                has_active_consumed = any(r.status == "CONSUMED" for r in task_res)
                 if (
+                    res is not None
+                    and (
+                        res.task_id != task_id
+                        or (res.attempt_id is not None and res.attempt_id != attempt_id)
+                        or res.status != "RESERVED"
+                    )
+                ) or (
                     res is None
-                    or res.task_id != task_id
-                    or (res.attempt_id is not None and res.attempt_id != attempt_id)
-                    or res.status != "RESERVED"
+                    and not has_active_consumed
+                    and (
+                        budget_ledger_path is not None
+                        or any(r.status == "RELEASED" for r in task_res)
+                    )
                 ):
                     raise ControllerError(
                         f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': "
