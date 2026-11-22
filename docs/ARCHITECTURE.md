@@ -331,14 +331,16 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   `CURRENT_STATUS.md` directly from canonical nested `QueuedTaskRecord.contract` fields.
   `aipc.project.workspace_git_checkpoint` holds exclusive `controller.lock` to verify LF
   `.gitattributes`, workspace-wide `.gitignore` coverage (rejecting path-scoped or root-only
-  `.env*` exclusions and conservative glob-vs-glob overlapping trailing `!` negations), zero
-  secrets (including quoted JSON/YAML credentials in portable root docs while preserving safe
-  PowerShell expressions), valid LF `.sha256` sidecars, and schema-valid quiescent queues
-  (enforcing `_QUIESCENT_TASK_STATUSES`, serializing `begin_dispatch()` and
-  `reconcile_queue_and_budget_consistency()` under a shared exclusive lock, preserving
-  uncertain or missing-task `RESERVED` budget entries fail-closed in `RECONCILIATION_REQUIRED`,
-  requiring exact non-empty `(operation_id, attempt_id)` matches, and rejecting symlinked HMAC
-  key ancestor directories) prior to Private Control-Plane Git checkpoints.
+  `.env*` exclusions and Unicode-complete glob-vs-glob overlapping trailing `!` negations),
+  zero secrets (including quoted JSON/YAML credentials starting with expression-prefix
+  characters in portable root docs while preserving safe unquoted PowerShell expressions and
+  pure placeholders), valid LF `.sha256` sidecars, and schema-valid quiescent queues
+  (enforcing `_QUIESCENT_TASK_STATUSES`, unifying `repair_budget.py` and `task_queue.py`
+  reservation/dispatch/reconciliation under a shared exclusive lock, persisting durable
+  queue-level `reconciliation_required` / `unresolved_reservation_ids` blockers on missing-task
+  or uncertain `RESERVED` budget entries, requiring exact non-empty `(operation_id, attempt_id)`
+  matches, and rejecting symlinked HMAC key ancestor directories) prior to Private
+  Control-Plane Git checkpoints.
 - **Strictly Read-Only Multi-Project Dashboard (`D02`, `FINAL-03`):**
   `aipc.dashboard.multi_project` and read-only `server.py` endpoints (`GET /multi-project`,
   `GET /api/multi-project`, HTTP `405` on mutations) aggregate multi-project phase, queue,
