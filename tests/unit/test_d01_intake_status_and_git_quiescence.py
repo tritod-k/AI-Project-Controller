@@ -9,10 +9,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from aipc.controller.task_queue import ApprovedTaskContract, PersistentTaskQueue
+from aipc.hardening.errors import ChildEnvironmentIsolationError
 from aipc.hardening.secrets import assert_no_secrets
 from aipc.project.scaffolding import (
     ProjectScaffoldingError,
@@ -26,6 +28,7 @@ from aipc.project.workspace_git_checkpoint import (
     WorkspaceGitQuiescenceError,
     _case_key,
     _collect_pattern_boundaries,
+    _run_git_nul_list,
     _segment_globs_intersect,
     _tokenize_segment_glob,
     acquire_controller_lock,
@@ -987,3 +990,95 @@ def test_unicode_elementary_interval_partition_constancy_invariant() -> None:
         assert _segment_globs_intersect(pat_a, pat_b) is expected
     assert _segment_globs_intersect("\U00010400", "[\U00010420-\U00010430]") is True
     assert _segment_globs_intersect("[!\U00010420-\U00010430]", "\U00010400") is False
+
+
+def test_git_quiescence_direct_call_strips_prohibited_mixed_case_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git executable not available")
+
+    ws = _setup_quiescent_workspace(tmp_path / "git_env_ws")
+    real_run = subprocess.run
+    real_run(["git", "init"], cwd=ws, check=True, capture_output=True)
+    real_run(
+        ["git", "add", ".gitattributes", ".gitignore"],
+        cwd=ws,
+        check=True,
+        capture_output=True,
+    )
+
+    prohibited_entries: tuple[tuple[str, str], ...] = (
+        ("".join(("OpenAI", "_Api_", "Key")), "".join(("dummy", "_val_", "01"))),
+        ("".join(("Gemini", "_Api_", "Key")), "".join(("dummy", "_val_", "02"))),
+        ("".join(("Anthropic", "_Api_", "Key")), "".join(("dummy", "_val_", "03"))),
+        (
+            "".join(("Aipc", "_Operator_", "Hmac_", "Key_", "Path")),
+            "".join(("dummy", "_path_", "04")),
+        ),
+        ("".join(("aipc", "_hmac_", "custom")), "".join(("dummy", "_val_", "05"))),
+    )
+    for var_name, var_val in prohibited_entries:
+        monkeypatch.setenv(var_name, var_val)
+
+    captured_calls: list[tuple[tuple[str, ...], object]] = []
+
+    def _recording_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        cmd_arg = args[0] if args else kwargs.get("args", ())
+        cmd = (
+            tuple(str(part) for part in cmd_arg)
+            if isinstance(cmd_arg, (list, tuple))
+            else (str(cmd_arg),)
+        )
+        env_arg = kwargs.get("env")
+        captured_calls.append((cmd, dict(env_arg) if isinstance(env_arg, dict) else env_arg))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _recording_run)
+
+    ok_direct, tracked_direct = _run_git_nul_list(ws, ["ls-files", "-z"])
+    assert ok_direct is True
+    assert set(tracked_direct) == {".gitattributes", ".gitignore"}
+
+    direct_count = len(captured_calls)
+    assert direct_count == 1
+
+    report = verify_workspace_git_quiescence(ws)
+    assert report.is_git_repo is True
+    assert report.passed is True
+    assert report.status == "PASS"
+    assert report.checks["git_index_clean"] is True
+    assert report.violations == ()
+
+    quiescence_calls = captured_calls[direct_count:]
+    assert len(quiescence_calls) >= 2
+    assert any(cmd[-2:] == ("ls-files", "-z") for cmd, _ in quiescence_calls)
+    expected_diff_cmd = ("diff", "--cached", "--name-only", "-z")
+    assert any(cmd[-4:] == expected_diff_cmd for cmd, _ in quiescence_calls)
+
+    prohibited_upper = {var_name.upper() for var_name, _ in prohibited_entries}
+    for cmd, captured_env in captured_calls:
+        assert cmd[0] == "git"
+        assert captured_env is not None
+        assert isinstance(captured_env, dict)
+        captured_upper = {k.upper() for k in captured_env}
+        assert captured_upper.isdisjoint(prohibited_upper)
+
+    def _raise_isolation_error(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        raise ChildEnvironmentIsolationError("simulated isolation failure")
+
+    monkeypatch.setattr(
+        "aipc.project.workspace_git_checkpoint.build_sanitized_child_env",
+        _raise_isolation_error,
+    )
+    calls_before_fail = len(captured_calls)
+    ok_blocked, entries_blocked = _run_git_nul_list(ws, ["ls-files", "-z"])
+    assert ok_blocked is False
+    assert entries_blocked == []
+    assert len(captured_calls) == calls_before_fail
+
+    blocked_report = verify_workspace_git_quiescence(ws)
+    assert blocked_report.is_git_repo is True
+    assert blocked_report.passed is False
+    assert blocked_report.checks["git_index_clean"] is False
+    assert len(captured_calls) == calls_before_fail

@@ -18,7 +18,8 @@ from typing import Literal
 
 from aipc.domain.errors import StateError
 from aipc.domain.models import CanonicalRecord
-from aipc.hardening.errors import SecretExposureError
+from aipc.hardening.env_isolation import build_sanitized_child_env
+from aipc.hardening.errors import ChildEnvironmentIsolationError, SecretExposureError
 from aipc.hardening.secrets import assert_no_secrets
 from aipc.storage.json_store import load_json
 
@@ -899,12 +900,14 @@ def _is_forbidden_git_path(rel_posix: str) -> bool:
 
 def _run_git_nul_list(workspace_root: Path, args: list[str]) -> tuple[bool, list[str]]:
     try:
+        sanitized_env = build_sanitized_child_env(os.environ)
         proc = subprocess.run(
             ["git", "-C", str(workspace_root), *args],
             capture_output=True,
             check=False,
+            env=sanitized_env,
         )
-    except OSError:
+    except (ChildEnvironmentIsolationError, OSError):
         return False, []
     if proc.returncode != 0:
         return False, []
