@@ -499,6 +499,14 @@ def test_verify_workspace_git_quiescence_strict_queue_allowlist_and_malformed_ta
         {"tasks": [{"task_id": "t-wait-prov", "status": "WAITING_PROVIDER"}]},
         {"tasks": [{"task_id": "t-wait-human", "status": "WAITING_HUMAN"}]},
         {"tasks": [{"task_id": "t-repair", "status": "REPAIR_REQUIRED"}]},
+        {
+            "reconciliation_required": True,
+            "tasks": [{"task_id": "t-1", "status": "ELIGIBLE"}],
+        },
+        {
+            "unresolved_reservation_ids": ["res-orphan-1"],
+            "tasks": [{"task_id": "t-1", "status": "ELIGIBLE"}],
+        },
     )
     for idx, payload in enumerate(bad_payloads):
         ws = _setup_quiescent_workspace(tmp_path / f"strict_bad_{idx}")
@@ -603,8 +611,15 @@ def test_verify_workspace_git_quiescence_quoted_json_yaml_secrets_and_ps_recipe(
         "Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue }\n"
         "```\n"
     )
-    (ws_ok / "GEMINI.md").write_text(ps_doc, encoding="utf-8", newline="\n")
+    safe_placeholders = (
+        '"api' + '_key": "${API_KEY}"',
+        '"tok' + 'en": "<placeholder>"',
+        '"pass' + 'word": "*"',
+    )
+    safe_doc = "# Placeholders\n\n" + "\n".join(safe_placeholders) + "\n"
+    (ws_ok / "GEMINI.md").write_text(ps_doc + "\n" + safe_doc, encoding="utf-8", newline="\n")
     (ws_ok / "AGENTS.md").write_text(ps_doc, encoding="utf-8", newline="\n")
+    (ws_ok / "README.md").write_text(safe_doc, encoding="utf-8", newline="\n")
     rep_ok = verify_workspace_git_quiescence(ws_ok)
     assert rep_ok.passed is True
     assert rep_ok.checks["no_secrets"] is True
@@ -615,6 +630,10 @@ def test_verify_workspace_git_quiescence_quoted_json_yaml_secrets_and_ps_recipe(
         '"client' + '_secret": "cs_val_123"',
         '"pass' + 'word": "pw_val_123"',
         '"authori' + 'zation": "Basic dXNlcjpwYXNz"',
+        '{"pass' + 'word": "$uperSecretPass' + 'word123"}',
+        "api" + '_key: "(my_secret_api_key_999)"',
+        "'sec" + "ret': '$2b$12$abcdefghijklmnopqrstuv'",
+        '"tok' + 'en": "{secret_tok_payload_123}"',
     )
     for idx, secret_line in enumerate(quoted_secrets):
         for doc_name in ("README.md", "GEMINI.md"):
@@ -682,6 +701,11 @@ def test_verify_workspace_git_quiescence_gitignore_scope_and_negations(
         "!*[l]ock",
         "!**/s?able_c/*",
         "!*",
+        "!ü.lock",
+        "!ไฟล์.key",
+        "!.env_ü",
+        "![!a].lock",
+        "![ü].lock",
     )
     for idx, neg_line in enumerate(trailing_negations):
         ws_neg = _setup_quiescent_workspace(tmp_path / f"ws_neg_{idx}")

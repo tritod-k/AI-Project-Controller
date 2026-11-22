@@ -63,7 +63,10 @@ _ALLOWED_GITIGNORE_PATTERNS: dict[str, frozenset[str]] = {
     "*.key": frozenset({"*.key", "**/*.key"}),
     ".env*": frozenset({".env*", "**/.env*"}),
 }
-_GLOB_ALPHABET: frozenset[str] = frozenset(chr(c).lower() for c in range(32, 127) if chr(c) != "/")
+_BASE_ASCII_ALPHABET: frozenset[str] = frozenset(
+    chr(c).lower() for c in range(32, 127) if chr(c) != "/"
+)
+_UNICODE_OTHER_SENTINEL = "\ue000"
 _PROTECTED_FILE_GLOBS: dict[str, tuple[str, ...]] = {
     "*.lock": ("*.lock", "controller.lock"),
     "*.key": ("*.key", "*.pem", "*secret*", "*credential*", "*token*"),
@@ -116,6 +119,11 @@ _AUTH_HEADER_RE = re.compile(
 )
 _EXPRESSION_PREFIXES = ("(", "$", "{", "[", "<", "*", "%", ",")
 _NON_SECRET_LITERALS: frozenset[str] = frozenset({"null", "none", "true", "false"})
+_PURE_PLACEHOLDER_RE = re.compile(
+    r"^(?:\*+|<[A-Za-z0-9_.:-]+>|\$\{[A-Za-z_][A-Za-z0-9_]*\}"
+    r"|\$\([A-Za-z_][A-Za-z0-9_]*\)|%[A-Za-z_][A-Za-z0-9_]*%"
+    r"|\{\{[A-Za-z0-9_.\s-]+\}\})$"
+)
 
 
 class WorkspaceGitQuiescenceError(StateError):
@@ -251,7 +259,80 @@ def _read_class_char(pat: str, idx: int, end: int) -> tuple[str, int]:
     return pat[idx], idx + 1
 
 
-def _tokenize_segment_glob(pat: str) -> list[tuple[str, frozenset[str]]]:
+def _collect_pattern_chars(pat: str) -> set[str]:
+    chars: set[str] = {ch for ch in pat.lower() if ch != "/"}
+    for ch in pat:
+        c_low = ch.lower()
+        if c_low != "/":
+            chars.add(c_low)
+    i = 0
+    n = len(pat)
+    while i < n:
+        if pat[i] == "\\" and i + 1 < n:
+            lit = pat[i + 1].lower()
+            if lit != "/":
+                chars.add(lit)
+            i += 2
+            continue
+        if pat[i] == "[":
+            j = i + 1
+            if j < n and pat[j] in ("!", "^"):
+                j += 1
+            content_start = j
+            if j < n and pat[j] == "]":
+                j += 1
+            while j < n and pat[j] != "]":
+                if pat[j] == "\\" and j + 1 < n:
+                    j += 2
+                else:
+                    j += 1
+            if j < n:
+                k = content_start
+                while k < j:
+                    lo_ch, next_k = _read_class_char(pat, k, j)
+                    if next_k + 1 < j and pat[next_k] == "-":
+                        hi_ch, k = _read_class_char(pat, next_k + 1, j)
+                        lo_ord = ord(lo_ch)
+                        hi_ord = ord(hi_ch)
+                        if lo_ord <= hi_ord:
+                            if hi_ord - lo_ord <= 1024:
+                                for code in range(lo_ord, hi_ord + 1):
+                                    c_low = chr(code).lower()
+                                    if c_low != "/":
+                                        chars.add(c_low)
+                            else:
+                                mid_ord = (lo_ord + hi_ord) // 2
+                                for code in (lo_ord, mid_ord, hi_ord):
+                                    c_low = chr(code).lower()
+                                    if c_low != "/":
+                                        chars.add(c_low)
+                    else:
+                        c_low = lo_ch.lower()
+                        if c_low != "/":
+                            chars.add(c_low)
+                        k = next_k
+                i = j + 1
+                continue
+        i += 1
+    return chars
+
+
+def _build_comparison_alphabet(pat_a: str, pat_b: str) -> frozenset[str]:
+    chars: set[str] = set(_BASE_ASCII_ALPHABET)
+    chars.update(_collect_pattern_chars(pat_a))
+    chars.update(_collect_pattern_chars(pat_b))
+    sentinel = _UNICODE_OTHER_SENTINEL
+    if sentinel in chars:
+        for code in range(0xE001, 0xF900):
+            candidate = chr(code)
+            if candidate not in chars:
+                sentinel = candidate
+                break
+    chars.add(sentinel)
+    return frozenset(chars)
+
+
+def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str, frozenset[str]]]:
     tokens: list[tuple[str, frozenset[str]]] = []
     i = 0
     n = len(pat)
@@ -259,10 +340,10 @@ def _tokenize_segment_glob(pat: str) -> list[tuple[str, frozenset[str]]]:
         ch = pat[i]
         if ch == "*":
             if not tokens or tokens[-1][0] != "star":
-                tokens.append(("star", _GLOB_ALPHABET))
+                tokens.append(("star", alphabet))
             i += 1
         elif ch == "?":
-            tokens.append(("char", _GLOB_ALPHABET))
+            tokens.append(("char", alphabet))
             i += 1
         elif ch == "\\":
             if i + 1 < n:
@@ -271,7 +352,7 @@ def _tokenize_segment_glob(pat: str) -> list[tuple[str, frozenset[str]]]:
             else:
                 lit = "\\"
                 i += 1
-            tokens.append(("char", frozenset({lit})))
+            tokens.append(("char", frozenset({lit}) if lit != "/" else frozenset()))
         elif ch == "[":
             j = i + 1
             negated = False
@@ -296,30 +377,48 @@ def _tokenize_segment_glob(pat: str) -> list[tuple[str, frozenset[str]]]:
                 lo_ch, next_k = _read_class_char(pat, k, j)
                 if next_k + 1 < j and pat[next_k] == "-":
                     hi_ch, k = _read_class_char(pat, next_k + 1, j)
-                    if ord(lo_ch) <= ord(hi_ch):
-                        for code in range(ord(lo_ch), ord(hi_ch) + 1):
-                            c_low = chr(code).lower()
-                            if c_low in _GLOB_ALPHABET:
-                                class_chars.add(c_low)
+                    lo_ord = ord(lo_ch)
+                    hi_ord = ord(hi_ch)
+                    if lo_ord <= hi_ord:
+                        if hi_ord - lo_ord <= 1024:
+                            for code in range(lo_ord, hi_ord + 1):
+                                c_low = chr(code).lower()
+                                if c_low != "/" and c_low in alphabet:
+                                    class_chars.add(c_low)
+                        else:
+                            for c in alphabet:
+                                if len(c) == 1:
+                                    c_ord = ord(c)
+                                    if lo_ord <= c_ord <= hi_ord:
+                                        class_chars.add(c)
+                                    else:
+                                        c_up = c.upper()
+                                        if len(c_up) == 1 and lo_ord <= ord(c_up) <= hi_ord:
+                                            class_chars.add(c)
+                        for edge in (lo_ch.lower(), hi_ch.lower()):
+                            if edge != "/" and edge in alphabet:
+                                class_chars.add(edge)
                 else:
                     c_low = lo_ch.lower()
-                    if c_low in _GLOB_ALPHABET:
+                    if c_low != "/" and c_low in alphabet:
                         class_chars.add(c_low)
                     k = next_k
-            matched = _GLOB_ALPHABET - class_chars if negated else frozenset(class_chars)
+            matched = alphabet - class_chars if negated else frozenset(class_chars)
             if not matched:
-                matched = _GLOB_ALPHABET
+                matched = alphabet
             tokens.append(("char", matched))
             i = j + 1
         else:
-            tokens.append(("char", frozenset({ch.lower()})))
+            lit = ch.lower()
+            tokens.append(("char", frozenset({lit}) if lit != "/" else frozenset()))
             i += 1
     return tokens
 
 
 def _segment_globs_intersect(pat_a: str, pat_b: str) -> bool:
-    tokens_a = _tokenize_segment_glob(pat_a)
-    tokens_b = _tokenize_segment_glob(pat_b)
+    alphabet = _build_comparison_alphabet(pat_a, pat_b)
+    tokens_a = _tokenize_segment_glob(pat_a, alphabet)
+    tokens_b = _tokenize_segment_glob(pat_b, alphabet)
     len_a = len(tokens_a)
     len_b = len(tokens_b)
     dp = [[False] * (len_b + 1) for _ in range(len_a + 1)]
@@ -546,20 +645,29 @@ def _check_queue_quiescence(workspace_root: Path, projects_subdir: str) -> list[
                             f"Malformed canonical_queue.json in {project_dir.name}: "
                             "root must be a JSON object"
                         )
-                    elif "tasks" not in queue_data:
-                        violations.append(
-                            f"Malformed canonical_queue.json in {project_dir.name}: "
-                            "missing 'tasks' list"
-                        )
                     else:
-                        raw_tasks = queue_data["tasks"]
-                        if not isinstance(raw_tasks, list):
+                        if queue_data.get("reconciliation_required"):
+                            violations.append(
+                                f"Non-quiescent queue in {project_dir.name}: "
+                                "top-level reconciliation_required is truthy"
+                            )
+                        if queue_data.get("unresolved_reservation_ids"):
+                            violations.append(
+                                f"Non-quiescent queue in {project_dir.name}: "
+                                "unresolved_reservation_ids is non-empty"
+                            )
+                        if "tasks" not in queue_data:
+                            violations.append(
+                                f"Malformed canonical_queue.json in {project_dir.name}: "
+                                "missing 'tasks' list"
+                            )
+                        elif not isinstance(queue_data["tasks"], list):
                             violations.append(
                                 f"Malformed canonical_queue.json in {project_dir.name}: "
                                 "'tasks' must be a list"
                             )
                         else:
-                            for idx, task in enumerate(raw_tasks):
+                            for idx, task in enumerate(queue_data["tasks"]):
                                 if not isinstance(task, dict):
                                     violations.append(
                                         f"Malformed canonical_queue.json in "
@@ -779,17 +887,25 @@ def _is_portable_root_doc_or_launcher(candidate_file: Path, workspace_root: Path
     return candidate_file.suffix.lower() == ".bat"
 
 
-def _is_suspicious_kv_value(value: str) -> bool:
+def _is_suspicious_kv_value(value: str, *, is_quoted: bool = False) -> bool:
     stripped = value.strip()
-    if not stripped or stripped.startswith(_EXPRESSION_PREFIXES):
+    if not stripped or stripped.lower() in _NON_SECRET_LITERALS:
         return False
-    if stripped.lower() in _NON_SECRET_LITERALS:
+    if not any(ch.isalnum() for ch in stripped):
         return False
-    return any(ch.isalnum() for ch in stripped)
+    if _PURE_PLACEHOLDER_RE.fullmatch(stripped):
+        return False
+    if not is_quoted and stripped.startswith(_EXPRESSION_PREFIXES):
+        return False
+    return True
 
 
-def _extract_kv_match_value(match: re.Match[str]) -> str:
-    return match.group(3) or match.group(4) or match.group(5) or ""
+def _extract_kv_match_value(match: re.Match[str]) -> tuple[str, bool]:
+    if match.group(3) is not None:
+        return match.group(3), True
+    if match.group(4) is not None:
+        return match.group(4), True
+    return match.group(5) or "", False
 
 
 def _has_workspace_secret(content: str, *, is_portable_doc: bool) -> bool:
@@ -808,10 +924,12 @@ def _has_workspace_secret(content: str, *, is_portable_doc: bool) -> bool:
             return True
         return False
     for match in _KV_SECRET_RE.finditer(content):
-        if _is_suspicious_kv_value(_extract_kv_match_value(match)):
+        value, is_quoted = _extract_kv_match_value(match)
+        if _is_suspicious_kv_value(value, is_quoted=is_quoted):
             return True
     for match in _AUTH_HEADER_RE.finditer(content):
-        if _is_suspicious_kv_value(_extract_kv_match_value(match)):
+        value, is_quoted = _extract_kv_match_value(match)
+        if _is_suspicious_kv_value(value, is_quoted=is_quoted):
             return True
     return False
 
