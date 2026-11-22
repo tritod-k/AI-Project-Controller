@@ -527,6 +527,18 @@ def _with_digest(state: RepairBudgetLedgerState) -> RepairBudgetLedgerState:
     return state.model_copy(update={"state_digest": digest_val})
 
 
+def _milestone_base_consumed(state: RepairBudgetLedgerState) -> int:
+    """Compute milestone-level BASE-funded consumption excluding GRANT-funded spend."""
+    grant_consumed_from_grants = sum(g.consumed_repairs or 0 for g in state.applied_grants)
+    grant_consumed_from_reservations = sum(
+        1
+        for r in state.reservations.values()
+        if r.status in ("RESERVED", "CONSUMED") and r.funding_source == "GRANT"
+    )
+    grant_consumed_total = max(grant_consumed_from_grants, grant_consumed_from_reservations)
+    return max(0, state.milestone_consumed - grant_consumed_total)
+
+
 def _get_in_process_lock(path: Path) -> threading.Lock:
     resolved = path.resolve()
     with _IN_PROCESS_LOCKS_GUARD:
@@ -1338,7 +1350,12 @@ class DurableRepairBudgetLedger:
             selected_idx: int | None = None
             selected_grant: AppliedExtensionRecord | None = None
 
-            if grant_approval_id is None and base_used < counter.base_limit:
+            milestone_base_used = _milestone_base_consumed(state)
+            if (
+                grant_approval_id is None
+                and base_used < counter.base_limit
+                and milestone_base_used < state.base_milestone_limit
+            ):
                 funding_source = "BASE"
                 new_base_consumed = base_used + 1
             else:
@@ -1364,7 +1381,8 @@ class DurableRepairBudgetLedger:
                         reason=(
                             f"Root lineage '{root_task}' repair budget exhausted "
                             f"({counter.consumed}/{counter.effective_limit}; "
-                            f"base {base_used}/{counter.base_limit}); "
+                            f"base {base_used}/{counter.base_limit}; "
+                            f"milestone_base {milestone_base_used}/{state.base_milestone_limit}); "
                             "HALT_ON_RETRY_EXHAUSTION / HUMAN_REVIEW_REQUIRED."
                         ),
                     )
@@ -1995,10 +2013,11 @@ class DurableRepairBudgetLedger:
             funding_source: Literal["BASE", "GRANT"] = "BASE"
             selected_idx: int | None = None
             selected_grant: AppliedExtensionRecord | None = None
+            milestone_base_used = _milestone_base_consumed(state)
             if (
                 clean_grant_id is None
                 and base_used < counter.base_limit
-                and state.milestone_consumed < state.base_milestone_limit
+                and milestone_base_used < state.base_milestone_limit
             ):
                 funding_source = "BASE"
                 new_base = base_used + 1
@@ -2012,6 +2031,16 @@ class DurableRepairBudgetLedger:
                     grant_approval_id=clean_grant_id,
                 )
                 if match is None:
+                    if (
+                        clean_grant_id is None
+                        and base_used < counter.base_limit
+                        and milestone_base_used >= state.base_milestone_limit
+                    ):
+                        raise RepairBudgetError(
+                            f"Milestone '{state.milestone_id}' base repair budget exhausted "
+                            f"({milestone_base_used}/{state.base_milestone_limit}) and "
+                            "no eligible active extension grant is available"
+                        )
                     raise RepairBudgetError(
                         f"Root lineage '{root_task}' base repair budget exhausted and "
                         "no eligible active extension grant is available"

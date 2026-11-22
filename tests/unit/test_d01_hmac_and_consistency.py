@@ -30,9 +30,15 @@ from aipc.controller.milestone_authorization import (
     verify_approval_record_hmac,
     verify_milestone_authorization_record,
 )
-from aipc.controller.repair_budget import DurableRepairBudgetLedger, RepairBudgetError
+from aipc.controller.repair_budget import (
+    DurableRepairBudgetLedger,
+    RepairBudgetError,
+    _milestone_base_consumed,
+)
 from aipc.controller.task_queue import (
     _MILESTONE_C5_BASELINE_SHA,
+    _MILESTONE_C6_BASELINE_SHA,
+    _MILESTONE_C7_BASELINE_SHA,
     ApprovedTaskContract,
     ConsistencyReconciliationResult,
     MilestoneAuthorizationEvidence,
@@ -1875,3 +1881,715 @@ def test_begin_dispatch_rejects_unbound_queue_with_sibling_ledger_and_omitted_op
     assert task_after.status == QueuedTaskStatus.ELIGIBLE
     assert task_after.current_attempt == 0
     assert task_after.attempts == ()
+
+
+def test_reserve_attempt_budget_mixed_root_grant_does_not_starve_milestone_base_capacity(
+    tmp_path: Path,
+) -> None:
+    trusted_root = tmp_path / "trusted"
+    workspace_root = tmp_path / "workspace"
+    trusted_root.mkdir()
+    workspace_root.mkdir()
+
+    policy_model = default_review_governance_policy(
+        owner="K.TRITOD",
+        default_auto_code_repairs_per_task=2,
+        total_auto_code_repairs_per_milestone=4,
+    )
+    policy_path = trusted_root / "policy.yaml"
+    policy_bytes = (
+        yaml.safe_dump(policy_model.model_dump(mode="json"), sort_keys=False)
+        .replace("\r\n", "\n")
+        .encode("utf-8")
+    )
+    policy_path.write_bytes(policy_bytes)
+    policy_sha = hashlib.sha256(policy_bytes).hexdigest()
+
+    approval_path = trusted_root / "c5_approval.json"
+    persist_milestone_authorization_evidence(
+        approval_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-d01-mixed-base",
+            project_id="proj-d01",
+            milestone_id="milestone-c5",
+            decision="APPROVED",
+            authorized_by="K.TRITOD",
+            baseline_commit_sha=_MILESTONE_C5_BASELINE_SHA,
+            authorized_workstreams=("rg03",),
+        ),
+    )
+    trust_ctx = PolicyTrustContext(
+        policy_path=policy_path.resolve(),
+        expected_sha256=policy_sha,
+        trusted_external_root=trusted_root.resolve(),
+        excluded_roots=(workspace_root.resolve(),),
+        approval_path=approval_path.resolve(),
+        expected_approval_id="appr-d01-mixed-base",
+        expected_owner="K.TRITOD",
+        expected_project_id="proj-d01",
+        expected_milestone_id="milestone-c5",
+    )
+    loaded_policy = load_review_governance_policy(trust_ctx)
+
+    ledger = DurableRepairBudgetLedger(trusted_root / "budget_mixed.json", clock=_fixed_now)
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["root-a", "root-b"],
+        trust_context=trust_ctx,
+    )
+
+    contract_a = ApprovedTaskContract(
+        task_id="root-a",
+        phase_id="rg03",
+        milestone_id="milestone-c5",
+        title="Root A mixed budget task",
+        objective="Verify grant consumption does not starve milestone base slots.",
+        in_scope=("src/a.py",),
+        validation_commands=("pytest -q",),
+        approval_id="appr-d01-mixed-base",
+        approval_evidence_path=str(approval_path),
+    )
+    grant_path = trusted_root / "ext_grant_root_a.json"
+    grant_payload = {
+        "schema_version": "1.0",
+        "approval_id": "ktritod-d01-mix-01",
+        "authorized_by": "K.TRITOD",
+        "decision": "APPROVED",
+        "milestone_id": "milestone-c5",
+        "root_task": "root-a",
+        "task_id": "root-a",
+        "max_additional_repairs": 2,
+        "milestone_repair_limit": 6,
+        "scope_paths": ["src/a.py"],
+        "issued_at": _fixed_now().isoformat(),
+        "expires_at": (_fixed_now() + timedelta(hours=4)).isoformat(),
+        "single_use": True,
+        "counter_reset": False,
+    }
+    grant_bytes = json.dumps(grant_payload, indent=2).encode("utf-8")
+    grant_path.write_bytes(grant_bytes)
+    grant_sha = hashlib.sha256(grant_bytes).hexdigest()
+    Path(f"{grant_path}.sha256").write_text(f"{grant_sha}  {grant_path.name}\n", encoding="utf-8")
+
+    ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=contract_a,
+        expected_grant_sha256=grant_sha,
+    )
+
+    # root-a reserves 2 BASE slots and 1 GRANT slot
+    for idx in (1, 2):
+        res_a = ledger.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id=f"op-a-base-{idx:02d}",
+            attempt_id=f"att-{idx:02d}-root-a",
+            attempt=idx,
+        )
+        assert res_a.funding_source == "BASE"
+        assert res_a.grant_approval_id is None
+
+    res_a_grant = ledger.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-a-grant-01",
+        attempt_id="att-03-root-a",
+        attempt=3,
+        target_paths=("src/a.py",),
+    )
+    assert res_a_grant.funding_source == "GRANT"
+    assert res_a_grant.grant_approval_id == "ktritod-d01-mix-01"
+    state_after_a = ledger.load()
+    assert state_after_a.milestone_consumed == 3
+    assert _milestone_base_consumed(state_after_a) == 2
+    assert state_after_a.applied_grants[0].consumed_repairs == 1
+    assert state_after_a.applied_grants[0].remaining_repairs == 1
+
+    # root-b reserves 1 BASE slot (aggregate reaches base_milestone_limit == 4, base is 3)
+    res_b1 = ledger.reserve_attempt_budget(
+        task_id="root-b",
+        operation_id="op-b-base-01",
+        attempt_id="att-01-root-b",
+        attempt=1,
+    )
+    assert res_b1.funding_source == "BASE"
+    assert res_b1.grant_approval_id is None
+    state_b1 = ledger.load()
+    assert state_b1.milestone_consumed == 4
+    assert state_b1.milestone_consumed == state_b1.base_milestone_limit
+    assert _milestone_base_consumed(state_b1) == 3
+
+    # root-b reserves its 2nd BASE slot without a grant: must succeed from remaining BASE
+    res_b2 = ledger.reserve_attempt_budget(
+        task_id="root-b",
+        operation_id="op-b-base-02",
+        attempt_id="att-02-root-b",
+        attempt=2,
+        grant_approval_id=None,
+    )
+    assert res_b2.funding_source == "BASE"
+    assert res_b2.grant_approval_id is None
+    state_b2 = ledger.load()
+    assert state_b2.registered_roots["root-b"].base_consumed == 2
+    assert state_b2.milestone_consumed == 5
+    assert _milestone_base_consumed(state_b2) == 4
+    assert state_b2.applied_grants[0].consumed_repairs == 1
+    assert state_b2.applied_grants[0].remaining_repairs == 1
+
+    # Idempotent replay of root-b's 2nd BASE and root-a's GRANT returns existing records unchanged
+    replay_b2 = ledger.reserve_attempt_budget(
+        task_id="root-b",
+        operation_id="op-b-base-02",
+        attempt_id="att-02-root-b",
+        attempt=2,
+        grant_approval_id=None,
+    )
+    assert replay_b2 == res_b2
+    assert replay_b2.status == "RESERVED"
+
+    replay_a_grant = ledger.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-a-grant-01",
+        attempt_id="att-03-root-a",
+        attempt=3,
+        target_paths=("src/a.py",),
+    )
+    assert replay_a_grant == res_a_grant
+    assert replay_a_grant.status == "RESERVED"
+
+    state_replayed = ledger.load()
+    assert state_replayed.milestone_consumed == 5
+    assert _milestone_base_consumed(state_replayed) == 4
+    assert state_replayed.registered_roots["root-b"].base_consumed == 2
+    assert state_replayed.applied_grants[0].consumed_repairs == 1
+    assert state_replayed.applied_grants[0].remaining_repairs == 1
+
+    # Release root-a's GRANT slot: grant restored, all 4 milestone BASE slots remain used
+    released_grant = ledger.release_attempt_budget(
+        reservation_id=res_a_grant.reservation_id,
+        operation_id="op-a-grant-01",
+    )
+    assert released_grant.status == "RELEASED"
+    state_rel_grant = ledger.load()
+    assert state_rel_grant.applied_grants[0].consumed_repairs == 0
+    assert state_rel_grant.applied_grants[0].remaining_repairs == 2
+    assert state_rel_grant.milestone_consumed == 4
+    assert _milestone_base_consumed(state_rel_grant) == 4
+
+    with pytest.raises(RepairBudgetError):
+        ledger.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-a-base-only-fail",
+            attempt_id="att-04-root-a",
+            attempt=4,
+            target_paths=None,
+        )
+    with pytest.raises(RepairBudgetError):
+        ledger.reserve_attempt_budget(
+            task_id="root-b",
+            operation_id="op-b-base-exhausted-fail",
+            attempt_id="att-03-root-b",
+            attempt=3,
+            grant_approval_id=None,
+        )
+
+    # Release root-b's 2nd BASE slot: restores 1 milestone BASE slot for a fresh BASE reservation
+    released_b2 = ledger.release_attempt_budget(
+        reservation_id=res_b2.reservation_id,
+        operation_id="op-b-base-02",
+    )
+    assert released_b2.status == "RELEASED"
+    state_rel_b2 = ledger.load()
+    assert state_rel_b2.milestone_consumed == 3
+    assert _milestone_base_consumed(state_rel_b2) == 3
+    assert state_rel_b2.registered_roots["root-b"].base_consumed == 1
+
+    fresh_b2 = ledger.reserve_attempt_budget(
+        task_id="root-b",
+        operation_id="op-b-base-03",
+        attempt_id="att-02-root-b",
+        attempt=2,
+        grant_approval_id=None,
+    )
+    assert fresh_b2.funding_source == "BASE"
+    assert fresh_b2.grant_approval_id is None
+    state_fresh = ledger.load()
+    assert state_fresh.registered_roots["root-b"].base_consumed == 2
+    assert state_fresh.milestone_consumed == 4
+    assert _milestone_base_consumed(state_fresh) == 4
+
+    # Imported pre-reservation baseline counts toward milestone BASE usage and blocks extra roots
+    usage_path = trusted_root / "prior_usage.json"
+    usage_path.write_text(
+        json.dumps(
+            {
+                "milestone": "milestone-c5",
+                "repairs_consumed": 2,
+                "root_lineages": {
+                    "root-a": {"consumed": 2},
+                    "root-b": {"consumed": 0},
+                    "root-c": {"consumed": 0},
+                },
+                "counter_reset_allowed": False,
+                "records": ["audit/prior-01.json", "audit/prior-02.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    imported_ledger = DurableRepairBudgetLedger(
+        trusted_root / "budget_imported_base.json", clock=_fixed_now
+    )
+    imported_state = imported_ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["root-a", "root-b", "root-c"],
+        external_usage_path=usage_path,
+        trust_context=trust_ctx,
+    )
+    assert imported_state.imported_milestone_consumed == 2
+    assert imported_state.milestone_consumed == 2
+    assert _milestone_base_consumed(imported_state) == 2
+
+    imported_ledger.apply_extension_grant(
+        trust_context=trust_ctx,
+        grant_path=grant_path,
+        contract=contract_a,
+        expected_grant_sha256=grant_sha,
+    )
+    for idx in (1, 2):
+        imp_b = imported_ledger.reserve_attempt_budget(
+            task_id="root-b",
+            operation_id=f"op-imp-b-{idx:02d}",
+            attempt_id=f"att-{idx:02d}-root-b",
+            attempt=idx,
+        )
+        assert imp_b.funding_source == "BASE"
+
+    imp_state_full_base = imported_ledger.load()
+    assert imp_state_full_base.milestone_consumed == 4
+    assert _milestone_base_consumed(imp_state_full_base) == 4
+
+    # root-c has 0/2 per-root base, but all 4 milestone BASE slots (2 imported + 2 live) are spent
+    with pytest.raises(RepairBudgetError, match="no eligible active extension grant"):
+        imported_ledger.reserve_attempt_budget(
+            task_id="root-c",
+            operation_id="op-imp-c-01",
+            attempt_id="att-01-root-c",
+            attempt=1,
+            grant_approval_id=None,
+        )
+
+    # root-a can still use its active GRANT within the extended milestone_limit (6)
+    imp_a_grant = imported_ledger.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-imp-a-grant-01",
+        attempt_id="att-03-root-a",
+        attempt=3,
+        target_paths=("src/a.py",),
+    )
+    assert imp_a_grant.funding_source == "GRANT"
+    assert imported_ledger.load().milestone_consumed == 5
+    assert _milestone_base_consumed(imported_ledger.load()) == 4
+
+
+def test_begin_dispatch_rejects_nonlegacy_spoofing_with_legacy_looking_identifiers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted_dir = tmp_path / "trusted"
+    workspace_dir = tmp_path / "workspace"
+    trusted_dir.mkdir()
+    workspace_dir.mkdir()
+
+    raw_grant = b"Commander K.TRITOD approves Milestone D D01."
+    approval_dig = compute_approval_digest(raw_grant)
+    d_record_path = trusted_dir / "milestone_d_grant.json"
+    d_scope = ApprovedMilestoneScope(
+        workstreams=("d01",),
+        allowed_path_prefixes=("src/aipc/controller/",),
+    )
+    _, d_rec_sha = issue_milestone_authorization_record(
+        raw_grant_bytes=raw_grant,
+        record_id="rec-d01-spoof-01",
+        approval_id="appr-d01-spoof",
+        project_id="proj-d01",
+        milestone_id="milestone-d",
+        commander_id="K.TRITOD",
+        approved_scope=d_scope,
+        output_path=d_record_path,
+        trusted_external_root=trusted_dir,
+        excluded_roots=(workspace_dir,),
+        issued_at=_fixed_now(),
+        expires_at=None,
+    )
+    d_trust_ctx = MilestoneAuthorizationTrustContext(
+        record_path=d_record_path,
+        expected_record_sha256=d_rec_sha,
+        expected_approval_digest=approval_dig,
+        trusted_external_root=trusted_dir,
+        excluded_roots=(workspace_dir,),
+        expected_project_id="proj-d01",
+        expected_milestone_id="milestone-d",
+        expected_commander_id="K.TRITOD",
+    )
+
+    policy = _make_loaded_policy()
+
+    # 1. Milestone D queues (bound and unbound sibling ledgers) with legacy-looking task_ids
+    for spoof_task_id, mode, ledger_name in (
+        ("task-rg01-spoof", "bound", "budget.json"),
+        ("task-cisl01-spoof", "sibling", "repair_budget_ledger.json"),
+        ("task-rce01-spoof", "sibling", "budget.json"),
+    ):
+        case_dir = tmp_path / f"ms_d_{spoof_task_id}"
+        ledger_path = case_dir / ledger_name
+        ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+        ledger.initialize(loaded_policy=policy, registered_roots=[spoof_task_id])
+
+        d_contract = ApprovedTaskContract(
+            task_id=spoof_task_id,
+            phase_id="d01",
+            milestone_id="milestone-d",
+            title=f"Milestone D spoof probe {spoof_task_id}",
+            objective="Ensure legacy-looking task_id never exempts Milestone D from D01 dispatch.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id="appr-d01-spoof",
+            approval_evidence_path=str(d_record_path),
+        )
+        queue = PersistentTaskQueue(
+            case_dir / "canonical_queue.json",
+            repair_budget_path=(ledger_path if mode == "bound" else None),
+            milestone_trust_context=d_trust_ctx,
+            clock=_fixed_now,
+        )
+        queue.initialize(
+            project_id="proj-d01",
+            milestone_id="milestone-d",
+            contracts=(d_contract,),
+            approval_id="appr-d01-spoof",
+        )
+
+        with pytest.raises(
+            ControllerError,
+            match="budget-backed dispatch requires a non-blank operation_id",
+        ):
+            queue.begin_dispatch(
+                spoof_task_id,
+                worker_id="w-spoof",
+                provider="mock",
+                operation_id=None,
+            )
+
+        task_after = queue.load().tasks[0]
+        assert task_after.status == QueuedTaskStatus.ELIGIBLE
+        assert task_after.current_attempt == 0
+        assert task_after.attempts == ()
+
+    # 2. Non-legacy phase-24 queues (bound and unbound sibling ledgers) with legacy-looking IDs
+    for spoof_task_id, spoof_phase_id, mode, ledger_name in (
+        ("task-rg01-spoof", "rg01", "bound", "budget.json"),
+        ("task-cisl01-spoof", "cisl01", "sibling", "budget.json"),
+        ("task-rce01-spoof", "rce01", "sibling", "repair_budget_ledger.json"),
+    ):
+        with pytest.raises(ValueError, match="cannot host Milestone"):
+            ApprovedTaskContract(
+                task_id=spoof_task_id,
+                phase_id=spoof_phase_id,
+                milestone_id="phase-24",
+                title="Phase 24 spoof contract",
+                objective="Must reject legacy-looking identifiers in phase-24 contract.",
+                in_scope=("src/aipc/controller/task_queue.py",),
+                validation_commands=("pytest -q",),
+            )
+
+        case_dir = tmp_path / f"p24_{spoof_task_id}"
+        ledger_path = case_dir / ledger_name
+        ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+        ledger.initialize(loaded_policy=policy, registered_roots=[spoof_task_id])
+
+        spoof_contract = ApprovedTaskContract.model_construct(
+            task_id=spoof_task_id,
+            phase_id=spoof_phase_id,
+            milestone_id="phase-24",
+            title="Phase 24 spoofed snapshot",
+            objective="Test begin_dispatch anti-spoofing directly.",
+            depends_on=(),
+            max_attempts=3,
+            in_scope=("src/aipc/controller/task_queue.py",),
+            out_of_scope=(),
+            validation_commands=("pytest -q",),
+            require_independent_review=True,
+            approval_id=None,
+            approval_evidence_path=None,
+        )
+        spoof_task = QueuedTaskRecord.model_construct(
+            contract=spoof_contract,
+            status=QueuedTaskStatus.ELIGIBLE,
+            current_attempt=0,
+            active_attempt_id=None,
+            operation_id=None,
+            last_candidate_sha=None,
+            last_evidence_root=None,
+            attempts=(),
+            interruption_reason=None,
+            blocker_reason=None,
+            reconciliation_required=False,
+            reconciliation_reason=None,
+            recovery_cleared_for_attempt=None,
+        )
+        spoof_snap = TaskQueueSnapshot.model_construct(
+            schema_version="1.0",
+            project_id="proj-d01",
+            milestone_id="phase-24",
+            stop_at_milestone_boundary=True,
+            approval_id=None,
+            approval_evidence_path=None,
+            reconciliation_required=False,
+            reconciliation_reasons=(),
+            unresolved_reservation_ids=(),
+            tasks=(spoof_task,),
+            updated_at=_fixed_now(),
+        )
+        saved: list[TaskQueueSnapshot] = []
+        queue = PersistentTaskQueue(
+            case_dir / "canonical_queue.json",
+            repair_budget_path=(ledger_path if mode == "bound" else None),
+            clock=_fixed_now,
+        )
+        monkeypatch.setattr(queue, "load", lambda s=spoof_snap: s)
+        monkeypatch.setattr(queue, "_save", lambda updated, out=saved: out.append(updated))
+
+        # Fails closed with verifiers active
+        with pytest.raises(ControllerError):
+            queue.begin_dispatch(
+                spoof_task_id,
+                worker_id="w-spoof",
+                provider="mock",
+                operation_id=None,
+            )
+        assert not saved
+        assert spoof_snap.tasks[0].status == QueuedTaskStatus.ELIGIBLE
+        assert spoof_snap.tasks[0].current_attempt == 0
+
+        # Also fails closed at begin_dispatch's own reservation gate if verifiers are bypassed
+        monkeypatch.setattr(
+            queue, "_verify_external_milestone_trust_context", lambda **_kwargs: None
+        )
+        monkeypatch.setattr(queue, "_verify_milestone_c_authorization", lambda **_kwargs: None)
+        with pytest.raises(
+            ControllerError,
+            match="budget-backed dispatch requires a non-blank operation_id",
+        ):
+            queue.begin_dispatch(
+                spoof_task_id,
+                worker_id="w-spoof",
+                provider="mock",
+                operation_id=None,
+            )
+        assert not saved
+        assert spoof_snap.tasks[0].status == QueuedTaskStatus.ELIGIBLE
+        assert spoof_snap.tasks[0].current_attempt == 0
+
+
+def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Path) -> None:
+    trusted_dir = tmp_path / "trusted"
+    workspace_dir = tmp_path / "workspace"
+    trusted_dir.mkdir()
+    workspace_dir.mkdir()
+
+    raw_c7_grant = b"Commander K.TRITOD approves Milestone C.7 RCE01."
+    c7_approval_dig = compute_approval_digest(raw_c7_grant)
+    c7_record_path = trusted_dir / "milestone_c7_grant.json"
+    c7_scope = ApprovedMilestoneScope(
+        workstreams=("rce01",),
+        allowed_path_prefixes=("src/aipc/controller/",),
+        baseline_commit_sha=_MILESTONE_C7_BASELINE_SHA,
+    )
+    _, c7_rec_sha = issue_milestone_authorization_record(
+        raw_grant_bytes=raw_c7_grant,
+        record_id="rec-c7-exempt-01",
+        approval_id="appr-c7-exempt",
+        project_id="proj-d01",
+        milestone_id="milestone-c7",
+        commander_id="K.TRITOD",
+        approved_scope=c7_scope,
+        output_path=c7_record_path,
+        trusted_external_root=trusted_dir,
+        excluded_roots=(workspace_dir,),
+        issued_at=_fixed_now(),
+        expires_at=None,
+    )
+    c7_trust_ctx = MilestoneAuthorizationTrustContext(
+        record_path=c7_record_path,
+        expected_record_sha256=c7_rec_sha,
+        expected_approval_digest=c7_approval_dig,
+        trusted_external_root=trusted_dir,
+        excluded_roots=(workspace_dir,),
+        expected_project_id="proj-d01",
+        expected_milestone_id="milestone-c7",
+        expected_commander_id="K.TRITOD",
+    )
+
+    base_policy = _make_loaded_policy()
+    cases = (
+        (
+            "milestone-c5",
+            "rg01",
+            "task-rg01-01",
+            _MILESTONE_C5_BASELINE_SHA,
+            "appr-c5-exempt",
+            None,
+        ),
+        (
+            "milestone-c6",
+            "cisl01",
+            "task-cisl01-01",
+            _MILESTONE_C6_BASELINE_SHA,
+            "appr-c6-exempt",
+            None,
+        ),
+        (
+            "milestone-c7",
+            "rce01",
+            "task-rce01-01",
+            _MILESTONE_C7_BASELINE_SHA,
+            "appr-c7-exempt",
+            c7_trust_ctx,
+        ),
+    )
+
+    for ms_id, phase_id, task_id, baseline_sha, appr_id, ms_trust_ctx in cases:
+        case_dir = tmp_path / ms_id.replace("-", "_")
+        approval_path = case_dir / f"{ms_id.replace('-', '_')}_approval.json"
+        persist_milestone_authorization_evidence(
+            approval_path,
+            MilestoneAuthorizationEvidence(
+                approval_id=appr_id,
+                project_id="proj-d01",
+                milestone_id=ms_id,
+                decision="APPROVED",
+                authorized_by="K.TRITOD",
+                baseline_commit_sha=baseline_sha,
+                authorized_workstreams=(phase_id,),
+            ),
+        )
+
+        ms_policy = base_policy.model_copy(update={"milestone_id": ms_id, "approval_id": appr_id})
+        ledger_path = case_dir / "budget.json"
+        ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+        ledger.initialize(loaded_policy=ms_policy, registered_roots=[task_id])
+
+        contract = ApprovedTaskContract(
+            task_id=task_id,
+            phase_id=phase_id,
+            milestone_id=ms_id,
+            title=f"Verified {ms_id} initial task",
+            objective=f"Verify legacy initial dispatch exemption for {ms_id}.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id=appr_id,
+            approval_evidence_path=str(approval_path),
+        )
+        queue = PersistentTaskQueue(
+            case_dir / "canonical_queue.json",
+            repair_budget_path=ledger_path,
+            milestone_trust_context=ms_trust_ctx,
+            clock=_fixed_now,
+        )
+        queue.initialize(
+            project_id="proj-d01",
+            milestone_id=ms_id,
+            contracts=(contract,),
+            approval_id=appr_id,
+            approval_evidence_path=approval_path,
+        )
+
+        dispatched = queue.begin_dispatch(
+            task_id,
+            worker_id="w-legacy",
+            provider="mock",
+            operation_id=None,
+        )
+        assert dispatched.status == QueuedTaskStatus.RUNNING
+        assert dispatched.current_attempt == 1
+        assert dispatched.operation_id is None
+        assert ledger.load().milestone_consumed == 0
+
+    # Once a C.5 ledger uses D01 operation-correlated tracking, omitted operation_id fails closed
+    op_dir = tmp_path / "c5_with_d01_op"
+    op_approval_path = op_dir / "c5_approval.json"
+    persist_milestone_authorization_evidence(
+        op_approval_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-c5-d01-op",
+            project_id="proj-d01",
+            milestone_id="milestone-c5",
+            decision="APPROVED",
+            authorized_by="K.TRITOD",
+            baseline_commit_sha=_MILESTONE_C5_BASELINE_SHA,
+            authorized_workstreams=("rg01",),
+        ),
+    )
+    op_policy = base_policy.model_copy(
+        update={"milestone_id": "milestone-c5", "approval_id": "appr-c5-d01-op"}
+    )
+    op_ledger_path = op_dir / "budget.json"
+    op_ledger = DurableRepairBudgetLedger(op_ledger_path, clock=_fixed_now)
+    op_ledger.initialize(
+        loaded_policy=op_policy,
+        registered_roots=["task-rg01-01", "task-rg01-02"],
+    )
+    op_ledger.reserve_attempt_budget(
+        task_id="task-rg01-01",
+        operation_id="op-c5-tracked-01",
+        attempt_id="att-01-task-rg01-01",
+    )
+
+    c5_t1 = ApprovedTaskContract(
+        task_id="task-rg01-01",
+        phase_id="rg01",
+        milestone_id="milestone-c5",
+        title="Tracked C5 task 1",
+        objective="Track D01 operation-correlated reservation.",
+        in_scope=("src/aipc/controller/task_queue.py",),
+        validation_commands=("pytest -q",),
+        approval_id="appr-c5-d01-op",
+        approval_evidence_path=str(op_approval_path),
+    )
+    c5_t2 = ApprovedTaskContract(
+        task_id="task-rg01-02",
+        phase_id="rg01",
+        milestone_id="milestone-c5",
+        title="Tracked C5 task 2",
+        objective="Verify omitted operation_id fails closed under D01 tracking.",
+        in_scope=("src/aipc/controller/task_queue.py",),
+        validation_commands=("pytest -q",),
+        approval_id="appr-c5-d01-op",
+        approval_evidence_path=str(op_approval_path),
+    )
+    op_queue = PersistentTaskQueue(
+        op_dir / "canonical_queue.json",
+        repair_budget_path=op_ledger_path,
+        clock=_fixed_now,
+    )
+    op_queue.initialize(
+        project_id="proj-d01",
+        milestone_id="milestone-c5",
+        contracts=(c5_t1, c5_t2),
+        approval_id="appr-c5-d01-op",
+        approval_evidence_path=op_approval_path,
+    )
+
+    with pytest.raises(
+        ControllerError,
+        match="budget-backed dispatch requires a non-blank operation_id",
+    ):
+        op_queue.begin_dispatch(
+            "task-rg01-02",
+            worker_id="w-c5",
+            provider="mock",
+            operation_id=None,
+        )
+    t2_after = op_queue.load().tasks[1]
+    assert t2_after.status == QueuedTaskStatus.ELIGIBLE
+    assert t2_after.current_attempt == 0
+    assert t2_after.attempts == ()

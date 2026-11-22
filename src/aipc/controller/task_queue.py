@@ -1143,6 +1143,8 @@ class PersistentTaskQueue:
         snapshot_evidence_path: str | None = None,
         extra_paths: Sequence[str] = (),
     ) -> None:
+        if _is_milestone_d_scope(milestone_id) and _is_milestone_d_scope(contract.milestone_id):
+            return
         is_c5 = any(
             _is_milestone_c5_scope(val)
             for val in (milestone_id, contract.milestone_id, contract.phase_id, contract.task_id)
@@ -1586,35 +1588,61 @@ class PersistentTaskQueue:
                     "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
                 )
 
-            is_c5 = any(
-                _is_milestone_c5_scope(val)
-                for val in (
-                    snap.milestone_id,
-                    target.contract.milestone_id,
-                    target.contract.phase_id,
-                    target.contract.task_id,
-                )
+            snap_ms_low = snap.milestone_id.strip().lower()
+            contract_ms_low = target.contract.milestone_id.strip().lower()
+            is_d_milestone = _is_milestone_d_scope(snap.milestone_id) or _is_milestone_d_scope(
+                target.contract.milestone_id
             )
-            is_c6 = any(
-                _is_milestone_c6_scope(val)
-                for val in (
-                    snap.milestone_id,
-                    target.contract.milestone_id,
-                    target.contract.phase_id,
-                    target.contract.task_id,
-                )
+            is_c5_milestone = (
+                not is_d_milestone
+                and snap_ms_low in _AUTHORIZED_MILESTONE_C5_IDS
+                and contract_ms_low in _AUTHORIZED_MILESTONE_C5_IDS
             )
-            is_c7 = any(
-                _is_milestone_c7_scope(val)
-                for val in (
-                    snap.milestone_id,
-                    target.contract.milestone_id,
-                    target.contract.phase_id,
-                    target.contract.task_id,
-                )
+            is_c6_milestone = (
+                not is_d_milestone
+                and snap_ms_low in _AUTHORIZED_MILESTONE_C6_IDS
+                and contract_ms_low in _AUTHORIZED_MILESTONE_C6_IDS
             )
+            is_c7_milestone = (
+                not is_d_milestone
+                and snap_ms_low in _AUTHORIZED_MILESTONE_C7_IDS
+                and contract_ms_low in _AUTHORIZED_MILESTONE_C7_IDS
+            )
+            is_verified_legacy_c567 = is_c5_milestone or is_c6_milestone or is_c7_milestone
+
+            uses_d01_op_tracking = any(
+                t.operation_id is not None
+                or any(att.operation_id is not None for att in t.attempts)
+                for t in snap.tasks
+            )
+            if (
+                is_verified_legacy_c567
+                and not uses_d01_op_tracking
+                and target.status == QueuedTaskStatus.ELIGIBLE
+                and operation_id is None
+                and expected_attempt_id is None
+                and eff_ledger_path is not None
+                and eff_ledger_path.is_file()
+            ):
+                lock_stack.enter_context(_acquire_queue_ledger_lock(None, eff_ledger_path))
+                from aipc.controller.repair_budget import (
+                    DurableRepairBudgetLedger,
+                    RepairBudgetError,
+                )
+
+                try:
+                    probe_budget_state = DurableRepairBudgetLedger(
+                        eff_ledger_path, clock=self._clock
+                    ).load()
+                except RepairBudgetError as exc:
+                    raise ControllerError(f"Cannot dispatch task '{task_id}': {exc}") from exc
+                uses_d01_op_tracking = any(
+                    r.operation_id is not None for r in probe_budget_state.reservations.values()
+                )
+
             is_legacy_c567_initial = (
-                (is_c5 or is_c6 or is_c7)
+                is_verified_legacy_c567
+                and not uses_d01_op_tracking
                 and target.status == QueuedTaskStatus.ELIGIBLE
                 and operation_id is None
                 and expected_attempt_id is None
@@ -1627,7 +1655,7 @@ class PersistentTaskQueue:
                 )
             )
             is_legacy_c567_repair = (
-                (is_c5 or is_c6 or is_c7)
+                is_verified_legacy_c567
                 and target.status == QueuedTaskStatus.REPAIR_REQUIRED
                 and operation_id is None
                 and expected_attempt_id is None
@@ -1692,9 +1720,13 @@ class PersistentTaskQueue:
                         f"Cannot dispatch task '{task_id}' for operation_id '{clean_op_id}': "
                         "budget reservation is missing or not in RESERVED state"
                     )
-            if target.status == QueuedTaskStatus.REPAIR_REQUIRED and (is_c5 or is_c6 or is_c7):
+            if target.status == QueuedTaskStatus.REPAIR_REQUIRED and is_verified_legacy_c567:
                 scope_label = (
-                    "Milestone C.7" if is_c7 else "Milestone C.6" if is_c6 else "Milestone C.5"
+                    "Milestone C.7"
+                    if is_c7_milestone
+                    else "Milestone C.6"
+                    if is_c6_milestone
+                    else "Milestone C.5"
                 )
                 if self._repair_budget_path is None:
                     raise ControllerError(
