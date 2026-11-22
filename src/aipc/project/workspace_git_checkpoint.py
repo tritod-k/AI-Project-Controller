@@ -63,10 +63,6 @@ _ALLOWED_GITIGNORE_PATTERNS: dict[str, frozenset[str]] = {
     "*.key": frozenset({"*.key", "**/*.key"}),
     ".env*": frozenset({".env*", "**/.env*"}),
 }
-_BASE_ASCII_ALPHABET: frozenset[str] = frozenset(
-    chr(c).lower() for c in range(32, 127) if chr(c) != "/"
-)
-_UNICODE_OTHER_SENTINEL = "\ue000"
 _PROTECTED_FILE_GLOBS: dict[str, tuple[str, ...]] = {
     "*.lock": ("*.lock", "controller.lock"),
     "*.key": ("*.key", "*.pem", "*secret*", "*credential*", "*token*"),
@@ -259,22 +255,63 @@ def _read_class_char(pat: str, idx: int, end: int) -> tuple[str, int]:
     return pat[idx], idx + 1
 
 
-def _collect_pattern_chars(pat: str) -> set[str]:
-    chars: set[str] = {ch for ch in pat.lower() if ch != "/"}
-    for ch in pat:
-        c_low = ch.lower()
-        if c_low != "/":
-            chars.add(c_low)
+def _single_cp_case_variants(ch: str) -> tuple[str, ...]:
+    variants: list[str] = []
+    for candidate in (ch, ch.lower(), ch.upper(), ch.casefold()):
+        if len(candidate) == 1 and candidate not in variants:
+            variants.append(candidate)
+    return tuple(variants)
+
+
+def _add_char_boundaries(boundaries: set[int], ch: str) -> None:
+    for variant in _single_cp_case_variants(ch):
+        v_ord = ord(variant)
+        boundaries.add(max(0, min(v_ord, 0x110000)))
+        boundaries.add(max(0, min(v_ord + 1, 0x110000)))
+
+
+def _add_range_boundaries(boundaries: set[int], lo_ch: str, hi_ch: str) -> None:
+    lo_ord = ord(lo_ch)
+    hi_ord = ord(hi_ch)
+    if lo_ord > hi_ord:
+        return
+    boundaries.add(max(0, min(lo_ord, 0x110000)))
+    boundaries.add(max(0, min(hi_ord + 1, 0x110000)))
+    _add_char_boundaries(boundaries, lo_ch)
+    _add_char_boundaries(boundaries, hi_ch)
+    for fn in (str.lower, str.upper, str.casefold):
+        t_lo = fn(lo_ch)
+        t_hi = fn(hi_ch)
+        if len(t_lo) == 1 and len(t_hi) == 1 and ord(t_lo) <= ord(t_hi):
+            boundaries.add(max(0, min(ord(t_lo), 0x110000)))
+            boundaries.add(max(0, min(ord(t_hi) + 1, 0x110000)))
+    upper_lo = max(lo_ord, ord("A"))
+    upper_hi = min(hi_ord, ord("Z"))
+    if upper_lo <= upper_hi:
+        boundaries.update((upper_lo, upper_hi + 1, upper_lo + 32, upper_hi + 33))
+    lower_lo = max(lo_ord, ord("a"))
+    lower_hi = min(hi_ord, ord("z"))
+    if lower_lo <= lower_hi:
+        boundaries.update((lower_lo, lower_hi + 1, lower_lo - 32, lower_hi - 31))
+
+
+def _collect_pattern_boundaries(pat: str) -> set[int]:
+    boundaries: set[int] = set()
     i = 0
     n = len(pat)
     while i < n:
-        if pat[i] == "\\" and i + 1 < n:
-            lit = pat[i + 1].lower()
-            if lit != "/":
-                chars.add(lit)
-            i += 2
-            continue
-        if pat[i] == "[":
+        ch = pat[i]
+        if ch in ("*", "?"):
+            i += 1
+        elif ch == "\\":
+            if i + 1 < n:
+                lit = pat[i + 1]
+                i += 2
+            else:
+                lit = "\\"
+                i += 1
+            _add_char_boundaries(boundaries, lit)
+        elif ch == "[":
             j = i + 1
             if j < n and pat[j] in ("!", "^"):
                 j += 1
@@ -286,50 +323,51 @@ def _collect_pattern_chars(pat: str) -> set[str]:
                     j += 2
                 else:
                     j += 1
-            if j < n:
-                k = content_start
-                while k < j:
-                    lo_ch, next_k = _read_class_char(pat, k, j)
-                    if next_k + 1 < j and pat[next_k] == "-":
-                        hi_ch, k = _read_class_char(pat, next_k + 1, j)
-                        lo_ord = ord(lo_ch)
-                        hi_ord = ord(hi_ch)
-                        if lo_ord <= hi_ord:
-                            if hi_ord - lo_ord <= 1024:
-                                for code in range(lo_ord, hi_ord + 1):
-                                    c_low = chr(code).lower()
-                                    if c_low != "/":
-                                        chars.add(c_low)
-                            else:
-                                mid_ord = (lo_ord + hi_ord) // 2
-                                for code in (lo_ord, mid_ord, hi_ord):
-                                    c_low = chr(code).lower()
-                                    if c_low != "/":
-                                        chars.add(c_low)
-                    else:
-                        c_low = lo_ch.lower()
-                        if c_low != "/":
-                            chars.add(c_low)
-                        k = next_k
-                i = j + 1
+            if j >= n:
+                _add_char_boundaries(boundaries, "[")
+                i += 1
                 continue
-        i += 1
-    return chars
+            k = content_start
+            while k < j:
+                lo_ch, next_k = _read_class_char(pat, k, j)
+                if next_k + 1 < j and pat[next_k] == "-":
+                    hi_ch, k = _read_class_char(pat, next_k + 1, j)
+                    _add_range_boundaries(boundaries, lo_ch, hi_ch)
+                else:
+                    _add_char_boundaries(boundaries, lo_ch)
+                    k = next_k
+            i = j + 1
+        else:
+            _add_char_boundaries(boundaries, ch)
+            i += 1
+    return boundaries
 
 
 def _build_comparison_alphabet(pat_a: str, pat_b: str) -> frozenset[str]:
-    chars: set[str] = set(_BASE_ASCII_ALPHABET)
-    chars.update(_collect_pattern_chars(pat_a))
-    chars.update(_collect_pattern_chars(pat_b))
-    sentinel = _UNICODE_OTHER_SENTINEL
-    if sentinel in chars:
-        for code in range(0xE001, 0xF900):
-            candidate = chr(code)
-            if candidate not in chars:
-                sentinel = candidate
-                break
-    chars.add(sentinel)
-    return frozenset(chars)
+    boundaries: set[int] = {0, ord("/"), ord("/") + 1, 0xD800, 0xE000, 0x110000}
+    boundaries.update(_collect_pattern_boundaries(pat_a))
+    boundaries.update(_collect_pattern_boundaries(pat_b))
+    sorted_b = sorted(b for b in boundaries if 0 <= b <= 0x110000)
+    alphabet: set[str] = set()
+    for b_i, b_next in zip(sorted_b, sorted_b[1:], strict=False):
+        if b_i >= b_next or b_i == ord("/") or 0xD800 <= b_i < 0xE000:
+            continue
+        alphabet.add(chr(b_i))
+    return frozenset(alphabet)
+
+
+def _char_matches_literal(rep: str, lit: str) -> bool:
+    if rep == "/":
+        return False
+    if rep == lit or rep.lower() == lit.lower() or rep.upper() == lit.upper():
+        return True
+    rep_cf = rep.casefold()
+    lit_cf = lit.casefold()
+    return len(rep_cf) == 1 and len(lit_cf) == 1 and rep_cf == lit_cf
+
+
+def _char_matches_range(rep: str, lo_ord: int, hi_ord: int) -> bool:
+    return rep != "/" and any(lo_ord <= ord(v) <= hi_ord for v in _single_cp_case_variants(rep))
 
 
 def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str, frozenset[str]]]:
@@ -347,12 +385,13 @@ def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str
             i += 1
         elif ch == "\\":
             if i + 1 < n:
-                lit = pat[i + 1].lower()
+                lit = pat[i + 1]
                 i += 2
             else:
                 lit = "\\"
                 i += 1
-            tokens.append(("char", frozenset({lit}) if lit != "/" else frozenset()))
+            matched = frozenset(a for a in alphabet if _char_matches_literal(a, lit))
+            tokens.append(("char", matched))
         elif ch == "[":
             j = i + 1
             negated = False
@@ -368,7 +407,8 @@ def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str
                 else:
                     j += 1
             if j >= n:
-                tokens.append(("char", frozenset({"["})))
+                matched = frozenset(a for a in alphabet if _char_matches_literal(a, "["))
+                tokens.append(("char", matched))
                 i += 1
                 continue
             class_chars: set[str] = set()
@@ -380,37 +420,20 @@ def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str
                     lo_ord = ord(lo_ch)
                     hi_ord = ord(hi_ch)
                     if lo_ord <= hi_ord:
-                        if hi_ord - lo_ord <= 1024:
-                            for code in range(lo_ord, hi_ord + 1):
-                                c_low = chr(code).lower()
-                                if c_low != "/" and c_low in alphabet:
-                                    class_chars.add(c_low)
-                        else:
-                            for c in alphabet:
-                                if len(c) == 1:
-                                    c_ord = ord(c)
-                                    if lo_ord <= c_ord <= hi_ord:
-                                        class_chars.add(c)
-                                    else:
-                                        c_up = c.upper()
-                                        if len(c_up) == 1 and lo_ord <= ord(c_up) <= hi_ord:
-                                            class_chars.add(c)
-                        for edge in (lo_ch.lower(), hi_ch.lower()):
-                            if edge != "/" and edge in alphabet:
-                                class_chars.add(edge)
+                        for a in alphabet:
+                            if _char_matches_range(a, lo_ord, hi_ord):
+                                class_chars.add(a)
                 else:
-                    c_low = lo_ch.lower()
-                    if c_low != "/" and c_low in alphabet:
-                        class_chars.add(c_low)
+                    for a in alphabet:
+                        if _char_matches_literal(a, lo_ch):
+                            class_chars.add(a)
                     k = next_k
             matched = alphabet - class_chars if negated else frozenset(class_chars)
-            if not matched:
-                matched = alphabet
             tokens.append(("char", matched))
             i = j + 1
         else:
-            lit = ch.lower()
-            tokens.append(("char", frozenset({lit}) if lit != "/" else frozenset()))
+            matched = frozenset(a for a in alphabet if _char_matches_literal(a, ch))
+            tokens.append(("char", matched))
             i += 1
     return tokens
 

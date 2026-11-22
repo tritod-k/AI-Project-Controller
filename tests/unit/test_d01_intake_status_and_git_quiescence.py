@@ -23,6 +23,7 @@ from aipc.project.scaffolding import (
 )
 from aipc.project.workspace_git_checkpoint import (
     WorkspaceGitQuiescenceError,
+    _segment_globs_intersect,
     acquire_controller_lock,
     verify_workspace_git_quiescence,
 )
@@ -717,3 +718,45 @@ def test_verify_workspace_git_quiescence_gitignore_scope_and_negations(
         rep_neg = verify_workspace_git_quiescence(ws_neg)
         assert rep_neg.passed is False, f"Expected negation FAIL for {neg_line}"
         assert rep_neg.checks["git_hygiene"] is False
+
+
+def test_segment_globs_intersect_exact_unicode_interval_partition_counterexample(
+    tmp_path: Path,
+) -> None:
+    wide_range = "[\u1000-\u3000]"
+    punctured_negation = "[!\u1000-\u1001\u1fff-\u2001\u2fff-\u3000]"
+
+    # Interior witness \u1002 intersects wide_range and punctured_negation
+    assert _segment_globs_intersect(wide_range, punctured_negation) is True
+    assert _segment_globs_intersect(punctured_negation, wide_range) is True
+
+    # Complementary disjoint classes must not intersect
+    assert _segment_globs_intersect("[\u1000-\u1001]", "[!\u1000-\u1001]") is False
+    assert _segment_globs_intersect("[\u1000-\u3000]", "[!\u1000-\u3000]") is False
+
+    # Case-insensitive ASCII and Unicode ranges and literals
+    assert _segment_globs_intersect("[A-Z]", "[a-z]") is True
+    assert _segment_globs_intersect("[A-Z]", "[!a-z]") is False
+    assert _segment_globs_intersect("[Z-b]", "[@-A]") is True
+    assert _segment_globs_intersect("[Z-b]", "[!Z-b]") is False
+    assert _segment_globs_intersect("*.LOCK", "*.lock") is True
+    assert _segment_globs_intersect("[\u00c0-\u00d6]", "[\u00e0-\u00f6]") is True
+    assert _segment_globs_intersect("[\u00c0-\u00d6]", "[!\u00e0-\u00f6]") is False
+
+    # Multi-char casefold expansion ('\u00df'.casefold() == 'ss') stays single-codepoint safe
+    assert _segment_globs_intersect("[\u00df]", "\u00df") is True
+    assert _segment_globs_intersect("[\u00df]", "[!\u00df]") is False
+
+    # End-to-end quiescence check fails closed on adversarial wildcard negation
+    ws = _setup_quiescent_workspace(tmp_path / "ws_unicode_neg")
+    base_rules = "stable_c/\n**/runtime/worktrees/\n**/runtime/logs/\n**/*.lock\n*.key\n.env*\n"
+    neg_line = f"!{punctured_negation}.lock"
+    (ws / ".gitignore").write_text(
+        f"{base_rules}{neg_line}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    rep = verify_workspace_git_quiescence(ws)
+    assert rep.passed is False
+    assert rep.checks["git_hygiene"] is False
+    assert any(neg_line in v for v in rep.violations)
