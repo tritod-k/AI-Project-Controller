@@ -330,13 +330,15 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   short `wt-<hash>` (`<= 12` chars) worktree names, and renders derived non-authoritative
   `CURRENT_STATUS.md` directly from canonical nested `QueuedTaskRecord.contract` fields.
   `aipc.project.workspace_git_checkpoint` holds exclusive `controller.lock` to verify LF
-  `.gitattributes`, workspace-wide `.gitignore` coverage (rejecting path-scoped exclusions and
-  trailing `!` negations), zero secrets (including quoted JSON/YAML credentials in portable root
-  docs while preserving safe PowerShell expressions), valid LF `.sha256` sidecars, and
-  schema-valid quiescent queues (enforcing `_QUIESCENT_TASK_STATUSES`, preserving uncertain
-  `RESERVED` budget entries in `RECONCILIATION_REQUIRED`, requiring exact non-empty
-  `(operation_id, attempt_id)` matches, and rejecting symlinked HMAC key ancestor directories)
-  prior to Private Control-Plane Git checkpoints.
+  `.gitattributes`, workspace-wide `.gitignore` coverage (rejecting path-scoped or root-only
+  `.env*` exclusions and conservative glob-vs-glob overlapping trailing `!` negations), zero
+  secrets (including quoted JSON/YAML credentials in portable root docs while preserving safe
+  PowerShell expressions), valid LF `.sha256` sidecars, and schema-valid quiescent queues
+  (enforcing `_QUIESCENT_TASK_STATUSES`, serializing `begin_dispatch()` and
+  `reconcile_queue_and_budget_consistency()` under a shared exclusive lock, preserving
+  uncertain or missing-task `RESERVED` budget entries fail-closed in `RECONCILIATION_REQUIRED`,
+  requiring exact non-empty `(operation_id, attempt_id)` matches, and rejecting symlinked HMAC
+  key ancestor directories) prior to Private Control-Plane Git checkpoints.
 - **Strictly Read-Only Multi-Project Dashboard (`D02`, `FINAL-03`):**
   `aipc.dashboard.multi_project` and read-only `server.py` endpoints (`GET /multi-project`,
   `GET /api/multi-project`, HTTP `405` on mutations) aggregate multi-project phase, queue,
