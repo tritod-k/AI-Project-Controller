@@ -105,7 +105,7 @@ class ApprovedPlanSnapshot(CanonicalRecord):
     manifest_sha256: str
 
 
-_PLAN_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_PLAN_VERSION_RE = re.compile(r"^plan-v[0-9]{4,}$")
 
 
 def validate_project_identifier(project_id: str) -> Identifier:

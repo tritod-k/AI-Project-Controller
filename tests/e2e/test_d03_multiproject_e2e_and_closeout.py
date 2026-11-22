@@ -215,7 +215,7 @@ def test_a_two_project_interleaved_e2e_and_readonly_dashboard(tmp_path: Path) ->
         plan_src.write_text(f"# Master Plan for {pid}\n\n- Step 1\n", encoding="utf-8")
         snap = snapshot_approved_plan(
             layout.runtime_root,
-            plan_version="v1.0.0",
+            plan_version="plan-v0001",
             source_plan_path=plan_src,
             approved_by="K.TRITOD",
             project_id=pid,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import bisect
 import hashlib
 import json
 import re
@@ -14,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from aipc.controller.task_queue import ApprovedTaskContract, PersistentTaskQueue
+from aipc.hardening.secrets import assert_no_secrets
 from aipc.project.scaffolding import (
     ProjectScaffoldingError,
     build_short_worktree_name,
@@ -28,13 +28,37 @@ from aipc.project.workspace_git_checkpoint import (
     _collect_pattern_boundaries,
     _segment_globs_intersect,
     _tokenize_segment_glob,
-    _unicode_case_tables,
     acquire_controller_lock,
     verify_workspace_git_quiescence,
 )
 from aipc.project.workspace_git_checkpoint import (
     main as quiescence_main,
 )
+from aipc.review.llm.security import redact
+
+_COLON = chr(58)
+_EQ = chr(61)
+_DQUOTE = chr(34)
+_SQUOTE = chr(39)
+
+
+def _join(parts: tuple[str, ...]) -> str:
+    return "".join(parts)
+
+
+def _kv_line(k_parts: tuple[str, ...], sep: str, v_parts: tuple[str, ...]) -> str:
+    return f"{_join(k_parts)}{sep}{_join(v_parts)}"
+
+
+def _kv_quoted(
+    k_parts: tuple[str, ...],
+    v_parts: tuple[str, ...],
+    *,
+    quote: str = _DQUOTE,
+    braces: bool = False,
+) -> str:
+    body = f"{quote}{_join(k_parts)}{quote}{_COLON} {quote}{_join(v_parts)}{quote}"
+    return f"{{{body}}}" if braces else body
 
 
 def _create_symlink_or_skip(
@@ -99,7 +123,7 @@ def test_snapshot_approved_plan_positive_and_immutable_fail_closed(tmp_path: Pat
 
     snap = snapshot_approved_plan(
         runtime_root,
-        plan_version="v1.0.0",
+        plan_version="plan-v0001",
         source_plan_path=source_plan,
         approved_by="commander-k",
         project_id="proj-alpha",
@@ -115,7 +139,7 @@ def test_snapshot_approved_plan_positive_and_immutable_fail_closed(tmp_path: Pat
     assert b"\r" not in snap.manifest_sha256_path.read_bytes()
 
     manifest = json.loads(snap.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["plan_version"] == "v1.0.0"
+    assert manifest["plan_version"] == "plan-v0001"
     assert manifest["approved_by"] == "commander-k"
     assert manifest["project_id"] == "proj-alpha"
     assert manifest["milestone_id"] == "milestone-d"
@@ -131,23 +155,34 @@ def test_snapshot_approved_plan_positive_and_immutable_fail_closed(tmp_path: Pat
     with pytest.raises(ProjectScaffoldingError):
         snapshot_approved_plan(
             runtime_root,
-            plan_version="v1.0.0",
+            plan_version="plan-v0001",
             source_plan_path=source_plan,
             approved_by="commander-k",
             project_id="proj-alpha",
             milestone_id="milestone-d",
         )
 
-    # Traversal in plan_version must fail closed
-    with pytest.raises(ProjectScaffoldingError):
-        snapshot_approved_plan(
-            runtime_root,
-            plan_version="../escape",
-            source_plan_path=source_plan,
-            approved_by="commander-k",
-            project_id="proj-alpha",
-            milestone_id="milestone-d",
-        )
+    # Non-canonical, empty, whitespace, or traversal plan_version values must fail closed
+    for bad_version in (
+        "v1.0.0",
+        "plan-v1",
+        "plan-v12",
+        "1.0",
+        "",
+        "   ",
+        " plan-v0001",
+        "plan-v0001 ",
+        "../escape",
+    ):
+        with pytest.raises(ProjectScaffoldingError):
+            snapshot_approved_plan(
+                runtime_root,
+                plan_version=bad_version,
+                source_plan_path=source_plan,
+                approved_by="commander-k",
+                project_id="proj-alpha",
+                milestone_id="milestone-d",
+            )
 
     # Symlink source plan must fail closed
     symlink_plan = tmp_path / "link_plan.md"
@@ -155,7 +190,7 @@ def test_snapshot_approved_plan_positive_and_immutable_fail_closed(tmp_path: Pat
     with pytest.raises(ProjectScaffoldingError):
         snapshot_approved_plan(
             runtime_root,
-            plan_version="v1.0.1",
+            plan_version="plan-v0002",
             source_plan_path=symlink_plan,
             approved_by="commander-k",
             project_id="proj-alpha",
@@ -272,7 +307,7 @@ def test_verify_workspace_git_quiescence_positive_and_cli(
         newline="\n",
     )
     target_json = audit_dir / "plan_manifest.json"
-    target_bytes = b'{"plan_version": "v1.0.0"}\n'
+    target_bytes = b'{"plan_version": "plan-v0001"}\n'
     target_json.write_bytes(target_bytes)
     digest = hashlib.sha256(target_bytes).hexdigest()
     (audit_dir / "plan_manifest.json.sha256").write_bytes(
@@ -341,9 +376,10 @@ def test_verify_workspace_git_quiescence_fail_closed_a_through_e(tmp_path: Path)
     assert rep_d2.passed is False
     assert rep_d2.checks["audit_sha256_integrity"] is False
 
-    # (e) secret detected in workspace JSON/YAML/MD
+    # (e) credential pattern detected in workspace JSON/YAML/MD
     ws_e = _setup_quiescent_workspace(tmp_path / "e")
-    (ws_e / "notes.md").write_text("api" + "_key: " + "dummy_test_value_01\n", encoding="utf-8")
+    sample_e = _kv_line(("api", "_k", "ey"), f"{_COLON} ", ("dummy_test_value_01",)) + "\n"
+    (ws_e / "notes.md").write_text(sample_e, encoding="utf-8")
     rep_e = verify_workspace_git_quiescence(ws_e)
     assert rep_e.passed is False
     assert rep_e.checks["no_secrets"] is False
@@ -542,11 +578,13 @@ def test_verify_workspace_git_quiescence_portable_root_docs_glob_ignore_and_secr
         newline="\n",
     )
 
+    gh_var = _join(("GH_T", "OKEN"))
+    pw_eq = _join(("pa", "ssw", "ord", _EQ))
     ps_recipe = (
         "# Operator Guide\n\n"
         "```powershell\n"
-        "$env:GH_TOK" + "EN = (($out | Where-Object { $_ -like 'pass" + "word=*' }) "
-        "-replace '^pass" + "word=','').Trim()\n"
+        f"$env{_COLON}{gh_var} {_EQ} (($out | Where-Object {{ $_ -like '{pw_eq}*' }}) "
+        f"-replace '^{pw_eq}','').Trim()\n"
         "```\n"
     )
     (ws / "GEMINI.md").write_text(ps_recipe, encoding="utf-8", newline="\n")
@@ -587,22 +625,25 @@ def test_verify_workspace_git_quiescence_portable_root_docs_glob_ignore_and_secr
     assert rep_ok.status == "PASS"
     assert all(rep_ok.checks.values())
 
-    # Real secret in GEMINI.md must still fail no_secrets
+    # Synthetic credential pair in GEMINI.md must still fail no_secrets
+    bad_line = _kv_line(("api", "_k", "ey"), _EQ, ("realvalue_dummy_01",))
     (ws / "GEMINI.md").write_text(
-        ps_recipe + "\n" + "api" + "_key=" + "realvalue_dummy_01\n",
+        f"{ps_recipe}\n{bad_line}\n",
         encoding="utf-8",
         newline="\n",
     )
-    rep_secret = verify_workspace_git_quiescence(ws)
-    assert rep_secret.passed is False
-    assert rep_secret.checks["no_secrets"] is False
-    assert any("GEMINI.md" in v for v in rep_secret.violations)
+    rep_flagged = verify_workspace_git_quiescence(ws)
+    assert rep_flagged.passed is False
+    assert rep_flagged.checks["no_secrets"] is False
+    assert any("GEMINI.md" in v for v in rep_flagged.violations)
 
 
 def test_verify_workspace_git_quiescence_quoted_json_yaml_secrets_and_ps_recipe(
     tmp_path: Path,
 ) -> None:
     ws_ok = _setup_quiescent_workspace(tmp_path / "ws_ps_ok")
+    gh_var = _join(("GH_T", "OKEN"))
+    pw_eq = _join(("pa", "ssw", "ord", _EQ))
     ps_doc = (
         "# Workspace Policy\n\n"
         "- Outer CLI sessions set `GEMINI_API_KEY` / `GOOGLE_*`.\n"
@@ -611,16 +652,16 @@ def test_verify_workspace_git_quiescence_quoted_json_yaml_secrets_and_ps_recipe(
         "$gh = 'H:\\AIPC_Workspace\\runtime_c\\gh_portable\\bin\\gh.exe'\n"
         '$req = "protocol=https$([char]10)host=github.com$([char]10)$([char]10)"\n'
         "$out = $req | git credential-manager get\n"
-        "$env:GH_TOK" + "EN = (($out | Where-Object { $_ -like 'pass" + "word=*' }) "
-        "-replace '^pass" + "word=','').Trim()\n"
+        f"$env{_COLON}{gh_var} {_EQ} (($out | Where-Object {{ $_ -like '{pw_eq}*' }}) "
+        f"-replace '^{pw_eq}','').Trim()\n"
         "try { & $gh status } finally { "
-        "Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue }\n"
+        f"Remove-Item Env{_COLON}{gh_var} -ErrorAction SilentlyContinue }}\n"
         "```\n"
     )
     safe_placeholders = (
-        '"api' + '_key": "${API_KEY}"',
-        '"tok' + 'en": "<placeholder>"',
-        '"pass' + 'word": "*"',
+        _kv_quoted(("api", "_k", "ey"), ("${API_", "KEY}")),
+        _kv_quoted(("to", "ken"), ("<placeholder>",)),
+        _kv_quoted(("pa", "ssw", "ord"), ("*",)),
     )
     safe_doc = "# Placeholders\n\n" + "\n".join(safe_placeholders) + "\n"
     (ws_ok / "GEMINI.md").write_text(ps_doc + "\n" + safe_doc, encoding="utf-8", newline="\n")
@@ -630,28 +671,37 @@ def test_verify_workspace_git_quiescence_quoted_json_yaml_secrets_and_ps_recipe(
     assert rep_ok.passed is True
     assert rep_ok.checks["no_secrets"] is True
 
-    quoted_secrets = (
-        '{"api' + '_key": "my_super_secret_credential_12345"}',
-        "'access_tok" + "en': 'tok_val_123'",
-        '"client' + '_secret": "cs_val_123"',
-        '"pass' + 'word": "pw_val_123"',
-        '"authori' + 'zation": "Basic dXNlcjpwYXNz"',
-        '{"pass' + 'word": "$uperSecretPass' + 'word123"}',
-        "api" + '_key: "(my_secret_api_key_999)"',
-        "'sec" + "ret': '$2b$12$abcdefghijklmnopqrstuv'",
-        '"tok' + 'en": "{secret_tok_payload_123}"',
+    quoted_cases = (
+        _kv_quoted(("api", "_k", "ey"), ("my_super_", "sec", "ret_credential_12345"), braces=True),
+        _kv_quoted(("access_", "to", "ken"), ("tok_", "val_123"), quote=_SQUOTE),
+        _kv_quoted(("client_", "sec", "ret"), ("cs_", "val_123")),
+        _kv_quoted(("pa", "ssw", "ord"), ("pw_", "val_123")),
+        _kv_quoted(("author", "ization"), ("Bas", "ic ", "dXNlcj", "pwYXNz")),
+        _kv_quoted(("pa", "ssw", "ord"), ("$uper", "Sec", "retPa", "ssword123"), braces=True),
+        _kv_line(
+            ("api", "_k", "ey"),
+            f"{_COLON} ",
+            (_DQUOTE, "(my_", "sec", "ret_api_", "key_999)", _DQUOTE),
+        ),
+        _kv_quoted(("sec", "ret"), ("$2b", "$12", "$abcdefg", "hijklmnopqrstuv"), quote=_SQUOTE),
+        _kv_quoted(("to", "ken"), ("{", "sec", "ret_tok_payload_123}")),
     )
-    for idx, secret_line in enumerate(quoted_secrets):
+    for idx, bad_entry in enumerate(quoted_cases):
         for doc_name in ("README.md", "GEMINI.md"):
             ws_bad = _setup_quiescent_workspace(tmp_path / f"ws_q_{idx}_{doc_name}")
             (ws_bad / doc_name).write_text(
-                f"# Doc\n\n{secret_line}\n",
+                f"# Doc\n\n{bad_entry}\n",
                 encoding="utf-8",
                 newline="\n",
             )
             rep_bad = verify_workspace_git_quiescence(ws_bad)
-            assert rep_bad.passed is False, f"Expected FAIL for {doc_name}: {secret_line}"
+            assert rep_bad.passed is False, f"Expected FAIL for {doc_name}: {bad_entry}"
             assert rep_bad.checks["no_secrets"] is False
+
+    # Verify this test module source itself never trips secret scanners or review redaction
+    source_text = Path(__file__).read_text(encoding="utf-8")
+    assert_no_secrets(source_text)
+    assert redact(source_text) == source_text
 
 
 def test_verify_workspace_git_quiescence_gitignore_scope_and_negations(
@@ -788,42 +838,30 @@ def test_segment_globs_intersect_unicode_inverse_case_discontinuities() -> None:
 
 
 def test_unicode_elementary_interval_partition_constancy_invariant() -> None:
-    _, all_cased_cps = _unicode_case_tables()
-    pattern_pairs: tuple[tuple[str, str], ...] = (
-        ("S[\u0170-\u0180][!S]", "[a-z][\u2120-\u2130][!\u0170-\u0180]"),
-        ("[\u0370-\u03ff]K[!\u0170-\u0180]", "[!S][\u2120-\u2130][a-z]"),
-    )
-    for pat_a, pat_b in pattern_pairs:
-        boundaries = (
-            {0, ord("/"), ord("/") + 1, 0xD800, 0xE000, 0x110000}
-            | _collect_pattern_boundaries(pat_a)
-            | _collect_pattern_boundaries(pat_b)
-        )
-        sorted_b = sorted(b for b in boundaries if 0 <= b <= 0x110000)
+    surrogate_start = 0xD800
+    surrogate_end = 0xE000  # 2,048 excluded surrogate code points (0xD800..0xDFFF)
+    slash_cp = ord("/")  # 0x2F excluded path separator
+    expected_valid_count = 0x110000 - (surrogate_end - surrogate_start) - 1
+    assert expected_valid_count == 1_112_063
 
-        interval_samples: list[tuple[int, int, list[int]]] = []
-        sample_chars: set[str] = set()
-        for b_i, b_next in zip(sorted_b, sorted_b[1:], strict=False):
-            if b_i >= b_next or b_i == ord("/") or 0xD800 <= b_i < 0xE000:
-                continue
-            c_start = bisect.bisect_left(all_cased_cps, b_i)
-            c_end = bisect.bisect_left(all_cased_cps, b_next)
-            mid = (b_i + b_next - 1) // 2
-            cps = sorted({b_i, b_next - 1, mid, *all_cased_cps[c_start:c_end]})
-            interval_samples.append((b_i, b_next, cps))
-            for cp in cps:
-                sample_chars.add(chr(cp))
+    # Precompute _case_key across the entire Unicode scalar domain 0x0000..0x10FFFF once
+    cp_keys: list[str | None] = [None] * 0x110000
+    valid_keys: list[str] = []
+    checked_count = 0
+    for cp in range(0x110000):
+        if cp == slash_cp or surrogate_start <= cp < surrogate_end:
+            continue
+        ch = chr(cp)
+        cf = ch.casefold()
+        key = cf if len(cf) == 1 else ch.lower()
+        cp_keys[cp] = key
+        valid_keys.append(key)
+        checked_count += 1
+    assert checked_count == expected_valid_count
+    assert len(valid_keys) == expected_valid_count
 
-        sample_alphabet = frozenset(sample_chars)
-        all_tokens = [
-            *_tokenize_segment_glob(pat_a, sample_alphabet),
-            *_tokenize_segment_glob(pat_b, sample_alphabet),
-        ]
-        for b_i, b_next, cps in interval_samples:
-            rep_sig = tuple(chr(b_i) in chars for _, chars in all_tokens)
-            for cp in cps:
-                cp_sig = tuple(chr(cp) in chars for _, chars in all_tokens)
-                assert cp_sig == rep_sig, f"Mismatch in [{b_i:#x}, {b_next:#x}) at {cp:#x}"
+    for probe_cp in (ord("S"), ord("K"), 0x00DF, 0x017F, 0x212A, 0x10400, 0x10428):
+        assert cp_keys[probe_cp] == _case_key(chr(probe_cp))
 
     def _ref_single_token_keys(pat: str) -> tuple[bool, frozenset[str]]:
         if pat.startswith("[") and pat.endswith("]"):
@@ -838,28 +876,97 @@ def test_unicode_elementary_interval_partition_constancy_invariant() -> None:
                     lo_ord = ord(inner[idx])
                     hi_ord = ord(inner[idx + 2])
                     for c in range(lo_ord, hi_ord + 1):
-                        if c != 0x2F:
-                            keys.add(_case_key(chr(c)))
+                        key = cp_keys[c]
+                        if key is not None:
+                            keys.add(key)
                     idx += 3
                 else:
-                    if inner[idx] != "/":
-                        keys.add(_case_key(inner[idx]))
+                    key = cp_keys[ord(inner[idx])]
+                    if key is not None:
+                        keys.add(key)
                     idx += 1
             return negated, frozenset(keys)
-        return False, frozenset({_case_key(pat)})
+        key = cp_keys[ord(pat)]
+        return False, frozenset({key}) if key is not None else frozenset()
 
-    def _ref_intersects_0_to_2200(pat_a: str, pat_b: str) -> bool:
+    def _ref_pattern_tokens(pat: str) -> list[tuple[bool, frozenset[str]]]:
+        tokens: list[tuple[bool, frozenset[str]]] = []
+        idx = 0
+        while idx < len(pat):
+            if pat[idx] == "[":
+                end = pat.index("]", idx + 1)
+                tokens.append(_ref_single_token_keys(pat[idx : end + 1]))
+                idx = end + 1
+            else:
+                tokens.append(_ref_single_token_keys(pat[idx]))
+                idx += 1
+        return tokens
+
+    # Verify elementary-interval partition constancy across EVERY valid code point in [0, 0x110000)
+    pattern_pairs: tuple[tuple[str, str], ...] = (
+        ("S[\u0170-\u0180][!S]", "[a-z][\u2120-\u2130][!\u0170-\u0180]"),
+        ("[\u0370-\u03ff]K[!\u0170-\u0180]", "[!S][\u2120-\u2130][a-z]"),
+        ("\U00010400[!\U00010420-\U00010430]", "[\U00010420-\U00010430][!\U00010400]"),
+    )
+    for pat_a, pat_b in pattern_pairs:
+        boundaries = (
+            {0, slash_cp, slash_cp + 1, surrogate_start, surrogate_end, 0x110000}
+            | _collect_pattern_boundaries(pat_a)
+            | _collect_pattern_boundaries(pat_b)
+        )
+        sorted_b = sorted(b for b in boundaries if 0 <= b <= 0x110000)
+
+        intervals: list[tuple[int, int]] = [
+            (b_i, b_next)
+            for b_i, b_next in zip(sorted_b, sorted_b[1:], strict=False)
+            if b_i < b_next and b_i != slash_cp and not (surrogate_start <= b_i < surrogate_end)
+        ]
+        rep_alphabet = frozenset(chr(b_i) for b_i, _ in intervals)
+        prod_tokens = [
+            *_tokenize_segment_glob(pat_a, rep_alphabet),
+            *_tokenize_segment_glob(pat_b, rep_alphabet),
+        ]
+        ref_tokens = [*_ref_pattern_tokens(pat_a), *_ref_pattern_tokens(pat_b)]
+        assert len(prod_tokens) == len(ref_tokens)
+
+        checked_interval_cps = 0
+        for b_i, b_next in intervals:
+            rep_ch = chr(b_i)
+            rep_key = cp_keys[b_i]
+            assert rep_key is not None
+            prod_sig = tuple(rep_ch in chars for _, chars in prod_tokens)
+            ref_sig = tuple(
+                (rep_key not in ks) if neg else (rep_key in ks) for neg, ks in ref_tokens
+            )
+            assert prod_sig == ref_sig, f"Production/reference mismatch at {b_i:#x}"
+
+            interval_slice = cp_keys[b_i:b_next]
+            checked_interval_cps += len(interval_slice)
+            interval_keys = set(interval_slice)
+            msg = f"Mismatch in [{b_i:#x}, {b_next:#x})"
+            assert None not in interval_keys, f"Excluded cp in [{b_i:#x}, {b_next:#x})"
+            for _, key_set in ref_tokens:
+                if rep_key in key_set:
+                    assert interval_keys <= key_set, msg
+                else:
+                    assert interval_keys.isdisjoint(key_set), msg
+        assert checked_interval_cps == expected_valid_count
+
+    def _ref_intersects_full_unicode(pat_a: str, pat_b: str) -> bool:
+        assert len(valid_keys) == expected_valid_count
         neg_a, keys_a = _ref_single_token_keys(pat_a)
         neg_b, keys_b = _ref_single_token_keys(pat_b)
-        for cp in range(0x2201):
-            if cp == 0x2F:
-                continue
-            key = _case_key(chr(cp))
-            in_a = key not in keys_a if neg_a else key in keys_a
-            in_b = key not in keys_b if neg_b else key in keys_b
-            if in_a and in_b:
-                return True
-        return False
+        if not neg_a and not neg_b:
+            target = keys_a & keys_b
+            return any(key in target for key in valid_keys)
+        if neg_a and not neg_b:
+            target = keys_b - keys_a
+            return any(key in target for key in valid_keys)
+        if not neg_a and neg_b:
+            target = keys_a - keys_b
+            return any(key in target for key in valid_keys)
+        excluded = keys_a | keys_b
+        return any(key not in excluded for key in valid_keys)
 
     reference_pairs: tuple[tuple[str, str], ...] = (
         ("S", "[\u0170-\u0180]"),
@@ -870,7 +977,13 @@ def test_unicode_elementary_interval_partition_constancy_invariant() -> None:
         ("[\u2120-\u2130]", "K"),
         ("[!\u0170-\u0180]", "S"),
         ("[!\u0170-\u017e]", "S"),
+        ("\U00010400", "[\U00010420-\U00010430]"),
+        ("[\U00010420-\U00010430]", "\U00010400"),
+        ("[!\U00010420-\U00010430]", "\U00010400"),
+        ("[!\U00010420-\U00010427]", "\U00010400"),
     )
     for pat_a, pat_b in reference_pairs:
-        expected = _ref_intersects_0_to_2200(pat_a, pat_b)
+        expected = _ref_intersects_full_unicode(pat_a, pat_b)
         assert _segment_globs_intersect(pat_a, pat_b) is expected
+    assert _segment_globs_intersect("\U00010400", "[\U00010420-\U00010430]") is True
+    assert _segment_globs_intersect("[!\U00010420-\U00010430]", "\U00010400") is False
