@@ -44,6 +44,7 @@ from aipc.hardening.env_isolation import (
     ChildEnvironmentIsolationError,
     build_sanitized_child_env,
     is_prohibited_child_env_var,
+    prepare_isolated_child_invocation,
 )
 from aipc.review.governance_policy import (
     LoadedReviewGovernancePolicy,
@@ -1258,3 +1259,161 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
     state_c = ledger_c.load()
     assert state_c.milestone_consumed == 1
     assert state_c.reservations[res_c_id].status == "CONSUMED"
+
+
+def test_env_isolation_strips_arbitrary_aipc_hmac_vars_and_mixed_case() -> None:
+    hmac_vars = (
+        "AIPC_HMAC_TOKEN",
+        "AIPC_HMAC_KEY_PATH",
+        "aipc_hmac_custom",
+        "AiPc_HmAc_Signing",
+    )
+    for var_name in hmac_vars:
+        assert is_prohibited_child_env_var(var_name) is True
+
+    inherited = {
+        "PATH": "/usr/bin",
+        "AIPC_HMAC_TOKEN": "dummy-value",
+        "AIPC_HMAC_KEY_PATH": "/trusted/hmac.key",
+        "aipc_hmac_custom": "dummy-custom",
+        "AiPc_HmAc_Signing": "dummy-signing",
+    }
+    sanitized = build_sanitized_child_env(base_env=inherited)
+    assert sanitized == {"PATH": "/usr/bin"}
+
+    _, isolated_env, report = prepare_isolated_child_invocation(
+        ["pytest", "-q"],
+        base_env=inherited,
+    )
+    assert isolated_env == {"PATH": "/usr/bin"}
+    assert report.status == "ISOLATED"
+    assert report.remaining_prohibited_vars == ()
+    assert report.removed_var_names == (
+        "AIPC_HMAC_CUSTOM",
+        "AIPC_HMAC_KEY_PATH",
+        "AIPC_HMAC_SIGNING",
+        "AIPC_HMAC_TOKEN",
+    )
+    for var_name in hmac_vars:
+        assert var_name not in isolated_env
+        assert var_name.upper() not in isolated_env
+        with pytest.raises(
+            ChildEnvironmentIsolationError,
+            match="CHILD_ENVIRONMENT_ISOLATION_BLOCKED",
+        ):
+            build_sanitized_child_env(
+                base_env={"PATH": "/usr/bin"},
+                extra_env={var_name: "dummy-value"},
+            )
+
+
+def test_begin_dispatch_fails_closed_when_budget_ledger_missing(tmp_path: Path) -> None:
+    explicit_dir = tmp_path / "missing_explicit"
+    queue_explicit = PersistentTaskQueue(explicit_dir / "queue.json", clock=_fixed_now)
+    queue_explicit.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    with pytest.raises(ControllerError, match="budget ledger file not found"):
+        queue_explicit.begin_dispatch(
+            "task-01",
+            worker_id="w-01",
+            provider="mock",
+            budget_ledger_path=tmp_path / "nonexistent_ledger.json",
+            operation_id="op-missing-ledger",
+        )
+    snap_explicit = queue_explicit.load()
+    assert snap_explicit.tasks[0].status == QueuedTaskStatus.ELIGIBLE
+    assert snap_explicit.tasks[0].current_attempt == 0
+    assert snap_explicit.tasks[0].attempts == ()
+
+    implicit_dir = tmp_path / "missing_implicit"
+    queue_implicit = PersistentTaskQueue(implicit_dir / "queue.json", clock=_fixed_now)
+    queue_implicit.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    with pytest.raises(ControllerError, match="budget ledger is missing or unavailable"):
+        queue_implicit.begin_dispatch(
+            "task-01",
+            worker_id="w-01",
+            provider="mock",
+            operation_id="op-no-ledger",
+        )
+    snap_implicit = queue_implicit.load()
+    assert snap_implicit.tasks[0].status == QueuedTaskStatus.ELIGIBLE
+    assert snap_implicit.tasks[0].current_attempt == 0
+    assert snap_implicit.tasks[0].attempts == ()
+
+
+def test_begin_dispatch_rejects_unreserved_attempt_despite_historical_consumed_entry(
+    tmp_path: Path,
+) -> None:
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, repair_budget_path=ledger_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-att-1",
+        attempt_id="att-01-task-01",
+    )
+    queue.begin_dispatch(
+        "task-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-att-1",
+    )
+    finalized = ledger.finalize_attempt_budget(
+        operation_id="op-att-1",
+        attempt_id="att-01-task-01",
+        worker_id="w-01",
+        provider="mock",
+    )
+    assert finalized.status == "CONSUMED"
+
+    queue.record_attempt_outcome(
+        "task-01",
+        candidate_sha="a" * 40,
+        checkpoint_id="cp-01",
+        evidence_root="evidence/01",
+        review_id="rev-01",
+        review_verdict="REVISE",
+        gate_verdict="REVISE",
+    )
+    assert queue.load().tasks[0].status == QueuedTaskStatus.REPAIR_REQUIRED
+
+    with pytest.raises(
+        ControllerError,
+        match="budget reservation is missing or not in RESERVED state",
+    ):
+        queue.begin_dispatch(
+            "task-01",
+            worker_id="w-01",
+            provider="mock",
+            operation_id="op-att-2-unreserved",
+        )
+
+    task_after = queue.load().tasks[0]
+    assert task_after.current_attempt == 1
+    assert len(task_after.attempts) == 1
+    assert task_after.status != QueuedTaskStatus.RUNNING
+    assert task_after.status == QueuedTaskStatus.REPAIR_REQUIRED
+
+    state_after = ledger.load()
+    assert state_after.milestone_consumed == 1
+    assert state_after.registered_roots["task-01"].consumed == 1

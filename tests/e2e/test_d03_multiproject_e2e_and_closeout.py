@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 import aipc
+from aipc.controller.errors import ControllerError
 from aipc.controller.milestone_authorization import (
     MilestoneAuthorizationError,
     sign_approval_record_hmac,
@@ -32,6 +33,7 @@ from aipc.controller.task_queue import (
     MilestoneAuthorizationEvidence,
     PersistentTaskQueue,
     QueuedTaskStatus,
+    TaskAttemptLedger,
     persist_milestone_authorization_evidence,
     reconcile_queue_and_budget_consistency,
 )
@@ -464,12 +466,33 @@ def test_b_queue_ledger_crash_fault_injection(tmp_path: Path) -> None:
         attempt_id="att-01-task-fault-mismatch-01",
     )
     ldg3.finalize_attempt_budget(operation_id="op-ledger-a")
-    q3.begin_dispatch(
-        "task-fault-mismatch-01",
+    with pytest.raises(ControllerError):
+        q3.begin_dispatch(
+            "task-fault-mismatch-01",
+            worker_id="w-3",
+            provider="mock",
+            operation_id="op-queue-b",
+        )
+    snap3 = q3.load()
+    crashed_attempt = TaskAttemptLedger(
+        attempt=1,
+        attempt_id="att-01-task-fault-mismatch-01",
+        operation_id="op-queue-b",
         worker_id="w-3",
         provider="mock",
-        operation_id="op-queue-b",
+        dispatch_stage="DISPATCHED",
+        started_at=datetime.now(UTC),
     )
+    crashed_task = snap3.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-fault-mismatch-01",
+            "operation_id": "op-queue-b",
+            "attempts": (crashed_attempt,),
+        }
+    )
+    q3._replace_task(snap3, crashed_task)
     rec3 = reconcile_queue_and_budget_consistency(q3, ldg3)
     assert rec3.status == "RECONCILIATION_REQUIRED"
     assert q3.load().tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED

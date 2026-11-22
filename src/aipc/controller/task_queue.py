@@ -1547,7 +1547,7 @@ class PersistentTaskQueue:
 
             attempt_id = f"att-{next_attempt_num:02d}-{task_id}"
 
-            eff_ledger_path = (
+            eff_ledger_path: Path | None = (
                 Path(budget_ledger_path).resolve()
                 if budget_ledger_path is not None
                 else self._repair_budget_path
@@ -1559,18 +1559,31 @@ class PersistentTaskQueue:
                         eff_ledger_path = candidate_path.resolve()
                         break
 
-            if (
-                eff_ledger_path is not None
-                and eff_ledger_path.is_file()
-                and operation_id is not None
+            if budget_ledger_path is not None and (
+                eff_ledger_path is None or not eff_ledger_path.is_file()
             ):
+                raise ControllerError(
+                    f"Cannot dispatch task '{task_id}': "
+                    f"budget ledger file not found: {eff_ledger_path}"
+                )
+
+            if operation_id is not None:
+                clean_op_id = operation_id.strip()
+                if not clean_op_id:
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}': operation_id must not be blank"
+                    )
+                if eff_ledger_path is None or not eff_ledger_path.is_file():
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': "
+                        "budget ledger is missing or unavailable"
+                    )
                 lock_stack.enter_context(_acquire_queue_ledger_lock(None, eff_ledger_path))
                 from aipc.controller.repair_budget import (
                     DurableRepairBudgetLedger,
                     RepairBudgetError,
                 )
 
-                clean_op_id = operation_id.strip()
                 try:
                     budget_state = DurableRepairBudgetLedger(
                         eff_ledger_path, clock=self._clock
@@ -1582,23 +1595,17 @@ class PersistentTaskQueue:
                 matching_res = [
                     r for r in budget_state.reservations.values() if r.operation_id == clean_op_id
                 ]
-                res = matching_res[0] if len(matching_res) == 1 else None
-                task_res = [r for r in budget_state.reservations.values() if r.task_id == task_id]
-                has_active_consumed = any(r.status == "CONSUMED" for r in task_res)
+                if len(matching_res) != 1:
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': "
+                        "budget reservation is missing or not in RESERVED state"
+                    )
+                res = matching_res[0]
                 if (
-                    res is not None
-                    and (
-                        res.task_id != task_id
-                        or (res.attempt_id is not None and res.attempt_id != attempt_id)
-                        or res.status != "RESERVED"
-                    )
-                ) or (
-                    res is None
-                    and not has_active_consumed
-                    and (
-                        budget_ledger_path is not None
-                        or any(r.status == "RELEASED" for r in task_res)
-                    )
+                    res.status != "RESERVED"
+                    or res.task_id != task_id
+                    or res.attempt_id is None
+                    or res.attempt_id.strip() != attempt_id
                 ):
                     raise ControllerError(
                         f"Cannot dispatch task '{task_id}' for operation_id '{operation_id}': "

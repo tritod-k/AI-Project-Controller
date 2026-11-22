@@ -47,6 +47,7 @@ PROHIBITED_CHILD_ENV_VARS: frozenset[str] = frozenset(
 PROHIBITED_CHILD_ENV_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^AIPC_.*_API_KEY$", re.IGNORECASE),
     re.compile(r"^AIPC_OPERATOR_HMAC_.*$", re.IGNORECASE),
+    re.compile(r"^AIPC_HMAC_", re.IGNORECASE),
     re.compile(r"^GEMINI_.*_KEY$", re.IGNORECASE),
     re.compile(r"^GOOGLE_.*_API_KEY$", re.IGNORECASE),
     re.compile(r"^OPENAI_.*_KEY$", re.IGNORECASE),
