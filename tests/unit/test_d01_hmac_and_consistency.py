@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,9 +29,11 @@ from aipc.controller.milestone_authorization import (
 from aipc.controller.repair_budget import DurableRepairBudgetLedger, RepairBudgetError
 from aipc.controller.task_queue import (
     ApprovedTaskContract,
+    ConsistencyReconciliationResult,
     PersistentTaskQueue,
     QueuedTaskRecord,
     QueuedTaskStatus,
+    TaskAttemptLedger,
     TaskQueueSnapshot,
     reconcile_queue_and_budget_consistency,
 )
@@ -743,3 +747,198 @@ def test_load_operator_hmac_key_rejects_real_os_symlink_ancestor(tmp_path: Path)
 
     with pytest.raises(MilestoneAuthorizationError, match="symlink"):
         load_operator_hmac_key(sym_parent / "operator.key")
+
+
+def test_reconcile_missing_task_in_queue_preserves_reserved_fail_closed(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01", "task-missing-99"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    res = ledger.reserve_attempt_budget(
+        task_id="task-missing-99",
+        operation_id="op-missing-99",
+        attempt_id="att-01-task-missing-99",
+    )
+    assert res.status == "RESERVED"
+    assert ledger.load().milestone_consumed == 1
+
+    outcome = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome.status == "RECONCILIATION_REQUIRED"
+    assert outcome.passed is False
+    assert outcome.released_reservation_ids == ()
+    assert "task-missing-99" in outcome.escalated_task_ids
+    assert any(
+        "task-missing-99" in reason and "RECONCILIATION_REQUIRED" in reason
+        for reason in outcome.reasons
+    )
+
+    reloaded = ledger.load()
+    assert reloaded.milestone_consumed == 1
+    assert reloaded.registered_roots["task-missing-99"].consumed == 1
+    assert reloaded.reservations[res.reservation_id].status == "RESERVED"
+
+
+def test_concurrent_begin_dispatch_and_reconcile_serialization_no_lost_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-conc-01",
+        attempt_id="att-01-task-01",
+    )
+    assert ledger.load().milestone_consumed == 1
+
+    orig_load = queue.load
+    orig_save = queue._save
+    dispatch_entered = threading.Event()
+    reconcile_ready = threading.Event()
+    events_lock = threading.Lock()
+    events: list[str] = []
+    outcomes: list[ConsistencyReconciliationResult] = []
+    errors: list[BaseException] = []
+
+    def hooked_load() -> TaskQueueSnapshot:
+        tname = threading.current_thread().name
+        if tname == "dispatch-thread":
+            with events_lock:
+                events.append("dispatch_load")
+            dispatch_entered.set()
+            assert reconcile_ready.wait(timeout=5.0)
+            time.sleep(0.1)
+        elif tname == "reconcile-thread":
+            with events_lock:
+                events.append("reconcile_load")
+        return orig_load()
+
+    def hooked_save(snapshot: TaskQueueSnapshot) -> None:
+        tname = threading.current_thread().name
+        if tname == "dispatch-thread":
+            with events_lock:
+                events.append("dispatch_save")
+        elif tname == "reconcile-thread":
+            with events_lock:
+                events.append("reconcile_save")
+        orig_save(snapshot)
+
+    monkeypatch.setattr(queue, "load", hooked_load)
+    monkeypatch.setattr(queue, "_save", hooked_save)
+
+    def run_dispatch() -> None:
+        try:
+            queue.begin_dispatch(
+                "task-01",
+                worker_id="w-01",
+                provider="mock",
+                operation_id="op-conc-01",
+            )
+        except BaseException as exc:  # pragma: no cover - asserted empty
+            errors.append(exc)
+
+    def run_reconcile() -> None:
+        try:
+            assert dispatch_entered.wait(timeout=5.0)
+            reconcile_ready.set()
+            outcomes.append(reconcile_queue_and_budget_consistency(queue, ledger))
+        except BaseException as exc:  # pragma: no cover - asserted empty
+            errors.append(exc)
+
+    t_dispatch = threading.Thread(target=run_dispatch, name="dispatch-thread")
+    t_reconcile = threading.Thread(target=run_reconcile, name="reconcile-thread")
+    t_dispatch.start()
+    t_reconcile.start()
+    t_dispatch.join(timeout=10.0)
+    t_reconcile.join(timeout=10.0)
+
+    assert not t_dispatch.is_alive()
+    assert not t_reconcile.is_alive()
+    assert not errors
+    assert events.index("dispatch_save") < events.index("reconcile_load")
+    assert len(outcomes) == 1
+
+    outcome = outcomes[0]
+    assert outcome.status == "RECONCILIATION_REQUIRED"
+    assert outcome.passed is False
+    assert outcome.released_reservation_ids == ()
+    assert outcome.escalated_task_ids == ("task-01",)
+
+    state = ledger.load()
+    assert state.milestone_consumed == 1
+    assert state.registered_roots["task-01"].consumed == 1
+    assert state.reservations[res.reservation_id].status == "RESERVED"
+
+    # Also verify revalidation inside reconcile aborts refund if queue transitions before release
+    reval_dir = tmp_path / "reval"
+    reval_ledger = DurableRepairBudgetLedger(reval_dir / "budget.json", clock=_fixed_now)
+    reval_ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+    reval_queue = PersistentTaskQueue(reval_dir / "queue.json", clock=_fixed_now)
+    reval_queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+    reval_res = reval_ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-reval-01",
+        attempt_id="att-01-task-01",
+    )
+    reval_orig_load = reval_queue.load
+    initial_snap = reval_orig_load()
+    running_attempt = TaskAttemptLedger(
+        attempt=1,
+        attempt_id="att-01-task-01",
+        operation_id="op-reval-01",
+        worker_id="w-01",
+        provider="mock",
+        dispatch_stage="DISPATCHED",
+        started_at=_fixed_now(),
+    )
+    running_task = initial_snap.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-reval-01",
+            "attempts": (running_attempt,),
+        }
+    )
+    running_snap = initial_snap.model_copy(update={"tasks": (running_task,)})
+    load_calls = 0
+
+    def reval_load() -> TaskQueueSnapshot:
+        nonlocal load_calls
+        load_calls += 1
+        return initial_snap if load_calls == 1 else running_snap
+
+    monkeypatch.setattr(reval_queue, "load", reval_load)
+    reval_outcome = reconcile_queue_and_budget_consistency(reval_queue, reval_ledger)
+    assert load_calls >= 2
+    assert reval_outcome.status == "RECONCILIATION_REQUIRED"
+    assert reval_outcome.released_reservation_ids == ()
+    assert reval_outcome.escalated_task_ids == ("task-01",)
+    assert reval_ledger.load().milestone_consumed == 1
+    assert reval_ledger.load().reservations[reval_res.reservation_id].status == "RESERVED"

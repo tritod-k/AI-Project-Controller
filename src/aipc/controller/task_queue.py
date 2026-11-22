@@ -7,10 +7,15 @@ quota-exhaustion preservation, bounded retries, and secret-free atomic persisten
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import re
-from collections.abc import Sequence
+import sys
+import threading
+import time
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -942,6 +947,79 @@ class TaskQueueSnapshot(CanonicalRecord):
         return self
 
 
+_PROCESS_QUEUE_LEDGER_LOCK = threading.RLock()
+_QUEUE_LEDGER_LOCK_STATE = threading.local()
+
+
+def _resolve_queue_ledger_lock_path(queue: object, ledger: object) -> Path | None:
+    raw_queue_path = getattr(queue, "_path", None)
+    raw_ledger_path = getattr(ledger, "_path", None)
+    target_path = raw_queue_path if raw_queue_path is not None else raw_ledger_path
+    if isinstance(target_path, (Path, str, os.PathLike)):
+        return Path(os.fspath(target_path)).resolve().parent / ".queue_ledger_consistency.lock"
+    return None
+
+
+@contextlib.contextmanager
+def _acquire_queue_ledger_lock(queue: object, ledger: object) -> Iterator[None]:
+    """Serialize queue/ledger dispatch and consistency operations across threads and processes."""
+    lock_path = _resolve_queue_ledger_lock_path(queue, ledger)
+    with _PROCESS_QUEUE_LEDGER_LOCK:
+        if lock_path is None:
+            yield
+            return
+        held_paths: set[Path] | None = getattr(_QUEUE_LEDGER_LOCK_STATE, "held_paths", None)
+        if held_paths is None:
+            held_paths = set()
+            _QUEUE_LEDGER_LOCK_STATE.held_paths = held_paths
+        if lock_path in held_paths:
+            yield
+            return
+
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = lock_path.open("a+b")
+        locked = False
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                deadline = time.monotonic() + 30.0
+                while True:
+                    try:
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                        locked = True
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.05)
+            else:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                locked = True
+            held_paths.add(lock_path)
+            try:
+                yield
+            finally:
+                held_paths.discard(lock_path)
+        finally:
+            try:
+                if locked:
+                    if sys.platform == "win32":
+                        import msvcrt
+
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+
+
 class PersistentTaskQueue:
     """Deterministic persistent task queue integrated with Controller and Recovery rules."""
 
@@ -1268,201 +1346,205 @@ class PersistentTaskQueue:
         milestone_trust_context: MilestoneAuthorizationTrustContext | None = None,
     ) -> QueuedTaskRecord:
         """Record dispatch intent for an eligible task and return the updated record."""
-        snap = self._refresh_eligibility(self.load())
-        by_id = {t.contract.task_id: t for t in snap.tasks}
-        if task_id not in by_id:
-            raise ControllerError(f"unapproved or unknown task_id '{task_id}'")
+        with _acquire_queue_ledger_lock(self, None):
+            snap = self._refresh_eligibility(self.load())
+            by_id = {t.contract.task_id: t for t in snap.tasks}
+            if task_id not in by_id:
+                raise ControllerError(f"unapproved or unknown task_id '{task_id}'")
 
-        for other in snap.tasks:
-            if (
-                other.status == QueuedTaskStatus.RECONCILIATION_REQUIRED
-                or other.reconciliation_required
-            ):
-                raise ControllerError(
-                    "RECONCILIATION_REQUIRED: queue/budget consistency reconciliation required "
-                    f"for task '{other.contract.task_id}' before dispatch"
-                )
-            if other.status == QueuedTaskStatus.RUNNING:
-                raise ControllerError(
-                    f"duplicate dispatch rejected: task '{other.contract.task_id}' is RUNNING"
-                )
-            if other.status == QueuedTaskStatus.INTERRUPTED:
-                raise ControllerError(
-                    f"interrupted task '{other.contract.task_id}' requires Recovery before dispatch"
-                )
-
-        target = by_id[task_id]
-        self._verify_external_milestone_trust_context(
-            project_id=snap.project_id,
-            milestone_id=snap.milestone_id,
-            phase_id=target.contract.phase_id,
-            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
-            task_id=target.contract.task_id,
-            override_trust_ctx=milestone_trust_context,
-        )
-        self._verify_milestone_c_authorization(
-            project_id=snap.project_id,
-            milestone_id=snap.milestone_id,
-            contract=target.contract,
-            snapshot_evidence_path=snap.approval_evidence_path,
-            extra_paths=target_paths or (),
-        )
-        if target.status not in (QueuedTaskStatus.ELIGIBLE, QueuedTaskStatus.REPAIR_REQUIRED):
-            raise ControllerError(
-                f"task '{task_id}' is not eligible for dispatch (status={target.status})"
-            )
-
-        for dep in target.contract.depends_on:
-            if by_id[dep].status != QueuedTaskStatus.COMPLETED:
-                raise ControllerError(f"task '{task_id}' dependency '{dep}' is not COMPLETED")
-
-        norm_target_paths: tuple[str, ...] | None = None
-        if target_paths is not None:
-            if not target_paths:
-                raise ControllerError("target_paths cannot be empty when specified")
-            in_scope = set(target.contract.in_scope)
-            out_scope = set(target.contract.out_of_scope)
-            normalized_list: list[str] = []
-            for rel_path in target_paths:
-                norm = PortableRelativePath(rel_path) if rel_path else ""
-                if norm in out_scope or (in_scope and norm not in in_scope):
+            for other in snap.tasks:
+                if (
+                    other.status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+                    or other.reconciliation_required
+                ):
                     raise ControllerError(
-                        f"out-of-scope target path '{rel_path}' rejected for task '{task_id}'"
+                        "RECONCILIATION_REQUIRED: queue/budget consistency reconciliation "
+                        f"required for task '{other.contract.task_id}' before dispatch"
                     )
-                if norm not in normalized_list:
-                    normalized_list.append(norm)
-            norm_target_paths = tuple(normalized_list)
+                if other.status == QueuedTaskStatus.RUNNING:
+                    raise ControllerError(
+                        f"duplicate dispatch rejected: task '{other.contract.task_id}' is RUNNING"
+                    )
+                if other.status == QueuedTaskStatus.INTERRUPTED:
+                    raise ControllerError(
+                        f"interrupted task '{other.contract.task_id}' "
+                        "requires Recovery before dispatch"
+                    )
 
-        next_attempt_num = target.current_attempt + 1
-        if next_attempt_num > target.contract.max_attempts:
-            raise ControllerError(
-                f"task '{task_id}' exceeded max_attempts ({target.contract.max_attempts})"
+            target = by_id[task_id]
+            self._verify_external_milestone_trust_context(
+                project_id=snap.project_id,
+                milestone_id=snap.milestone_id,
+                phase_id=target.contract.phase_id,
+                in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
+                task_id=target.contract.task_id,
+                override_trust_ctx=milestone_trust_context,
             )
+            self._verify_milestone_c_authorization(
+                project_id=snap.project_id,
+                milestone_id=snap.milestone_id,
+                contract=target.contract,
+                snapshot_evidence_path=snap.approval_evidence_path,
+                extra_paths=target_paths or (),
+            )
+            if target.status not in (QueuedTaskStatus.ELIGIBLE, QueuedTaskStatus.REPAIR_REQUIRED):
+                raise ControllerError(
+                    f"task '{task_id}' is not eligible for dispatch (status={target.status})"
+                )
 
-        attempt_id = f"att-{next_attempt_num:02d}-{task_id}"
-        is_c5 = any(
-            _is_milestone_c5_scope(val)
-            for val in (
-                snap.milestone_id,
-                target.contract.milestone_id,
-                target.contract.phase_id,
-                target.contract.task_id,
-            )
-        )
-        is_c6 = any(
-            _is_milestone_c6_scope(val)
-            for val in (
-                snap.milestone_id,
-                target.contract.milestone_id,
-                target.contract.phase_id,
-                target.contract.task_id,
-            )
-        )
-        is_c7 = any(
-            _is_milestone_c7_scope(val)
-            for val in (
-                snap.milestone_id,
-                target.contract.milestone_id,
-                target.contract.phase_id,
-                target.contract.task_id,
-            )
-        )
-        if target.status == QueuedTaskStatus.REPAIR_REQUIRED and (is_c5 or is_c6 or is_c7):
-            scope_label = (
-                "Milestone C.7" if is_c7 else "Milestone C.6" if is_c6 else "Milestone C.5"
-            )
-            if self._repair_budget_path is None:
-                raise ControllerError(
-                    f"{scope_label} repair dispatch requires a controller-bound budget ledger"
-                )
-            if (
-                budget_ledger_path is not None
-                and Path(budget_ledger_path).resolve() != self._repair_budget_path
-            ):
-                raise ControllerError(
-                    "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
-                )
-            if (
-                self._policy_trust_context is not None
-                and policy_trust_context is not None
-                and policy_trust_context != self._policy_trust_context
-            ):
-                raise ControllerError("Mismatched PolicyTrustContext rejected at queue dispatch")
-            effective_trust_ctx = (
-                policy_trust_context
-                if policy_trust_context is not None
-                else self._policy_trust_context
-            )
-            if effective_trust_ctx is None:
-                raise ControllerError(
-                    f"{scope_label} repair dispatch requires controller PolicyTrustContext"
-                )
-            if repair_reservation_id is None or not repair_reservation_id.strip():
-                raise ControllerError(
-                    f"{scope_label} repair dispatch requires a valid repair_reservation_id "
-                    "and controller-bound budget ledger"
-                )
-            from aipc.controller.repair_budget import (
-                DurableRepairBudgetLedger,
-                RepairBudgetError,
-                load_policy_trust_context,
-            )
+            for dep in target.contract.depends_on:
+                if by_id[dep].status != QueuedTaskStatus.COMPLETED:
+                    raise ControllerError(f"task '{task_id}' dependency '{dep}' is not COMPLETED")
 
-            try:
-                loaded_policy = load_policy_trust_context(effective_trust_ctx)
-                budget_ledger = DurableRepairBudgetLedger(
-                    self._repair_budget_path, clock=self._clock
-                )
-                budget_ledger.consume_dispatch_reservation(
-                    reservation_id=repair_reservation_id.strip(),
-                    task_id=task_id,
-                    attempt=next_attempt_num,
-                    attempt_id=attempt_id,
-                    worker_id=worker_id,
-                    provider=provider,
-                    candidate_sha=target.last_candidate_sha,
-                    allow_recovery_redispatch=(
-                        target.recovery_cleared_for_attempt == next_attempt_num
-                    ),
-                    loaded_policy=loaded_policy,
-                    trust_context=effective_trust_ctx,
-                    expected_project_id=snap.project_id,
-                    expected_milestone_id=snap.milestone_id,
-                    target_paths=norm_target_paths,
-                    contract_in_scope=target.contract.in_scope,
-                )
-            except RepairBudgetError as exc:
-                raise ControllerError(
-                    f"{scope_label} repair budget enforcement rejected dispatch: {exc}"
-                ) from exc
+            norm_target_paths: tuple[str, ...] | None = None
+            if target_paths is not None:
+                if not target_paths:
+                    raise ControllerError("target_paths cannot be empty when specified")
+                in_scope = set(target.contract.in_scope)
+                out_scope = set(target.contract.out_of_scope)
+                normalized_list: list[str] = []
+                for rel_path in target_paths:
+                    norm = PortableRelativePath(rel_path) if rel_path else ""
+                    if norm in out_scope or (in_scope and norm not in in_scope):
+                        raise ControllerError(
+                            f"out-of-scope target path '{rel_path}' rejected for task '{task_id}'"
+                        )
+                    if norm not in normalized_list:
+                        normalized_list.append(norm)
+                norm_target_paths = tuple(normalized_list)
 
-        ledger = TaskAttemptLedger(
-            attempt=next_attempt_num,
-            attempt_id=attempt_id,
-            operation_id=operation_id,
-            worker_id=worker_id,
-            provider=provider,
-            dispatch_stage="DISPATCHED",
-            started_at=self._clock(),
-        )
-        effective_contract = (
-            target.contract.model_copy(update={"in_scope": norm_target_paths})
-            if norm_target_paths is not None
-            else target.contract
-        )
-        updated_target = target.model_copy(
-            update={
-                "contract": effective_contract,
-                "status": QueuedTaskStatus.RUNNING,
-                "current_attempt": next_attempt_num,
-                "active_attempt_id": attempt_id,
-                "operation_id": operation_id,
-                "attempts": (*target.attempts, ledger),
-                "interruption_reason": None,
-            }
-        )
-        self._replace_task(snap, updated_target)
-        return updated_target
+            next_attempt_num = target.current_attempt + 1
+            if next_attempt_num > target.contract.max_attempts:
+                raise ControllerError(
+                    f"task '{task_id}' exceeded max_attempts ({target.contract.max_attempts})"
+                )
+
+            attempt_id = f"att-{next_attempt_num:02d}-{task_id}"
+            is_c5 = any(
+                _is_milestone_c5_scope(val)
+                for val in (
+                    snap.milestone_id,
+                    target.contract.milestone_id,
+                    target.contract.phase_id,
+                    target.contract.task_id,
+                )
+            )
+            is_c6 = any(
+                _is_milestone_c6_scope(val)
+                for val in (
+                    snap.milestone_id,
+                    target.contract.milestone_id,
+                    target.contract.phase_id,
+                    target.contract.task_id,
+                )
+            )
+            is_c7 = any(
+                _is_milestone_c7_scope(val)
+                for val in (
+                    snap.milestone_id,
+                    target.contract.milestone_id,
+                    target.contract.phase_id,
+                    target.contract.task_id,
+                )
+            )
+            if target.status == QueuedTaskStatus.REPAIR_REQUIRED and (is_c5 or is_c6 or is_c7):
+                scope_label = (
+                    "Milestone C.7" if is_c7 else "Milestone C.6" if is_c6 else "Milestone C.5"
+                )
+                if self._repair_budget_path is None:
+                    raise ControllerError(
+                        f"{scope_label} repair dispatch requires a controller-bound budget ledger"
+                    )
+                if (
+                    budget_ledger_path is not None
+                    and Path(budget_ledger_path).resolve() != self._repair_budget_path
+                ):
+                    raise ControllerError(
+                        "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
+                    )
+                if (
+                    self._policy_trust_context is not None
+                    and policy_trust_context is not None
+                    and policy_trust_context != self._policy_trust_context
+                ):
+                    raise ControllerError(
+                        "Mismatched PolicyTrustContext rejected at queue dispatch"
+                    )
+                effective_trust_ctx = (
+                    policy_trust_context
+                    if policy_trust_context is not None
+                    else self._policy_trust_context
+                )
+                if effective_trust_ctx is None:
+                    raise ControllerError(
+                        f"{scope_label} repair dispatch requires controller PolicyTrustContext"
+                    )
+                if repair_reservation_id is None or not repair_reservation_id.strip():
+                    raise ControllerError(
+                        f"{scope_label} repair dispatch requires a valid repair_reservation_id "
+                        "and controller-bound budget ledger"
+                    )
+                from aipc.controller.repair_budget import (
+                    DurableRepairBudgetLedger,
+                    RepairBudgetError,
+                    load_policy_trust_context,
+                )
+
+                try:
+                    loaded_policy = load_policy_trust_context(effective_trust_ctx)
+                    budget_ledger = DurableRepairBudgetLedger(
+                        self._repair_budget_path, clock=self._clock
+                    )
+                    budget_ledger.consume_dispatch_reservation(
+                        reservation_id=repair_reservation_id.strip(),
+                        task_id=task_id,
+                        attempt=next_attempt_num,
+                        attempt_id=attempt_id,
+                        worker_id=worker_id,
+                        provider=provider,
+                        candidate_sha=target.last_candidate_sha,
+                        allow_recovery_redispatch=(
+                            target.recovery_cleared_for_attempt == next_attempt_num
+                        ),
+                        loaded_policy=loaded_policy,
+                        trust_context=effective_trust_ctx,
+                        expected_project_id=snap.project_id,
+                        expected_milestone_id=snap.milestone_id,
+                        target_paths=norm_target_paths,
+                        contract_in_scope=target.contract.in_scope,
+                    )
+                except RepairBudgetError as exc:
+                    raise ControllerError(
+                        f"{scope_label} repair budget enforcement rejected dispatch: {exc}"
+                    ) from exc
+
+            ledger = TaskAttemptLedger(
+                attempt=next_attempt_num,
+                attempt_id=attempt_id,
+                operation_id=operation_id,
+                worker_id=worker_id,
+                provider=provider,
+                dispatch_stage="DISPATCHED",
+                started_at=self._clock(),
+            )
+            effective_contract = (
+                target.contract.model_copy(update={"in_scope": norm_target_paths})
+                if norm_target_paths is not None
+                else target.contract
+            )
+            updated_target = target.model_copy(
+                update={
+                    "contract": effective_contract,
+                    "status": QueuedTaskStatus.RUNNING,
+                    "current_attempt": next_attempt_num,
+                    "active_attempt_id": attempt_id,
+                    "operation_id": operation_id,
+                    "attempts": (*target.attempts, ledger),
+                    "interruption_reason": None,
+                }
+            )
+            self._replace_task(snap, updated_target)
+            return updated_target
 
     def mark_interrupted(
         self,
@@ -1845,6 +1927,11 @@ class ConsistencyReconciliationResult(CanonicalRecord):
     escalated_task_ids: tuple[str, ...] = ()
     reasons: tuple[str, ...] = ()
 
+    @property
+    def passed(self) -> bool:
+        """Return True when reconciliation did not require manual escalation."""
+        return self.status != "RECONCILIATION_REQUIRED"
+
 
 def _clean_non_empty_str(value: object) -> str | None:
     if isinstance(value, str):
@@ -1856,7 +1943,7 @@ def _clean_non_empty_str(value: object) -> str | None:
 def _task_never_dispatched(task: QueuedTaskRecord | None) -> bool:
     """Return True only when canonical queue state proves dispatch never occurred."""
     if task is None:
-        return True
+        return False
     status_val = (
         task.status.value if isinstance(task.status, QueuedTaskStatus) else str(task.status)
     )
@@ -1877,111 +1964,165 @@ def reconcile_queue_and_budget_consistency(
     """Reconcile PersistentTaskQueue and DurableRepairBudgetLedger state fail-closed.
 
     - Releases orphan RESERVED ledger entries ONLY when canonical queue state proves
-      dispatch never occurred (missing task or pre-dispatch with zero attempt/claim history).
-    - Escalates RUNNING or post-dispatch tasks with RESERVED, ambiguous, or
-      missing/mismatched operation_id or attempt_id entries to RECONCILIATION_REQUIRED
+      the task exists in queue and dispatch never occurred (pre-dispatch with zero
+      attempt/claim history), revalidated under the shared queue/ledger lock.
+    - Escalates missing tasks or RUNNING/post-dispatch tasks with RESERVED, ambiguous,
+      or missing/mismatched operation_id or attempt_id entries to RECONCILIATION_REQUIRED
       without releasing RESERVED budget or auto-resetting counters.
     - Leaves healthy COMPLETED/CONSUMED pairs consistent.
     """
-    snap = queue.load()
-    ledger_state = ledger.load()  # type: ignore[attr-defined]
-    tasks_by_id = {t.contract.task_id: t for t in snap.tasks}
+    with _acquire_queue_ledger_lock(queue, ledger):
+        snap = queue.load()
+        ledger_state = ledger.load()  # type: ignore[attr-defined]
+        tasks_by_id = {t.contract.task_id: t for t in snap.tasks}
 
-    reserved_by_task_id: dict[str, list[str]] = {}
-    released_ids: list[str] = []
-    reasons: list[str] = []
-    for res_id, res in ledger_state.reservations.items():
-        if res.status == "RESERVED":
+        reserved_by_task_id: dict[str, list[str]] = {}
+        released_ids: list[str] = []
+        escalated_ids: list[str] = []
+        reasons: list[str] = []
+
+        for res_id, res in ledger_state.reservations.items():
+            if res.status != "RESERVED":
+                continue
             task = tasks_by_id.get(res.task_id)
-            if _task_never_dispatched(task):
-                ledger.release_attempt_budget(  # type: ignore[attr-defined]
-                    reservation_id=res_id,
-                    reason="orphan_reserved_task_not_in_progress",
-                )
-                released_ids.append(res_id)
+            if task is None:
+                if res.task_id not in escalated_ids:
+                    escalated_ids.append(res.task_id)
                 reasons.append(
-                    f"Released orphan RESERVED reservation '{res_id}' for task '{res.task_id}'"
+                    f"RECONCILIATION_REQUIRED: active RESERVED ledger entry '{res_id}' "
+                    f"references missing task '{res.task_id}' absent from canonical_queue.json"
                 )
+                continue
+            if _task_never_dispatched(task):
+                latest_snap = queue.load()
+                latest_tasks_by_id = {t.contract.task_id: t for t in latest_snap.tasks}
+                latest_task = latest_tasks_by_id.get(res.task_id)
+                snap = latest_snap
+                tasks_by_id = latest_tasks_by_id
+                if latest_task is None:
+                    if res.task_id not in escalated_ids:
+                        escalated_ids.append(res.task_id)
+                    reasons.append(
+                        f"RECONCILIATION_REQUIRED: active RESERVED ledger entry '{res_id}' "
+                        f"references missing task '{res.task_id}' absent from canonical_queue.json"
+                    )
+                elif _task_never_dispatched(latest_task):
+                    ledger.release_attempt_budget(  # type: ignore[attr-defined]
+                        reservation_id=res_id,
+                        reason="orphan_reserved_task_not_in_progress",
+                    )
+                    released_ids.append(res_id)
+                    reasons.append(
+                        f"Released orphan RESERVED reservation '{res_id}' for task '{res.task_id}'"
+                    )
+                else:
+                    reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
             else:
                 reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
 
-    if released_ids:
-        ledger_state = ledger.load()  # type: ignore[attr-defined]
+        if released_ids:
+            ledger_state = ledger.load()  # type: ignore[attr-defined]
 
-    escalated_ids: list[str] = []
-    updated_tasks: list[QueuedTaskRecord] = []
-    queue_dirty = False
+        updated_tasks: list[QueuedTaskRecord] = []
+        queue_dirty = False
 
-    for task in snap.tasks:
-        tid = task.contract.task_id
-        if task.status == QueuedTaskStatus.RECONCILIATION_REQUIRED or task.reconciliation_required:
-            escalated_ids.append(tid)
-            if task.reconciliation_reason:
-                reasons.append(task.reconciliation_reason)
-            updated_tasks.append(task)
-            continue
+        for task in snap.tasks:
+            tid = task.contract.task_id
+            if (
+                task.status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+                or task.reconciliation_required
+            ):
+                if tid not in escalated_ids:
+                    escalated_ids.append(tid)
+                if task.reconciliation_reason:
+                    reasons.append(task.reconciliation_reason)
+                updated_tasks.append(task)
+                continue
 
-        if task.status == QueuedTaskStatus.RUNNING:
-            active_res = [
-                r
-                for r in ledger_state.reservations.values()
-                if r.task_id == tid and r.status in ("RESERVED", "CONSUMED")
-            ]
-            reserved_res = [r for r in active_res if r.status == "RESERVED"]
-            op_id = _clean_non_empty_str(task.operation_id) or (
-                _clean_non_empty_str(task.attempts[-1].operation_id) if task.attempts else None
-            )
-            att_id = _clean_non_empty_str(task.active_attempt_id) or (
-                _clean_non_empty_str(task.attempts[-1].attempt_id) if task.attempts else None
-            )
-
-            esc_reason: str | None = None
-            if reserved_res:
-                res_list = [r.reservation_id for r in reserved_res]
-                esc_reason = (
-                    f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' has unfinalized "
-                    f"RESERVED ledger entries {res_list}"
-                )
-            elif not op_id:
-                esc_reason = (
-                    f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' is missing operation_id"
-                )
-            elif not att_id:
-                esc_reason = (
-                    f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' is missing attempt_id"
-                )
-            else:
-                matching = [
-                    r for r in active_res if r.status == "CONSUMED" and r.operation_id == op_id
+            if task.status == QueuedTaskStatus.RUNNING:
+                active_res = [
+                    r
+                    for r in ledger_state.reservations.values()
+                    if r.task_id == tid and r.status in ("RESERVED", "CONSUMED")
                 ]
-                if not matching:
+                reserved_res = [r for r in active_res if r.status == "RESERVED"]
+                op_id = _clean_non_empty_str(task.operation_id) or (
+                    _clean_non_empty_str(task.attempts[-1].operation_id) if task.attempts else None
+                )
+                att_id = _clean_non_empty_str(task.active_attempt_id) or (
+                    _clean_non_empty_str(task.attempts[-1].attempt_id) if task.attempts else None
+                )
+
+                esc_reason: str | None = None
+                if reserved_res:
+                    res_list = [r.reservation_id for r in reserved_res]
                     esc_reason = (
-                        f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' operation_id "
-                        f"'{op_id}' is missing or mismatched in budget ledger"
+                        f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' has unfinalized "
+                        f"RESERVED ledger entries {res_list}"
                     )
-                elif len(matching) > 1:
+                elif not op_id:
                     esc_reason = (
-                        f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' has ambiguous "
-                        f"multiple ledger entries for operation_id '{op_id}'"
+                        f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' is missing operation_id"
+                    )
+                elif not att_id:
+                    esc_reason = (
+                        f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' is missing attempt_id"
                     )
                 else:
-                    res_att = _clean_non_empty_str(matching[0].attempt_id) or _clean_non_empty_str(
-                        matching[0].consumed_attempt_id
-                    )
-                    if not res_att:
+                    matching = [
+                        r for r in active_res if r.status == "CONSUMED" and r.operation_id == op_id
+                    ]
+                    if not matching:
                         esc_reason = (
-                            f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' ledger entry "
-                            f"'{matching[0].reservation_id}' is missing attempt_id"
+                            f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' operation_id "
+                            f"'{op_id}' is missing or mismatched in budget ledger"
                         )
-                    elif res_att != att_id:
+                    elif len(matching) > 1:
                         esc_reason = (
-                            f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' attempt_id "
-                            f"'{att_id}' mismatches ledger '{res_att}'"
+                            f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' has ambiguous "
+                            f"multiple ledger entries for operation_id '{op_id}'"
                         )
+                    else:
+                        res_att = _clean_non_empty_str(matching[0].attempt_id)
+                        if not res_att:
+                            res_att = _clean_non_empty_str(matching[0].consumed_attempt_id)
+                        if not res_att:
+                            esc_reason = (
+                                f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' ledger entry "
+                                f"'{matching[0].reservation_id}' is missing attempt_id"
+                            )
+                        elif res_att != att_id:
+                            esc_reason = (
+                                f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' attempt_id "
+                                f"'{att_id}' mismatches ledger '{res_att}'"
+                            )
 
-            if esc_reason is not None:
+                if esc_reason is not None:
+                    queue_dirty = True
+                    if tid not in escalated_ids:
+                        escalated_ids.append(tid)
+                    reasons.append(esc_reason)
+                    updated_tasks.append(
+                        task.model_copy(
+                            update={
+                                "status": QueuedTaskStatus.RECONCILIATION_REQUIRED,
+                                "reconciliation_required": True,
+                                "reconciliation_reason": esc_reason,
+                                "blocker_reason": esc_reason,
+                            }
+                        )
+                    )
+                else:
+                    updated_tasks.append(task)
+            elif tid in reserved_by_task_id:
+                res_list = reserved_by_task_id[tid]
+                esc_reason = (
+                    f"RECONCILIATION_REQUIRED: task '{tid}' (status={task.status}) has "
+                    f"unfinalized RESERVED ledger entries {res_list}"
+                )
                 queue_dirty = True
-                escalated_ids.append(tid)
+                if tid not in escalated_ids:
+                    escalated_ids.append(tid)
                 reasons.append(esc_reason)
                 updated_tasks.append(
                     task.model_copy(
@@ -1995,47 +2136,28 @@ def reconcile_queue_and_budget_consistency(
                 )
             else:
                 updated_tasks.append(task)
-        elif tid in reserved_by_task_id:
-            res_list = reserved_by_task_id[tid]
-            esc_reason = (
-                f"RECONCILIATION_REQUIRED: task '{tid}' (status={task.status}) has unfinalized "
-                f"RESERVED ledger entries {res_list}"
-            )
-            queue_dirty = True
-            escalated_ids.append(tid)
-            reasons.append(esc_reason)
-            updated_tasks.append(
-                task.model_copy(
-                    update={
-                        "status": QueuedTaskStatus.RECONCILIATION_REQUIRED,
-                        "reconciliation_required": True,
-                        "reconciliation_reason": esc_reason,
-                        "blocker_reason": esc_reason,
-                    }
+
+        if queue_dirty:
+            queue._save(
+                snap.model_copy(
+                    update={"tasks": tuple(updated_tasks), "updated_at": queue._clock()}
                 )
             )
+
+        status: Literal["CONSISTENT", "RECONCILED_ORPHANS", "RECONCILIATION_REQUIRED"]
+        if escalated_ids:
+            status = "RECONCILIATION_REQUIRED"
+        elif released_ids:
+            status = "RECONCILED_ORPHANS"
         else:
-            updated_tasks.append(task)
+            status = "CONSISTENT"
 
-    if queue_dirty:
-        queue._save(
-            snap.model_copy(update={"tasks": tuple(updated_tasks), "updated_at": queue._clock()})
+        return ConsistencyReconciliationResult(
+            status=status,
+            released_reservation_ids=tuple(released_ids),
+            escalated_task_ids=tuple(escalated_ids),
+            reasons=tuple(reasons),
         )
-
-    status: Literal["CONSISTENT", "RECONCILED_ORPHANS", "RECONCILIATION_REQUIRED"]
-    if escalated_ids:
-        status = "RECONCILIATION_REQUIRED"
-    elif released_ids:
-        status = "RECONCILED_ORPHANS"
-    else:
-        status = "CONSISTENT"
-
-    return ConsistencyReconciliationResult(
-        status=status,
-        released_reservation_ids=tuple(released_ids),
-        escalated_task_ids=tuple(escalated_ids),
-        reasons=tuple(reasons),
-    )
 
 
 __all__ = [
