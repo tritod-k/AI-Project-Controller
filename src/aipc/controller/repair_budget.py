@@ -539,11 +539,13 @@ def _get_in_process_lock(path: Path) -> threading.Lock:
 
 @contextmanager
 def _acquire_ledger_lock(ledger_path: Path, *, timeout_seconds: float = 5.0) -> Iterator[None]:
+    from aipc.controller.task_queue import _acquire_queue_ledger_lock
+
     resolved = ledger_path.resolve()
     resolved.parent.mkdir(parents=True, exist_ok=True)
     lock_file = resolved.parent / f".{resolved.name}.lock"
     proc_lock = _get_in_process_lock(resolved)
-    with proc_lock:
+    with _acquire_queue_ledger_lock(None, resolved), proc_lock:
         deadline = time.monotonic() + timeout_seconds
         fd: int | None = None
         while True:

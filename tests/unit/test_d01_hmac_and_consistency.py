@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -13,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import aipc
 from aipc.controller.errors import ControllerError
 from aipc.controller.milestone_authorization import (
     ApprovedMilestoneScope,
@@ -787,6 +790,45 @@ def test_reconcile_missing_task_in_queue_preserves_reserved_fail_closed(tmp_path
     assert reloaded.registered_roots["task-missing-99"].consumed == 1
     assert reloaded.reservations[res.reservation_id].status == "RESERVED"
 
+    persisted_snap = queue.load()
+    assert persisted_snap.reconciliation_required is True
+    assert persisted_snap.unresolved_reservation_ids == (res.reservation_id,)
+    assert any("task-missing-99" in r for r in persisted_snap.reconciliation_reasons)
+
+    # Queue-level blocker durably prevents dispatching even ELIGIBLE tasks
+    assert queue.next_eligible_task() is None
+    with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
+        queue.begin_dispatch("task-01", worker_id="w-01", provider="mock")
+
+    # Repeated reconciliation remains RECONCILIATION_REQUIRED without reducing counters
+    for _ in range(2):
+        repeat = reconcile_queue_and_budget_consistency(queue, ledger)
+        assert repeat.status == "RECONCILIATION_REQUIRED"
+        assert repeat.passed is False
+        assert repeat.released_reservation_ids == ()
+        assert ledger.load().milestone_consumed == 1
+        assert ledger.load().reservations[res.reservation_id].status == "RESERVED"
+        snap_again = queue.load()
+        assert snap_again.reconciliation_required is True
+        assert snap_again.unresolved_reservation_ids == (res.reservation_id,)
+
+    # Explicit human reconciliation helper enforces non-blank inputs and clears blocker
+    with pytest.raises(ControllerError, match="resolved_by"):
+        queue.clear_reconciliation_blocker(resolved_by="   ", note="checked")
+    with pytest.raises(ControllerError, match="note"):
+        queue.clear_reconciliation_blocker(resolved_by="K.TRITOD", note="   ")
+
+    cleared = queue.clear_reconciliation_blocker(
+        resolved_by="K.TRITOD",
+        note="verified missing reservation manually",
+    )
+    assert cleared.reconciliation_required is False
+    assert cleared.unresolved_reservation_ids == ()
+    assert cleared.reconciliation_reasons == ()
+    next_task = queue.next_eligible_task()
+    assert next_task is not None
+    assert next_task.contract.task_id == "task-01"
+
 
 def test_concurrent_begin_dispatch_and_reconcile_serialization_no_lost_reservation(
     tmp_path: Path,
@@ -942,3 +984,277 @@ def test_concurrent_begin_dispatch_and_reconcile_serialization_no_lost_reservati
     assert reval_outcome.escalated_task_ids == ("task-01",)
     assert reval_ledger.load().milestone_consumed == 1
     assert reval_ledger.load().reservations[reval_res.reservation_id].status == "RESERVED"
+
+
+def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_reservation_and_atomic_helper_serializes(  # noqa: E501
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _make_loaded_policy()
+
+    # Case A: Unprotected caller where reconciliation refunds pre-dispatch RESERVED entry
+    case_a_dir = tmp_path / "case_a"
+    ledger_a = DurableRepairBudgetLedger(case_a_dir / "budget.json", clock=_fixed_now)
+    ledger_a.initialize(loaded_policy=policy, registered_roots=["task-01"])
+    queue_a = PersistentTaskQueue(case_a_dir / "queue.json", clock=_fixed_now)
+    queue_a.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    res_a = ledger_a.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-race-01",
+        attempt_id="att-01-task-01",
+    )
+    outcome_a = reconcile_queue_and_budget_consistency(queue_a, ledger_a)
+    assert outcome_a.status == "RECONCILED_ORPHANS"
+    assert outcome_a.released_reservation_ids == (res_a.reservation_id,)
+    assert ledger_a.load().reservations[res_a.reservation_id].status == "RELEASED"
+    assert ledger_a.load().milestone_consumed == 0
+
+    with pytest.raises(ControllerError, match="not in RESERVED state"):
+        queue_a.begin_dispatch(
+            "task-01",
+            worker_id="w-01",
+            provider="mock",
+            operation_id="op-race-01",
+        )
+    assert queue_a.load().tasks[0].status == QueuedTaskStatus.ELIGIBLE
+    assert queue_a.load().tasks[0].current_attempt == 0
+    assert ledger_a.load().milestone_consumed == 0
+
+    # Case B: Atomic reserve_and_begin_dispatch serializes against concurrent reconciliation
+    case_b_dir = tmp_path / "case_b"
+    ledger_b = DurableRepairBudgetLedger(case_b_dir / "budget.json", clock=_fixed_now)
+    ledger_b.initialize(loaded_policy=policy, registered_roots=["task-01"])
+    queue_b = PersistentTaskQueue(case_b_dir / "queue.json", clock=_fixed_now)
+    queue_b.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    orig_begin_b = queue_b.begin_dispatch
+    orig_load_b = queue_b.load
+    reserved_event = threading.Event()
+    reconcile_ready_b = threading.Event()
+    events_lock_b = threading.Lock()
+    events_b: list[str] = []
+    outcomes_b: list[ConsistencyReconciliationResult] = []
+    atomic_results: list[tuple[object, QueuedTaskRecord]] = []
+    errors_b: list[BaseException] = []
+
+    def hooked_begin_b(*args: object, **kwargs: object) -> QueuedTaskRecord:
+        if threading.current_thread().name == "atomic-dispatch-thread":
+            reserved_event.set()
+            assert reconcile_ready_b.wait(timeout=5.0)
+            time.sleep(0.1)
+        record = orig_begin_b(*args, **kwargs)  # type: ignore[arg-type]
+        if threading.current_thread().name == "atomic-dispatch-thread":
+            with events_lock_b:
+                events_b.append("atomic_dispatch_done")
+        return record
+
+    def hooked_load_b() -> TaskQueueSnapshot:
+        if threading.current_thread().name == "atomic-reconcile-thread":
+            with events_lock_b:
+                events_b.append("reconcile_load")
+        return orig_load_b()
+
+    monkeypatch.setattr(queue_b, "begin_dispatch", hooked_begin_b)
+    monkeypatch.setattr(queue_b, "load", hooked_load_b)
+
+    def run_atomic_dispatch() -> None:
+        try:
+            pair = queue_b.reserve_and_begin_dispatch(
+                "task-01",
+                ledger=ledger_b,
+                worker_id="w-01",
+                provider="mock",
+                operation_id="op-atomic-01",
+            )
+            atomic_results.append(pair)
+        except BaseException as exc:  # pragma: no cover - asserted empty
+            errors_b.append(exc)
+
+    def run_reconcile_b() -> None:
+        try:
+            assert reserved_event.wait(timeout=5.0)
+            reconcile_ready_b.set()
+            outcomes_b.append(reconcile_queue_and_budget_consistency(queue_b, ledger_b))
+        except BaseException as exc:  # pragma: no cover - asserted empty
+            errors_b.append(exc)
+
+    t1 = threading.Thread(target=run_atomic_dispatch, name="atomic-dispatch-thread")
+    t2 = threading.Thread(target=run_reconcile_b, name="atomic-reconcile-thread")
+    t1.start()
+    t2.start()
+    t1.join(timeout=10.0)
+    t2.join(timeout=10.0)
+
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    assert not errors_b
+    assert len(atomic_results) == 1
+    assert len(outcomes_b) == 1
+    assert events_b.index("atomic_dispatch_done") < events_b.index("reconcile_load")
+
+    res_b, dispatched_b = atomic_results[0]
+    assert dispatched_b.status == QueuedTaskStatus.RUNNING
+    assert outcomes_b[0].status == "RECONCILIATION_REQUIRED"
+    assert outcomes_b[0].released_reservation_ids == ()
+    assert outcomes_b[0].escalated_task_ids == ("task-01",)
+    state_b = ledger_b.load()
+    res_b_id = res_b.reservation_id  # type: ignore[attr-defined]
+    assert state_b.milestone_consumed == 1
+    assert state_b.reservations[res_b_id].status == "RESERVED"
+
+    # Case C: Independent subprocess lock serialization and exact counter accuracy
+    case_c_dir = tmp_path / "case_c"
+    ledger_c_path = case_c_dir / "budget.json"
+    queue_c_path = case_c_dir / "queue.json"
+    ledger_c = DurableRepairBudgetLedger(ledger_c_path, clock=_fixed_now)
+    ledger_c.initialize(loaded_policy=policy, registered_roots=["task-01"])
+    queue_c = PersistentTaskQueue(queue_c_path, clock=_fixed_now)
+    queue_c.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    helper_script = case_c_dir / "child_lock_helper.py"
+    helper_script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import sys",
+                "import time",
+                "from pathlib import Path",
+                "from aipc.controller.repair_budget import DurableRepairBudgetLedger",
+                "from aipc.controller.task_queue import (",
+                "    PersistentTaskQueue,",
+                "    _acquire_queue_ledger_lock,",
+                "    reconcile_queue_and_budget_consistency,",
+                ")",
+                "",
+                "mode = sys.argv[1]",
+                "queue = PersistentTaskQueue(Path(sys.argv[2]))",
+                "ledger = DurableRepairBudgetLedger(Path(sys.argv[3]))",
+                "if mode == 'hold':",
+                "    ready_path = Path(sys.argv[4])",
+                "    release_path = Path(sys.argv[5])",
+                "    with _acquire_queue_ledger_lock(queue, ledger):",
+                "        ready_path.write_text('LOCKED', encoding='utf-8')",
+                "        deadline = time.monotonic() + 15.0",
+                "        while not release_path.is_file() and time.monotonic() < deadline:",
+                "            time.sleep(0.02)",
+                "elif mode == 'reconcile':",
+                "    res_id = sys.argv[4]",
+                "    outcome = reconcile_queue_and_budget_consistency(queue, ledger)",
+                "    state = ledger.load()",
+                "    print(",
+                "        json.dumps(",
+                "            {",
+                "                'status': outcome.status,",
+                "                'milestone_consumed': state.milestone_consumed,",
+                "                'reservation_status': state.reservations[res_id].status,",
+                "            }",
+                "        )",
+                "    )",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    src_root = str(Path(aipc.__file__).resolve().parent.parent)
+    existing_pp = os.environ.get("PYTHONPATH", "")
+    child_pp = f"{src_root}{os.pathsep}{existing_pp}" if existing_pp else src_root
+    child_env = build_sanitized_child_env(extra_env={"PYTHONPATH": child_pp})
+
+    ready_file = case_c_dir / "child_ready.flag"
+    release_file = case_c_dir / "child_release.flag"
+    child_proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(helper_script),
+            "hold",
+            str(queue_c_path),
+            str(ledger_c_path),
+            str(ready_file),
+            str(release_file),
+        ],
+        env=child_env,
+    )
+    release_ts: list[float] = []
+    try:
+        wait_deadline = time.monotonic() + 15.0
+        while not ready_file.is_file():
+            assert child_proc.poll() is None, "child lock holder exited prematurely"
+            assert time.monotonic() < wait_deadline, "timed out waiting for child lock"
+            time.sleep(0.02)
+
+        def _signal_release() -> None:
+            time.sleep(0.25)
+            release_ts.append(time.monotonic())
+            release_file.write_text("RELEASE", encoding="utf-8")
+
+        releaser = threading.Thread(target=_signal_release, name="child-lock-releaser")
+        releaser.start()
+
+        res_c, dispatched_c = queue_c.reserve_and_begin_dispatch(
+            "task-01",
+            ledger=ledger_c,
+            worker_id="w-01",
+            provider="mock",
+            operation_id="op-proc-01",
+        )
+        parent_done_ts = time.monotonic()
+        releaser.join(timeout=10.0)
+        assert not releaser.is_alive()
+        assert child_proc.wait(timeout=15.0) == 0
+    finally:
+        if not release_file.is_file():
+            release_file.write_text("RELEASE", encoding="utf-8")
+        if child_proc.poll() is None:
+            child_proc.terminate()
+            child_proc.wait(timeout=5.0)
+
+    assert len(release_ts) == 1
+    assert parent_done_ts >= release_ts[0]
+
+    finalized_c = ledger_c.finalize_attempt_budget(
+        operation_id="op-proc-01",
+        attempt_id=dispatched_c.active_attempt_id,
+        worker_id="w-01",
+        provider="mock",
+    )
+    assert finalized_c.status == "CONSUMED"
+
+    res_c_id = res_c.reservation_id  # type: ignore[attr-defined]
+    recon_proc = subprocess.run(
+        [
+            sys.executable,
+            str(helper_script),
+            "reconcile",
+            str(queue_c_path),
+            str(ledger_c_path),
+            res_c_id,
+        ],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20.0,
+    )
+    recon_payload = json.loads(recon_proc.stdout.strip())
+    assert recon_payload == {
+        "status": "CONSISTENT",
+        "milestone_consumed": 1,
+        "reservation_status": "CONSUMED",
+    }
+    state_c = ledger_c.load()
+    assert state_c.milestone_consumed == 1
+    assert state_c.reservations[res_c_id].status == "CONSUMED"
