@@ -343,10 +343,11 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   `(reservation_id, operation_id)` pairs in `release_attempt_budget()`, enforcing `^plan-v[0-9]{4,}$`
   in `snapshot_approved_plan()`, passing explicit `build_sanitized_child_env(os.environ)` to
   Git subprocesses in `_run_git_nul_list()`, and requiring a non-blank `operation_id` and exact
-  active `RESERVED` entry on all budget-backed and sibling-ledger dispatches (probing ledger
-  tracking for both `ELIGIBLE` and `REPAIR_REQUIRED` states and gating legacy C.5/C.6/C.7
-  exemptions strictly on `not uses_d01_op_tracking`) with hardened non-legacy anti-spoofing and
-  zero historical `CONSUMED` bypasses, persisting durable queue-level
+  active `RESERVED` entry on all budget-backed, sibling-ledger, and active-D01-tracking
+  dispatches (including unbound queues with historical D01 tracking whose sibling ledger is
+  missing, probing ledger tracking for both `ELIGIBLE` and `REPAIR_REQUIRED` states and gating
+  legacy C.5/C.6/C.7 exemptions strictly on `not uses_d01_op_tracking`) with hardened
+  non-legacy anti-spoofing and zero historical `CONSUMED` bypasses, persisting durable queue-level
   `reconciliation_required` / `unresolved_reservation_ids` blockers on missing-task or
   uncertain `RESERVED` entries, stripping all `AIPC_HMAC_*` and `AIPC_OPERATOR_HMAC_*` env
   vars, and rejecting symlinked HMAC key ancestor directories) prior to Private Control-Plane

@@ -1,8 +1,8 @@
 # AIPC 2.0 Milestone D (`D01`–`D03`) — Completion Report
 
-**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI on `frozenSHA_d_r11` + AST-Closed 2-Wave Codex Review Cycle #11 `PASS` + preserved `job-a1a-r7` `D01-AUTH-HMAC: PASS`, `job-b-r4` `D02: PASS`, `job-a1b1a-r10b` `D01-BUDGET-LEDGER-CORE: PASS` + Commander K.TRITOD merge approval)
+**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI on `frozenSHA_d_r12` + AST-Closed 2-Wave Codex Review Cycle #12 `PASS` + preserved `job-a1a-r7` `D01-AUTH-HMAC: PASS`, `job-b-r4` `D02: PASS`, `job-a1b1a-r10b` `D01-BUDGET-LEDGER-CORE: PASS` + Commander K.TRITOD merge approval)
 **Architecture Baseline:** Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`
-**Branch:** `gemini/aipc-2.0-milestone-d` (`tested_source_sha_d_r11`: `f2b77070ea0fe57c2f46f63ca3cfc22c125ee006`; prior `frozenSHA_d_r10`: `179d38d1a30ff092e97651b51e31cc6a63b0febb`; prior `frozenSHA_d_r9`: `5c19b73733848b3d95a6e4c821fce24e661058b5`; prior `frozenSHA_d_r8`: `3517b898514ea57e83fdc7e594713b3ef5e4cce0`; prior `frozenSHA_d_r7`: `e6ad749f32213d1feb6e0d8661fdc48841f830ba`; prior `frozenSHA_d_r4`: `c1624e357a1bc3c8ecb89adfed59f16aed4386f8`; `1,639 passed, 1 skipped, 0 failed` Windows; `88 passed, 0 skipped, 0 failed` Linux Docker)
+**Branch:** `gemini/aipc-2.0-milestone-d` (`tested_source_sha_d_r12`: `fbd73416a1a3177b92a1e8bd4c7d8585e6d532f7`; prior `frozenSHA_d_r11`: `62ea3031f653a63e1b4356e9251bbbd28a2b4acc`; prior `frozenSHA_d_r10`: `179d38d1a30ff092e97651b51e31cc6a63b0febb`; prior `frozenSHA_d_r9`: `5c19b73733848b3d95a6e4c821fce24e661058b5`; prior `frozenSHA_d_r8`: `3517b898514ea57e83fdc7e594713b3ef5e4cce0`; prior `frozenSHA_d_r7`: `e6ad749f32213d1feb6e0d8661fdc48841f830ba`; prior `frozenSHA_d_r4`: `c1624e357a1bc3c8ecb89adfed59f16aed4386f8`; `1,640 passed, 1 skipped, 0 failed` Windows; `89 passed, 0 skipped, 0 failed` Linux Docker)
 **Owner / Human Commander:** K.TRITOD
 **Operating Posture:** STRICT `subscription_only`, `EXPERIMENTAL / SUPERVISED`, `Level A + Level B` isolation with explicit Level C host disclosure; unattended production remains **NO-GO** pending separate release gate.
 
