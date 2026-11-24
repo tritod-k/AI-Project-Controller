@@ -1664,6 +1664,7 @@ class PersistentTaskQueue:
             requires_op_reservation = (
                 operation_id is not None
                 or expected_attempt_id is not None
+                or uses_d01_op_tracking
                 or (
                     eff_ledger_path is not None
                     and not is_legacy_c567_initial

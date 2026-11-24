@@ -3078,3 +3078,134 @@ def test_begin_dispatch_legacy_c567_repair_rejects_omitted_or_blank_op_id_when_d
                 == before_b_state.registered_roots[task_id].consumed
             )
             assert after_b_state.reservations[case_b_res_id].status == "RESERVED"
+
+
+def test_begin_dispatch_unbound_queue_with_d01_history_and_missing_sibling_ledger_fails_closed(
+    tmp_path: Path,
+) -> None:
+    # Part 1: Unbound queue with D01 operation_id history and deleted sibling ledger
+    unbound_dir = tmp_path / "unbound_d01_missing_ledger"
+    appr_path = unbound_dir / "trusted_policy" / "c5_approval.json"
+    persist_milestone_authorization_evidence(
+        appr_path,
+        MilestoneAuthorizationEvidence(
+            approval_id="appr-c5-unbound",
+            project_id="proj-d01",
+            milestone_id="milestone-c5",
+            decision="APPROVED",
+            authorized_by="K.TRITOD",
+            baseline_commit_sha=_MILESTONE_C5_BASELINE_SHA,
+            authorized_workstreams=("rg01",),
+        ),
+    )
+    trust_ctx = _build_c567_policy_trust_context(
+        unbound_dir,
+        ms_id="milestone-c5",
+        approval_path=appr_path,
+        approval_id="appr-c5-unbound",
+    )
+    policy = load_policy_trust_context(trust_ctx)
+
+    sibling_ledger_path = unbound_dir / "repair_budget_ledger.json"
+    sibling_ledger = DurableRepairBudgetLedger(sibling_ledger_path, clock=_fixed_now)
+    sibling_ledger.initialize(
+        loaded_policy=policy,
+        registered_roots=["task-rg01-01", "task-rg01-02"],
+    )
+
+    contracts = (
+        ApprovedTaskContract(
+            task_id="task-rg01-01",
+            phase_id="rg01",
+            milestone_id="milestone-c5",
+            title="Unbound D01 task 1",
+            objective="Record operation_id then transition to REPAIR_REQUIRED.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id="appr-c5-unbound",
+            approval_evidence_path=str(appr_path),
+        ),
+        ApprovedTaskContract(
+            task_id="task-rg01-02",
+            phase_id="rg01",
+            milestone_id="milestone-c5",
+            title="Unbound D01 task 2",
+            objective="Remain ELIGIBLE after task 1 records operation_id.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id="appr-c5-unbound",
+            approval_evidence_path=str(appr_path),
+        ),
+    )
+    unbound_queue = PersistentTaskQueue(
+        unbound_dir / "canonical_queue.json",
+        repair_budget_path=None,
+        policy_trust_context=trust_ctx,
+        clock=_fixed_now,
+    )
+    unbound_queue.initialize(
+        project_id="proj-d01",
+        milestone_id="milestone-c5",
+        contracts=contracts,
+        approval_id="appr-c5-unbound",
+        approval_evidence_path=appr_path,
+    )
+
+    sibling_ledger.reserve_attempt_budget(
+        task_id="task-rg01-01",
+        operation_id="op-unbound-01",
+        attempt_id="att-01-task-rg01-01",
+    )
+    unbound_queue.begin_dispatch(
+        "task-rg01-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-unbound-01",
+    )
+    sibling_ledger.finalize_attempt_budget(
+        operation_id="op-unbound-01",
+        attempt_id="att-01-task-rg01-01",
+        worker_id="w-01",
+        provider="mock",
+    )
+    unbound_queue.record_attempt_outcome(
+        "task-rg01-01",
+        candidate_sha="a" * 40,
+        checkpoint_id="cp-01",
+        evidence_root="evidence/01",
+        review_id="rev-01",
+        review_verdict="REVISE",
+        gate_verdict="REVISE",
+        failure_reason="needs repair",
+    )
+
+    sibling_ledger_path.unlink()
+    assert not sibling_ledger_path.exists()
+
+    snap_before = unbound_queue.load()
+    task_repair_before = snap_before.tasks[0]
+    task_eligible_before = snap_before.tasks[1]
+    assert task_repair_before.status == QueuedTaskStatus.REPAIR_REQUIRED
+    assert task_eligible_before.status == QueuedTaskStatus.ELIGIBLE
+
+    for target_task_id, before_record in (
+        ("task-rg01-02", task_eligible_before),
+        ("task-rg01-01", task_repair_before),
+    ):
+        for bad_op_id in (None, "   "):
+            with pytest.raises(
+                ControllerError,
+                match="budget ledger is missing or unavailable",
+            ):
+                unbound_queue.begin_dispatch(
+                    target_task_id,
+                    worker_id="w-01",
+                    provider="mock",
+                    operation_id=bad_op_id,
+                    expected_attempt_id=None,
+                )
+            snap_after = unbound_queue.load()
+            after_record = next(t for t in snap_after.tasks if t.contract.task_id == target_task_id)
+            assert after_record.status == before_record.status
+            assert after_record.current_attempt == before_record.current_attempt
+            assert after_record.attempts == before_record.attempts
