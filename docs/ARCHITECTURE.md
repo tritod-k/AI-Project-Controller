@@ -339,8 +339,11 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   `repair_budget.py` and `task_queue.py` reservation/dispatch/reconciliation under a shared
   exclusive lock, validating canonical `expected_attempt_id` prior to reservation, tracking
   milestone `BASE`-funded vs. `GRANT`-funded consumption independently via `_milestone_base_consumed()`
-  in `reserve_attempt_budget()` and `reserve_dispatch()`, strictly cross-checking
-  `(reservation_id, operation_id)` pairs in `release_attempt_budget()`, enforcing `^plan-v[0-9]{4,}$`
+  in `reserve_attempt_budget()` and `reserve_dispatch()`, validating full reservation-binding
+  field parity (`root_task`, `attempt`, `candidate_sha`, normalized `review_id`, `route`,
+  `target_paths`, policy/grant binding) before accepting idempotent `RESERVED` replay in
+  `reserve_attempt_budget()`, strictly cross-checking `(reservation_id, operation_id)` pairs in
+  `release_attempt_budget()`, enforcing `^plan-v[0-9]{4,}$`
   in `snapshot_approved_plan()`, passing explicit `build_sanitized_child_env(os.environ)` to
   Git subprocesses in `_run_git_nul_list()`, and requiring a non-blank `operation_id` and exact
   active `RESERVED` entry on all budget-backed, sibling-ledger, and active-D01-tracking
