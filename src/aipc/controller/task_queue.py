@@ -1618,7 +1618,7 @@ class PersistentTaskQueue:
             if (
                 is_verified_legacy_c567
                 and not uses_d01_op_tracking
-                and target.status == QueuedTaskStatus.ELIGIBLE
+                and target.status in (QueuedTaskStatus.ELIGIBLE, QueuedTaskStatus.REPAIR_REQUIRED)
                 and operation_id is None
                 and expected_attempt_id is None
                 and eff_ledger_path is not None
@@ -1656,6 +1656,7 @@ class PersistentTaskQueue:
             )
             is_legacy_c567_repair = (
                 is_verified_legacy_c567
+                and not uses_d01_op_tracking
                 and target.status == QueuedTaskStatus.REPAIR_REQUIRED
                 and operation_id is None
                 and expected_attempt_id is None

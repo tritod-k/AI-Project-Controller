@@ -34,6 +34,7 @@ from aipc.controller.repair_budget import (
     DurableRepairBudgetLedger,
     RepairBudgetError,
     _milestone_base_consumed,
+    load_policy_trust_context,
 )
 from aipc.controller.task_queue import (
     _MILESTONE_C5_BASELINE_SHA,
@@ -2593,3 +2594,487 @@ def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Pa
     assert t2_after.status == QueuedTaskStatus.ELIGIBLE
     assert t2_after.current_attempt == 0
     assert t2_after.attempts == ()
+
+
+def _build_c567_policy_trust_context(
+    base_dir: Path,
+    *,
+    ms_id: str,
+    approval_path: Path,
+    approval_id: str,
+) -> PolicyTrustContext:
+    trusted_root = base_dir / "trusted_policy"
+    cand_root = base_dir / "candidate_repo"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+    cand_root.mkdir(parents=True, exist_ok=True)
+
+    policy_payload = {
+        "policy_version": "1.0",
+        "policy_id": f"pol-{ms_id}",
+        "operating_profile": "subscription_only",
+        "owner": "K.TRITOD",
+        "source_authority": "operator_owned_external_policy",
+        "review": {
+            "preserve_raw_review": True,
+            "preserve_canonical_verdict": True,
+            "require_exact_candidate_sha": True,
+            "default_independence": "prefer_cross_provider",
+            "require_objective_evidence_for_blockers": True,
+            "unsupported_or_unverifiable_critical_finding": "NEEDS_TRIAGE_HUMAN",
+            "advisory": {"auto_dispatch": False, "action": "AUDIT_BACKLOG_ONLY"},
+            "release_blocker": {
+                "allow_release": False,
+                "auto_dispatch_only_if_authorized_and_within_budget": True,
+            },
+            "needs_triage": {
+                "allow_release_if_credible_unresolved": False,
+                "action": "HUMAN_REVIEW_REQUIRED",
+            },
+        },
+        "repair_budget": {
+            "default_auto_code_repairs_per_task": 2,
+            "total_auto_code_repairs_per_milestone": 6,
+            "budget_exhausted_action": "HALT_ON_RETRY_EXHAUSTION",
+            "preserve_unresolved_blockers": True,
+            "counter_scope": "approved_milestone_and_root_task_lineage",
+            "persist_across_restarts": True,
+            "persist_across_provider_fallback": True,
+            "reject_counter_reset_by_task_splitting": True,
+            "extension": {
+                "human_commander_approval_required": True,
+                "requires_explicit_task_and_scope": True,
+                "requires_max_additional_attempts": True,
+                "auditable_and_expiring": True,
+            },
+        },
+        "change_scope": {
+            "cannot_expand_milestone_from_review": True,
+            "prohibit_speculative_security_hardening": True,
+            "no_second_phase_gate": True,
+            "no_auto_merge": True,
+            "no_auto_deploy": True,
+            "no_milestone_d": True,
+        },
+    }
+    policy_path = trusted_root / "policy.yaml"
+    raw = yaml.safe_dump(policy_payload, sort_keys=False).encode("utf-8")
+    policy_path.write_bytes(raw)
+    policy_sha = hashlib.sha256(raw).hexdigest()
+
+    return PolicyTrustContext(
+        policy_path=policy_path,
+        expected_sha256=policy_sha,
+        trusted_external_root=base_dir,
+        excluded_roots=(cand_root,),
+        approval_path=approval_path,
+        expected_approval_id=approval_id,
+        expected_owner="K.TRITOD",
+        expected_project_id="proj-d01",
+        expected_milestone_id=ms_id,
+    )
+
+
+def test_begin_dispatch_legacy_c567_repair_rejects_omitted_or_blank_op_id_when_d01_tracking_active(
+    tmp_path: Path,
+) -> None:
+    trusted_dir = tmp_path / "trusted_ms_d"
+    workspace_dir = tmp_path / "workspace_ms_d"
+    trusted_dir.mkdir()
+    workspace_dir.mkdir()
+
+    raw_c7_grant = b"Commander K.TRITOD approves Milestone C.7 RCE01 repair."
+    c7_approval_dig = compute_approval_digest(raw_c7_grant)
+    c7_record_path = trusted_dir / "milestone_c7_grant.json"
+    c7_scope = ApprovedMilestoneScope(
+        workstreams=("rce01",),
+        allowed_path_prefixes=("src/aipc/controller/",),
+        baseline_commit_sha=_MILESTONE_C7_BASELINE_SHA,
+    )
+    _, c7_rec_sha = issue_milestone_authorization_record(
+        raw_grant_bytes=raw_c7_grant,
+        record_id="rec-c7-repair-01",
+        approval_id="appr-c7-repair",
+        project_id="proj-d01",
+        milestone_id="milestone-c7",
+        commander_id="K.TRITOD",
+        approved_scope=c7_scope,
+        output_path=c7_record_path,
+        trusted_external_root=trusted_dir,
+        excluded_roots=(workspace_dir,),
+        issued_at=_fixed_now(),
+        expires_at=None,
+    )
+    c7_trust_ctx = MilestoneAuthorizationTrustContext(
+        record_path=c7_record_path,
+        expected_record_sha256=c7_rec_sha,
+        expected_approval_digest=c7_approval_dig,
+        trusted_external_root=trusted_dir,
+        excluded_roots=(workspace_dir,),
+        expected_project_id="proj-d01",
+        expected_milestone_id="milestone-c7",
+        expected_commander_id="K.TRITOD",
+    )
+
+    cases = (
+        (
+            "milestone-c5",
+            "rg01",
+            "task-rg01-01",
+            "task-rg01-02",
+            _MILESTONE_C5_BASELINE_SHA,
+            "appr-c5-repair",
+            None,
+        ),
+        (
+            "milestone-c6",
+            "cisl01",
+            "task-cisl01-01",
+            "task-cisl01-02",
+            _MILESTONE_C6_BASELINE_SHA,
+            "appr-c6-repair",
+            None,
+        ),
+        (
+            "milestone-c7",
+            "rce01",
+            "task-rce01-01",
+            "task-rce01-02",
+            _MILESTONE_C7_BASELINE_SHA,
+            "appr-c7-repair",
+            c7_trust_ctx,
+        ),
+    )
+
+    for ms_id, phase_id, task_id, other_task_id, baseline_sha, appr_id, ms_trust_ctx in cases:
+        ms_tag = ms_id.replace("-", "_")
+
+        # 0. Pure legacy C.5/C.6/C.7 REPAIR_REQUIRED dispatch (uses_d01_op_tracking == False)
+        pure_dir = tmp_path / f"{ms_tag}_pure_legacy"
+        pure_appr_path = pure_dir / "trusted_policy" / f"{ms_tag}_approval.json"
+        persist_milestone_authorization_evidence(
+            pure_appr_path,
+            MilestoneAuthorizationEvidence(
+                approval_id=appr_id,
+                project_id="proj-d01",
+                milestone_id=ms_id,
+                decision="APPROVED",
+                authorized_by="K.TRITOD",
+                baseline_commit_sha=baseline_sha,
+                authorized_workstreams=(phase_id,),
+            ),
+        )
+        pure_trust_ctx = _build_c567_policy_trust_context(
+            pure_dir,
+            ms_id=ms_id,
+            approval_path=pure_appr_path,
+            approval_id=appr_id,
+        )
+        pure_policy = load_policy_trust_context(pure_trust_ctx)
+        pure_ledger_path = pure_dir / "budget.json"
+        pure_ledger = DurableRepairBudgetLedger(pure_ledger_path, clock=_fixed_now)
+        pure_ledger.initialize(loaded_policy=pure_policy, registered_roots=[task_id])
+
+        pure_contract = ApprovedTaskContract(
+            task_id=task_id,
+            phase_id=phase_id,
+            milestone_id=ms_id,
+            title=f"Pure legacy {ms_id} repair task",
+            objective="Verify pure legacy repair dispatch still succeeds without operation_id.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id=appr_id,
+            approval_evidence_path=str(pure_appr_path),
+        )
+        pure_queue = PersistentTaskQueue(
+            pure_dir / "canonical_queue.json",
+            repair_budget_path=pure_ledger_path,
+            policy_trust_context=pure_trust_ctx,
+            milestone_trust_context=ms_trust_ctx,
+            clock=_fixed_now,
+        )
+        pure_queue.initialize(
+            project_id="proj-d01",
+            milestone_id=ms_id,
+            contracts=(pure_contract,),
+            approval_id=appr_id,
+            approval_evidence_path=pure_appr_path,
+        )
+        pure_queue.begin_dispatch(task_id, worker_id="w-legacy", provider="mock")
+        pure_queue.record_attempt_outcome(
+            task_id,
+            candidate_sha="a" * 40,
+            checkpoint_id="cp-01",
+            evidence_root="evidence/01",
+            review_id="rev-01",
+            review_verdict="REVISE",
+            gate_verdict="REVISE",
+            failure_reason="needs repair",
+        )
+        pure_res = pure_ledger.reserve_repair(
+            loaded_policy=pure_policy,
+            event_id=f"evt-pure-{ms_tag}",
+            task_id=task_id,
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-01",
+            route="REVIEW_COORDINATOR",
+            trust_context=pure_trust_ctx,
+            target_paths=("src/aipc/controller/task_queue.py",),
+        )
+        pure_res_id = pure_res.reservation.reservation_id
+        pure_dispatched = pure_queue.begin_dispatch(
+            task_id,
+            worker_id="w-legacy",
+            provider="mock",
+            repair_reservation_id=pure_res_id,
+            operation_id=None,
+        )
+        assert pure_dispatched.status == QueuedTaskStatus.RUNNING
+        assert pure_dispatched.current_attempt == 2
+        assert pure_ledger.load().reservations[pure_res_id].status == "CONSUMED"
+
+        # Case A: Queue attempt history has non-None operation_id
+        case_a_dir = tmp_path / f"{ms_tag}_case_a"
+        case_a_appr_path = case_a_dir / "trusted_policy" / f"{ms_tag}_approval.json"
+        persist_milestone_authorization_evidence(
+            case_a_appr_path,
+            MilestoneAuthorizationEvidence(
+                approval_id=appr_id,
+                project_id="proj-d01",
+                milestone_id=ms_id,
+                decision="APPROVED",
+                authorized_by="K.TRITOD",
+                baseline_commit_sha=baseline_sha,
+                authorized_workstreams=(phase_id,),
+            ),
+        )
+        case_a_trust_ctx = _build_c567_policy_trust_context(
+            case_a_dir,
+            ms_id=ms_id,
+            approval_path=case_a_appr_path,
+            approval_id=appr_id,
+        )
+        case_a_policy = load_policy_trust_context(case_a_trust_ctx)
+        case_a_ledger_path = case_a_dir / "budget.json"
+        case_a_ledger = DurableRepairBudgetLedger(case_a_ledger_path, clock=_fixed_now)
+        case_a_ledger.initialize(loaded_policy=case_a_policy, registered_roots=[task_id])
+
+        case_a_contract = ApprovedTaskContract(
+            task_id=task_id,
+            phase_id=phase_id,
+            milestone_id=ms_id,
+            title=f"Case A {ms_id} repair task",
+            objective="Verify queue attempt history D01 tracking blocks legacy repair bypass.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id=appr_id,
+            approval_evidence_path=str(case_a_appr_path),
+        )
+        case_a_queue = PersistentTaskQueue(
+            case_a_dir / "canonical_queue.json",
+            repair_budget_path=case_a_ledger_path,
+            policy_trust_context=case_a_trust_ctx,
+            milestone_trust_context=ms_trust_ctx,
+            clock=_fixed_now,
+        )
+        case_a_queue.initialize(
+            project_id="proj-d01",
+            milestone_id=ms_id,
+            contracts=(case_a_contract,),
+            approval_id=appr_id,
+            approval_evidence_path=case_a_appr_path,
+        )
+        op_a_id = f"op-a-{ms_tag}-01"
+        att_a_id = f"att-01-{task_id}"
+        case_a_ledger.reserve_attempt_budget(
+            task_id=task_id,
+            operation_id=op_a_id,
+            attempt_id=att_a_id,
+        )
+        case_a_queue.begin_dispatch(
+            task_id,
+            worker_id="w-a",
+            provider="mock",
+            operation_id=op_a_id,
+        )
+        case_a_ledger.finalize_attempt_budget(
+            operation_id=op_a_id,
+            attempt_id=att_a_id,
+            worker_id="w-a",
+            provider="mock",
+        )
+        case_a_queue.record_attempt_outcome(
+            task_id,
+            candidate_sha="a" * 40,
+            checkpoint_id="cp-01",
+            evidence_root="evidence/01",
+            review_id="rev-01",
+            review_verdict="REVISE",
+            gate_verdict="REVISE",
+            failure_reason="needs repair",
+        )
+        case_a_res = case_a_ledger.reserve_repair(
+            loaded_policy=case_a_policy,
+            event_id=f"evt-a-{ms_tag}",
+            task_id=task_id,
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-01",
+            route="REVIEW_COORDINATOR",
+            trust_context=case_a_trust_ctx,
+            target_paths=("src/aipc/controller/task_queue.py",),
+        )
+        case_a_res_id = case_a_res.reservation.reservation_id
+        before_a_task = case_a_queue.load().tasks[0]
+        before_a_state = case_a_ledger.load()
+
+        for bad_op_id in (None, "   "):
+            with pytest.raises(
+                ControllerError,
+                match="budget-backed dispatch requires a non-blank operation_id",
+            ):
+                case_a_queue.begin_dispatch(
+                    task_id,
+                    worker_id="w-a",
+                    provider="mock",
+                    repair_reservation_id=case_a_res_id,
+                    operation_id=bad_op_id,
+                )
+            after_a_task = case_a_queue.load().tasks[0]
+            after_a_state = case_a_ledger.load()
+            assert after_a_task.status == QueuedTaskStatus.REPAIR_REQUIRED
+            assert after_a_task.current_attempt == before_a_task.current_attempt
+            assert len(after_a_task.attempts) == len(before_a_task.attempts)
+            assert after_a_state.milestone_consumed == before_a_state.milestone_consumed
+            assert (
+                after_a_state.registered_roots[task_id].consumed
+                == before_a_state.registered_roots[task_id].consumed
+            )
+            assert after_a_state.reservations[case_a_res_id].status == "RESERVED"
+
+        # Case B: Queue attempt history has NO operation_id, ledger has operation-correlated res
+        case_b_dir = tmp_path / f"{ms_tag}_case_b"
+        case_b_appr_path = case_b_dir / "trusted_policy" / f"{ms_tag}_approval.json"
+        persist_milestone_authorization_evidence(
+            case_b_appr_path,
+            MilestoneAuthorizationEvidence(
+                approval_id=appr_id,
+                project_id="proj-d01",
+                milestone_id=ms_id,
+                decision="APPROVED",
+                authorized_by="K.TRITOD",
+                baseline_commit_sha=baseline_sha,
+                authorized_workstreams=(phase_id,),
+            ),
+        )
+        case_b_trust_ctx = _build_c567_policy_trust_context(
+            case_b_dir,
+            ms_id=ms_id,
+            approval_path=case_b_appr_path,
+            approval_id=appr_id,
+        )
+        case_b_policy = load_policy_trust_context(case_b_trust_ctx)
+        case_b_ledger_path = case_b_dir / "budget.json"
+        case_b_ledger = DurableRepairBudgetLedger(case_b_ledger_path, clock=_fixed_now)
+        case_b_ledger.initialize(
+            loaded_policy=case_b_policy,
+            registered_roots=[task_id, other_task_id],
+        )
+
+        case_b_contract = ApprovedTaskContract(
+            task_id=task_id,
+            phase_id=phase_id,
+            milestone_id=ms_id,
+            title=f"Case B {ms_id} repair task",
+            objective="Verify ledger-only D01 tracking blocks legacy repair bypass.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id=appr_id,
+            approval_evidence_path=str(case_b_appr_path),
+        )
+        case_b_other_contract = ApprovedTaskContract(
+            task_id=other_task_id,
+            phase_id=phase_id,
+            milestone_id=ms_id,
+            title=f"Case B {ms_id} tracked sibling task",
+            objective="Hold operation-correlated reservation in ledger.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id=appr_id,
+            approval_evidence_path=str(case_b_appr_path),
+        )
+        case_b_queue = PersistentTaskQueue(
+            case_b_dir / "canonical_queue.json",
+            repair_budget_path=case_b_ledger_path,
+            policy_trust_context=case_b_trust_ctx,
+            milestone_trust_context=ms_trust_ctx,
+            clock=_fixed_now,
+        )
+        case_b_queue.initialize(
+            project_id="proj-d01",
+            milestone_id=ms_id,
+            contracts=(case_b_contract, case_b_other_contract),
+            approval_id=appr_id,
+            approval_evidence_path=case_b_appr_path,
+        )
+        case_b_queue.begin_dispatch(
+            task_id,
+            worker_id="w-b",
+            provider="mock",
+            operation_id=None,
+        )
+        case_b_queue.record_attempt_outcome(
+            task_id,
+            candidate_sha="a" * 40,
+            checkpoint_id="cp-01",
+            evidence_root="evidence/01",
+            review_id="rev-01",
+            review_verdict="REVISE",
+            gate_verdict="REVISE",
+            failure_reason="needs repair",
+        )
+        case_b_res = case_b_ledger.reserve_repair(
+            loaded_policy=case_b_policy,
+            event_id=f"evt-b-{ms_tag}",
+            task_id=task_id,
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-01",
+            route="REVIEW_COORDINATOR",
+            trust_context=case_b_trust_ctx,
+            target_paths=("src/aipc/controller/task_queue.py",),
+        )
+        case_b_res_id = case_b_res.reservation.reservation_id
+        case_b_ledger.reserve_attempt_budget(
+            task_id=other_task_id,
+            operation_id=f"op-b-{ms_tag}-01",
+            attempt_id=f"att-01-{other_task_id}",
+        )
+
+        before_b_task = case_b_queue.load().tasks[0]
+        assert all(att.operation_id is None for att in before_b_task.attempts)
+        before_b_state = case_b_ledger.load()
+
+        for bad_op_id in (None, "   "):
+            with pytest.raises(
+                ControllerError,
+                match="budget-backed dispatch requires a non-blank operation_id",
+            ):
+                case_b_queue.begin_dispatch(
+                    task_id,
+                    worker_id="w-b",
+                    provider="mock",
+                    repair_reservation_id=case_b_res_id,
+                    operation_id=bad_op_id,
+                )
+            after_b_task = case_b_queue.load().tasks[0]
+            after_b_state = case_b_ledger.load()
+            assert after_b_task.status == QueuedTaskStatus.REPAIR_REQUIRED
+            assert after_b_task.current_attempt == before_b_task.current_attempt
+            assert len(after_b_task.attempts) == len(before_b_task.attempts)
+            assert after_b_state.milestone_consumed == before_b_state.milestone_consumed
+            assert (
+                after_b_state.registered_roots[task_id].consumed
+                == before_b_state.registered_roots[task_id].consumed
+            )
+            assert after_b_state.reservations[case_b_res_id].status == "RESERVED"
