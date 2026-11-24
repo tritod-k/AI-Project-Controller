@@ -18,9 +18,32 @@
 **Verified `tested_source_sha_d_r11` (Tier-2 Cycle #10 / `d01-b-recovery10`):** `f2b77070ea0fe57c2f46f63ca3cfc22c125ee006` (`frozenSHA_d_r11`: `62ea3031f653a63e1b4356e9251bbbd28a2b4acc`)
 **Verified `tested_source_sha_d_r12` (Tier-2 Cycle #11 / `d01-b-recovery11`):** `fbd73416a1a3177b92a1e8bd4c7d8585e6d532f7` (`frozenSHA_d_r12`: `a93de7d0a0fc4da11c47e96dfd1bacaabf910ea8`)
 **Verified `tested_source_sha_d_r13` (Tier-2 Cycle #12 / `d01-b-recovery12`):** `82b5a189e16a6db61213702e16dfcb7230dca864` (`frozenSHA_d_r13`: `57befe85ac538176c79ded83eb7f1e3d35e465fa`)
-**Verified `tested_source_sha_d_r14` (Tier-2 Cycle #13 / `d01-b-recovery13`):** `05011ccaabf1c3578353dc110e6654d86fd1c2d0`
+**Verified `tested_source_sha_d_r14` (Tier-2 Cycle #13 / `d01-b-recovery13`):** `05011ccaabf1c3578353dc110e6654d86fd1c2d0` (`frozenSHA_d_r14`: `74b257ca9eeca9394a65aa3e0e440701f2874119`)
+**Verified `tested_source_sha_d_r15` (Tier-2 Cycle #14 / `d01-b-recovery14`):** `35eacbd507788b022060bcdd901f7dd4d154c1e5`
 **Pinned Stable Engine (`H:/AIPC_Workspace/stable_c`):** `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6` (clean, unmodified after Section 1 fast-forward)
 **Operating Profile:** STRICT `subscription_only` (`agy.exe` + `gemini-4-hydrogen-medium` Workers, `codex.cmd` Independent Reviewers; `$0` paid API usage)
+
+---
+
+## 0M. Tier-2 Remediation Cycle #14 (`d01-b-recovery14`) Provenance & Verbatim Receipts
+Authorized by Human Commander K.TRITOD (`d18_commander_tier2_cycle14_grant.json`, HMAC-SHA256 signed, `sha256: 23e33c6dc59d79d7bedd9e6588f239c1df5513644d4616494b42c9e2153f5d61`, verified via `verify_approval_record_hmac` in `r15_commander_grant_hmac_verification_receipt.json` `sha256: 5f244b1dbcdb0a6b48628e446cb22ee2e8609751e1a69fcfa9ab6d7be270c3c6`; Tier-2 Cycle `14/14`, `0` budget resets; preserving `D01-AUTH-HMAC`, `D02`, `D01-BUDGET-DISPATCH` `task_queue.py`, `D01-INTAKE-GIT`, and `D03` 100% byte-identical):
+
+| Workstream | Worker Commit | Worker Provenance (`gemini-4-hydrogen-medium`) | Defects Remediated |
+| :--- | :--- | :--- | :--- |
+| `d01-b-recovery14` | `35eacbd507788b022060bcdd901f7dd4d154c1e5` | session `879ef77a-daf3-4456-a597-a4c62b765a62` | Enforce symmetric `(clean_grant_id is not None) == existing.grant_approval_id_explicit` replay binding in both `reserve_repair()` and `reserve_attempt_budget()` (`repair_budget.py`) rejecting both implicit-to-explicit and explicit-to-implicit conflicts with zero ledger/counter mutation; add unit regression assertions (`test_d01_hmac_and_consistency.py`) |
+
+Verbatim JSON command receipts (`argv`, `cwd`, `exit_code`, `stdout`, `stdout_sha256` + `.sha256` sidecars) at `tested_source_sha_d_r15` (`35eacbd507788b022060bcdd901f7dd4d154c1e5`) under `H:/AIPC_Workspace/projects/AI_Project_Controller/runtime/audit/receipts/r15_verification/`:
+- `r15_d01_pytest_receipt.json` (`sha256: a4c54e326ee9d3817d3f5180582a285db66fd00c487ac853954b0aad795cd178`): Windows **61 passed, 0 skipped, 0 failed**; `--network none --read-only` Linux Docker **61 passed, 0 skipped, 0 failed** (per module: `test_d00_scope_bootstrap.py`=9, `test_d01_hmac_and_consistency.py`=35, `test_d01_intake_status_and_git_quiescence.py`=17).
+- `r15_d02_pytest_receipt.json` (`sha256: 74be85f5d32471dc69667f02331880c9efdd2e840b339e8372e4fc44b702e267`, byte-identical to `c1624e357a1bc3c8ecb89adfed59f16aed4386f8`): Windows **21 passed, 0 skipped, 0 failed**; `--network none --read-only` Linux Docker **21 passed, 0 skipped, 0 failed** (per module: `test_d02_multiproject_dashboard.py`=11, `test_dashboard.py`=10).
+- `r15_d03_pytest_receipt.json` (`sha256: 4d91c9c29a6369a6c3dd0d874b8ee63f2f94a05ea6c84b3197d5eb77062427b1`, `isolation_and_closeout.py` byte-identical to `e6ad749f32213d1feb6e0d8661fdc48841f830ba`, `test_d03_multiproject_e2e_and_closeout.py` byte-identical to `5c19b73733848b3d95a6e4c821fce24e661058b5`): Windows **11 passed, 0 skipped, 0 failed**; `--network none --read-only` Linux Docker **11 passed, 0 skipped, 0 failed**.
+- `r15_c567_compat_pytest_receipt.json` (`sha256: ec2653f2b50824265f6b51fde96c11272fc26e242dbb763b5a255cc1912b1fae`): Dedicated C.5/C.6/C.7 queue & budget compatibility suite — Windows **39 passed, 0 skipped, 0 failed**; `--network none --read-only` Linux Docker **39 passed, 0 skipped, 0 failed**.
+- `r15_linux_docker_suite_receipt.json` (`sha256: 231b8a6fda4281e56f798dd1694fa86052cca82ac34ba312c3d11557ce7cfd45`): Combined `--network none --read-only` Linux Docker (`aipc-cisl-verify:py313-v1`) **93 passed, 0 skipped, 0 failed** (`0` symlink skips).
+- `r15_full_windows_pytest_receipt.json` (`sha256: ae5e9f638fe0ae246abe4eae4e2f7c23da8d1670c7308180a7edb6aa8014bf78`): CI-equivalent + Milestone D full Windows suite **1,644 passed, 1 skipped** (POSIX process groups), **0 failed**.
+- `r15_c03_isolated_receipt.json` (`sha256: 7711297d916f7b308fa2a986d64adc29f88076992fd841852916945f1494bfdd`): Isolated C03 (`--noconftest -c NUL -o filterwarnings=default -p no:cacheprovider`) **1 passed, 0 skipped, 0 failed**.
+- `r15_static_and_wheel_receipt.json` (`sha256: ce60049c640120d5515f2bd2abf35a0ce4f6588fdf4c27c5347eef084acd45cf`): `ruff check src tests` (`0`), `ruff format --check src tests` (`339` files already formatted), `git diff --check` (`0`), `pip wheel` (`ai_project_controller-0.0.1-py3-none-any.whl`, `sha256: ca6dee9aabdd4f4c1826f116517b49a26f346e6305b3b3f54106c5e33bf7afd3`), `stable_c` (`6671f87c`, clean).
+- `r15_runtime_c_untouched_receipt.json` (`sha256: 98f74b787b70336e34ae97db2d7b5c6ff82ff3f436b7e0aaa78484f12657c26c`): `107,441` files match fresh `d00` metadata baseline (`3155d13a6bf65826f489f0638c0cc3ec43317f65eca3a4dc1b3c37d2754fb2d3`) AND cryptographically bind to verified `r3_runtime_c_untouched_receipt.json` (`sha256: 0d8114388548674d9aff5d96c7a79232312d0c0f737f48649c2ed22793d42d16`) and `d06_runtime_c_content_baseline.json` (`0e173de23dae45a0520a13aa65e0ecf59f1b8828600cb81bb19713fcca59e3f0`, `scandir_lstat_content_sha256`, `regular_file_read_errors: 0`).
+- `r15_commander_grant_hmac_verification_receipt.json` (`sha256: 5f244b1dbcdb0a6b48628e446cb22ee2e8609751e1a69fcfa9ab6d7be270c3c6`): `verify_approval_record_hmac` executed under `tools.sanitized_exec` against all Milestone D Commander grants (`d00` & `d05`..`d18`) with external operator key (`verified: true`, zero secret material).
+- `r15_cumulative_budget_accounting_receipt.json` (`sha256: ccbf740d2eccea8ae35d53d6c43a58d3dd022fc0a6fa5e8ec783cbac70fec603`): Cumulative Tier-1 & Tier-2 budget/attempt ledger summary from Cycle 0 through Cycle #14 (`budget_resets: 0`).
 
 ---
 
