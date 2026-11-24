@@ -3209,3 +3209,97 @@ def test_begin_dispatch_unbound_queue_with_d01_history_and_missing_sibling_ledge
             assert after_record.status == before_record.status
             assert after_record.current_attempt == before_record.current_attempt
             assert after_record.attempts == before_record.attempts
+
+
+def test_reserve_attempt_budget_conflicting_replay_rejected_and_identical_replay_idempotent(
+    tmp_path: Path,
+) -> None:
+    policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(tmp_path / "repair_budget_ledger.json", clock=_fixed_now)
+    ledger.initialize(
+        loaded_policy=policy,
+        registered_roots=["root-a", "root-b"],
+        child_to_root={"child-a": "root-a"},
+    )
+
+    reserved = ledger.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-replay-01",
+        attempt_id="att-replay-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-replay-01",
+        route="REVIEW_COORDINATOR",
+        target_paths=("src/a.py",),
+        loaded_policy=policy,
+    )
+    assert reserved.review_id == "rev-replay-01"
+    assert reserved.root_task == "root-a"
+
+    state_before = ledger.load(loaded_policy=policy)
+    assert state_before.milestone_consumed == 1
+    assert state_before.registered_roots["root-a"].consumed == 1
+    assert len(state_before.reservations) == 1
+
+    # (b) Exact identical replay (with whitespace padding) is idempotent without mutating state.
+    replayed = ledger.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="  op-replay-01  ",
+        attempt_id="  att-replay-01 ",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="  rev-replay-01 ",
+        route="REVIEW_COORDINATOR",
+        target_paths=("src/a.py",),
+        loaded_policy=policy,
+    )
+    assert replayed == reserved
+    state_after_replay = ledger.load(loaded_policy=policy)
+    assert state_after_replay.milestone_consumed == state_before.milestone_consumed
+    assert state_after_replay.registered_roots["root-a"].consumed == 1
+    assert len(state_after_replay.reservations) == 1
+    assert state_after_replay.state_digest == state_before.state_digest
+
+    # (c) Conflicting replays mutating any bound field must be rejected without mutating state.
+    conflicting_kwargs: list[dict[str, object]] = [
+        {"candidate_sha": "b" * 40},
+        {"attempt": 2},
+        {"review_id": "rev-replay-02"},
+        {"review_id": None},
+        {"route": "VERIFICATION_FAILURE"},
+        {"target_paths": ("src/b.py",)},
+        {"explicit_root_task": "root-b"},
+        {"task_id": "child-a"},
+        {"task_id": "root-b"},
+    ]
+    base_kwargs: dict[str, object] = {
+        "task_id": "root-a",
+        "operation_id": "op-replay-01",
+        "attempt_id": "att-replay-01",
+        "attempt": 1,
+        "candidate_sha": "a" * 40,
+        "review_id": "rev-replay-01",
+        "route": "REVIEW_COORDINATOR",
+        "target_paths": ("src/a.py",),
+        "loaded_policy": policy,
+    }
+    for override in conflicting_kwargs:
+        call_kwargs = {**base_kwargs, **override}
+        with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+            ledger.reserve_attempt_budget(**call_kwargs)  # type: ignore[arg-type]
+        state_after = ledger.load(loaded_policy=policy)
+        assert state_after.milestone_consumed == state_before.milestone_consumed
+        assert state_after.registered_roots["root-a"].consumed == 1
+        assert state_after.registered_roots["root-b"].consumed == 0
+        assert len(state_after.reservations) == 1
+        assert state_after.state_digest == state_before.state_digest
+
+    # (d) Blank review_id raises RepairBudgetError.
+    with pytest.raises(RepairBudgetError, match="review_id must be a non-blank string"):
+        ledger.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-replay-blank-rev",
+            attempt_id="att-replay-02",
+            review_id="   ",
+            loaded_policy=policy,
+        )
