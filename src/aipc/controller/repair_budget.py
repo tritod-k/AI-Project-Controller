@@ -1295,12 +1295,14 @@ class DurableRepairBudgetLedger:
             if existing_res_id is not None:
                 existing = state.reservations[existing_res_id]
                 grant_mismatch = (
+                    (clean_grant_id is not None) != existing.grant_approval_id_explicit
+                ) or (
                     clean_grant_id is not None
                     and (
                         existing.funding_source != "GRANT"
                         or existing.grant_approval_id != clean_grant_id
                     )
-                ) or (clean_grant_id is None and existing.grant_approval_id_explicit)
+                )
                 if (
                     existing.task_id != task_id
                     or existing.root_task != root_task
@@ -2027,12 +2029,14 @@ class DurableRepairBudgetLedger:
                     )
                 )
                 grant_mismatch = (
+                    (clean_grant_id is not None) != existing.grant_approval_id_explicit
+                ) or (
                     clean_grant_id is not None
                     and (
                         existing.funding_source != "GRANT"
                         or existing.grant_approval_id != clean_grant_id
                     )
-                ) or (clean_grant_id is None and existing.grant_approval_id_explicit)
+                )
                 if (
                     existing.event_id != event_id
                     or existing.task_id != task_id

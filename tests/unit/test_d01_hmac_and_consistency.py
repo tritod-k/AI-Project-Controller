@@ -3304,6 +3304,253 @@ def test_reserve_attempt_budget_conflicting_replay_rejected_and_identical_replay
             loaded_policy=policy,
         )
 
+    # (e) Symmetric grant_approval_id_explicit replay binding for reserve_repair & reserve_attempt.
+    target = ("src/aipc/controller/repair_budget.py",)
+
+    def _snap(
+        ldg: DurableRepairBudgetLedger,
+        pol: LoadedReviewGovernancePolicy,
+        ctx: PolicyTrustContext,
+    ) -> tuple[bytes, str, str | None, int, int, int | None, int | None]:
+        raw = ldg.path.read_bytes()
+        st = ldg.load(loaded_policy=pol, trust_context=ctx)
+        g1 = next(g for g in st.applied_grants if g.approval_id == "g1")
+        return (
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+            st.state_digest,
+            st.milestone_consumed,
+            st.registered_roots["root-a"].consumed,
+            g1.consumed_repairs,
+            g1.remaining_repairs,
+        )
+
+    # 1. reserve_repair(): implicit auto-selected GRANT and explicit GRANT.
+    ldg_r, pol_r, ctx_r, _ = _setup_replay_binding_env(tmp_path / "sym_repair")
+    ldg_r.reserve_repair(
+        loaded_policy=pol_r,
+        trust_context=ctx_r,
+        event_id="ev-exhaust-base",
+        task_id="root-a",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-exhaust-base",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    imp_r = ldg_r.reserve_repair(
+        loaded_policy=pol_r,
+        trust_context=ctx_r,
+        event_id="ev-imp-grant",
+        task_id="root-a",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-grant",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert imp_r.reservation is not None
+    assert imp_r.reservation.funding_source == "GRANT"
+    assert imp_r.reservation.grant_approval_id == "g1"
+    assert imp_r.reservation.grant_approval_id_explicit is False
+    snap_imp_r = _snap(ldg_r, pol_r, ctx_r)
+
+    imp_r_rep = ldg_r.reserve_repair(
+        loaded_policy=pol_r,
+        trust_context=ctx_r,
+        event_id="ev-imp-grant",
+        task_id="root-a",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-grant",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert imp_r_rep.idempotent_replay is True
+    assert imp_r_rep.reservation == imp_r.reservation
+    assert _snap(ldg_r, pol_r, ctx_r) == snap_imp_r
+
+    with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+        ldg_r.reserve_repair(
+            loaded_policy=pol_r,
+            trust_context=ctx_r,
+            event_id="ev-imp-grant",
+            task_id="root-a",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-imp-grant",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+            grant_approval_id="g1",
+        )
+    assert _snap(ldg_r, pol_r, ctx_r) == snap_imp_r
+
+    exp_r = ldg_r.reserve_repair(
+        loaded_policy=pol_r,
+        trust_context=ctx_r,
+        event_id="ev-exp-grant",
+        task_id="root-a",
+        attempt=3,
+        candidate_sha="a" * 40,
+        review_id="rev-exp-grant",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id="g1",
+    )
+    assert exp_r.reservation is not None
+    assert exp_r.reservation.funding_source == "GRANT"
+    assert exp_r.reservation.grant_approval_id == "g1"
+    assert exp_r.reservation.grant_approval_id_explicit is True
+    snap_exp_r = _snap(ldg_r, pol_r, ctx_r)
+
+    exp_r_rep = ldg_r.reserve_repair(
+        loaded_policy=pol_r,
+        trust_context=ctx_r,
+        event_id="ev-exp-grant",
+        task_id="root-a",
+        attempt=3,
+        candidate_sha="a" * 40,
+        review_id="rev-exp-grant",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id="g1",
+    )
+    assert exp_r_rep.idempotent_replay is True
+    assert exp_r_rep.reservation == exp_r.reservation
+    assert _snap(ldg_r, pol_r, ctx_r) == snap_exp_r
+
+    for bad_gid in (None, "g2"):
+        with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+            ldg_r.reserve_repair(
+                loaded_policy=pol_r,
+                trust_context=ctx_r,
+                event_id="ev-exp-grant",
+                task_id="root-a",
+                attempt=3,
+                candidate_sha="a" * 40,
+                review_id="rev-exp-grant",
+                route="REVIEW_COORDINATOR",
+                target_paths=target,
+                grant_approval_id=bad_gid,
+            )
+        assert _snap(ldg_r, pol_r, ctx_r) == snap_exp_r
+
+    # 2. reserve_attempt_budget(): implicit auto-selected GRANT and explicit GRANT.
+    ldg_a, pol_a, ctx_a, _ = _setup_replay_binding_env(tmp_path / "sym_attempt")
+    ldg_a.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-exhaust-base",
+        attempt_id="att-exhaust-base",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-exhaust-base",
+        target_paths=target,
+        loaded_policy=pol_a,
+        trust_context=ctx_a,
+        grant_approval_id=None,
+    )
+    imp_a = ldg_a.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-imp-grant",
+        attempt_id="att-imp-grant",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-grant",
+        target_paths=target,
+        loaded_policy=pol_a,
+        trust_context=ctx_a,
+        grant_approval_id=None,
+    )
+    assert imp_a.funding_source == "GRANT"
+    assert imp_a.grant_approval_id == "g1"
+    assert imp_a.grant_approval_id_explicit is False
+    snap_imp_a = _snap(ldg_a, pol_a, ctx_a)
+
+    assert (
+        ldg_a.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-imp-grant",
+            attempt_id="att-imp-grant",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-imp-grant",
+            target_paths=target,
+            loaded_policy=pol_a,
+            trust_context=ctx_a,
+            grant_approval_id=None,
+        )
+        == imp_a
+    )
+    assert _snap(ldg_a, pol_a, ctx_a) == snap_imp_a
+
+    with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+        ldg_a.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-imp-grant",
+            attempt_id="att-imp-grant",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-imp-grant",
+            target_paths=target,
+            loaded_policy=pol_a,
+            trust_context=ctx_a,
+            grant_approval_id="g1",
+        )
+    assert _snap(ldg_a, pol_a, ctx_a) == snap_imp_a
+
+    exp_a = ldg_a.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-exp-grant",
+        attempt_id="att-exp-grant",
+        attempt=3,
+        candidate_sha="a" * 40,
+        review_id="rev-exp-grant",
+        target_paths=target,
+        loaded_policy=pol_a,
+        trust_context=ctx_a,
+        grant_approval_id="g1",
+    )
+    assert exp_a.funding_source == "GRANT"
+    assert exp_a.grant_approval_id == "g1"
+    assert exp_a.grant_approval_id_explicit is True
+    snap_exp_a = _snap(ldg_a, pol_a, ctx_a)
+
+    assert (
+        ldg_a.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-exp-grant",
+            attempt_id="att-exp-grant",
+            attempt=3,
+            candidate_sha="a" * 40,
+            review_id="rev-exp-grant",
+            target_paths=target,
+            loaded_policy=pol_a,
+            trust_context=ctx_a,
+            grant_approval_id="g1",
+        )
+        == exp_a
+    )
+    assert _snap(ldg_a, pol_a, ctx_a) == snap_exp_a
+
+    for bad_gid in (None, "g2"):
+        with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+            ldg_a.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id="op-exp-grant",
+                attempt_id="att-exp-grant",
+                attempt=3,
+                candidate_sha="a" * 40,
+                review_id="rev-exp-grant",
+                target_paths=target,
+                loaded_policy=pol_a,
+                trust_context=ctx_a,
+                grant_approval_id=bad_gid,
+            )
+        assert _snap(ldg_a, pol_a, ctx_a) == snap_exp_a
+
 
 def _setup_replay_binding_env(
     tmp_path: Path,
