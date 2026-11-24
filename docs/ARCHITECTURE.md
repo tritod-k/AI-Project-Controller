@@ -341,9 +341,11 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   milestone `BASE`-funded vs. `GRANT`-funded consumption independently via `_milestone_base_consumed()`
   in `reserve_attempt_budget()` and `reserve_dispatch()`, validating full reservation-binding
   field parity (`root_task`, `attempt`, `candidate_sha`, normalized `review_id`, `route`,
-  `target_paths`, policy/grant binding) before accepting idempotent `RESERVED` replay in
-  `reserve_attempt_budget()`, strictly cross-checking `(reservation_id, operation_id)` pairs in
-  `release_attempt_budget()`, enforcing `^plan-v[0-9]{4,}$`
+  `target_paths`, symmetric `grant_approval_id` and policy binding, and non-released status)
+  before accepting idempotent replay in both `reserve_repair()` and `reserve_attempt_budget()`,
+  rejecting `RELEASED`/`INTERRUPTED` consumption in `consume_dispatch_reservation()`, strictly
+  cross-checking `(reservation_id, operation_id)` pairs in `release_attempt_budget()`,
+  enforcing `^plan-v[0-9]{4,}$`
   in `snapshot_approved_plan()`, passing explicit `build_sanitized_child_env(os.environ)` to
   Git subprocesses in `_run_git_nul_list()`, and requiring a non-blank `operation_id` and exact
   active `RESERVED` entry on all budget-backed, sibling-ledger, and active-D01-tracking
