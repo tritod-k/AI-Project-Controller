@@ -246,6 +246,7 @@ class BudgetReservationRecord(CanonicalRecord):
     attempt_id: Identifier | None = None
     funding_source: Literal["BASE", "GRANT"] | None = None
     grant_approval_id: NonBlank | None = None
+    grant_approval_id_explicit: StrictBool = False
     grant_sha256: Sha256Hex | None = None
     target_paths: tuple[NonBlank, ...] | None = None
     consumed_attempt_id: Identifier | None = None
@@ -268,6 +269,12 @@ class BudgetReservationRecord(CanonicalRecord):
             raise ValueError("GRANT-funded reservation requires grant_approval_id")
         if self.funding_source == "BASE" and self.grant_approval_id is not None:
             raise ValueError("BASE-funded reservation cannot reference grant_approval_id")
+        if self.grant_approval_id_explicit and (
+            self.funding_source != "GRANT" or self.grant_approval_id is None
+        ):
+            raise ValueError(
+                "grant_approval_id_explicit requires GRANT funding_source and grant_approval_id"
+            )
         _assert_no_secrets_local(self.model_dump(mode="json"))
         return self
 
@@ -498,7 +505,9 @@ _C6_ROOT_COUNTER_KEYS = frozenset(
         "worker_invocations_limit",
     }
 )
-_C6_RESERVATION_KEYS = frozenset({"bucket", "inner_pass_index", "dispatch_claim_id"})
+_C6_RESERVATION_KEYS = frozenset(
+    {"bucket", "inner_pass_index", "dispatch_claim_id", "grant_approval_id_explicit"}
+)
 
 
 def _is_pure_legacy_c5_ledger_dict(raw: Mapping[str, Any]) -> bool:
@@ -1093,7 +1102,7 @@ class DurableRepairBudgetLedger:
         reservation: BudgetReservationRecord,
         task_id: str,
         expected_root: str,
-        loaded_policy: LoadedReviewGovernancePolicy,
+        loaded_policy: LoadedReviewGovernancePolicy | None = None,
         now: datetime,
         norm_req_paths: tuple[str, ...] | None = None,
         for_consumption: bool = False,
@@ -1115,7 +1124,10 @@ class DurableRepairBudgetLedger:
             grant_rec.grant_sha256, reservation.grant_sha256
         ):
             raise RepairBudgetError(f"Reservation '{res_id}' grant digest mismatch")
-        if grant_rec.authorized_by != loaded_policy.authorized_by:
+        expected_owner = (
+            loaded_policy.authorized_by if loaded_policy is not None else state.authorized_by
+        )
+        if grant_rec.authorized_by != expected_owner:
             raise RepairBudgetError(
                 f"Grant '{grant_rec.approval_id}' owner mismatch at consumption"
                 if for_consumption
@@ -1264,6 +1276,11 @@ class DurableRepairBudgetLedger:
         grant_approval_id: str | None = None,
     ) -> BudgetReservationDecision:
         """Atomically check and reserve one code-repair slot, idempotent on exact replay."""
+        clean_grant_id: str | None = None
+        if grant_approval_id is not None:
+            if not isinstance(grant_approval_id, str) or not grant_approval_id.strip():
+                raise RepairBudgetError("grant_approval_id must be a non-blank string")
+            clean_grant_id = grant_approval_id.strip()
         norm_paths = _normalize_target_paths(target_paths)
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
@@ -1277,26 +1294,37 @@ class DurableRepairBudgetLedger:
             existing_res_id = state.event_to_reservation.get(event_id)
             if existing_res_id is not None:
                 existing = state.reservations[existing_res_id]
+                grant_mismatch = (
+                    clean_grant_id is not None
+                    and (
+                        existing.funding_source != "GRANT"
+                        or existing.grant_approval_id != clean_grant_id
+                    )
+                ) or (clean_grant_id is None and existing.grant_approval_id_explicit)
                 if (
                     existing.task_id != task_id
                     or existing.root_task != root_task
+                    or existing.milestone_id != state.milestone_id
                     or existing.attempt != attempt
                     or existing.candidate_sha != candidate_sha
                     or existing.review_id != review_id
                     or existing.route != route
+                    or existing.bucket != "OUTER_REPAIR"
+                    or existing.inner_pass_index != 0
                     or existing.target_paths != norm_paths
+                    or existing.approval_id != loaded_policy.approval_id
+                    or not hmac.compare_digest(existing.policy_sha256, loaded_policy.policy_sha256)
+                    or grant_mismatch
                 ):
                     raise RepairBudgetError(
                         f"Conflicting replay for repair event_id '{event_id}' rejected"
                     )
+                if existing.status in ("RELEASED", "INTERRUPTED"):
+                    raise RepairBudgetError(
+                        f"Repair event_id '{event_id}' reservation '{existing.reservation_id}' "
+                        f"already transitioned to '{existing.status}'"
+                    )
                 if existing.funding_source == "GRANT" or existing.grant_approval_id is not None:
-                    if (
-                        grant_approval_id is not None
-                        and grant_approval_id.strip() != existing.grant_approval_id
-                    ):
-                        raise RepairBudgetError(
-                            f"Conflicting replay for repair event_id '{event_id}' rejected"
-                        )
                     self._validate_bound_grant(
                         state,
                         reservation=existing,
@@ -1352,7 +1380,7 @@ class DurableRepairBudgetLedger:
 
             milestone_base_used = _milestone_base_consumed(state)
             if (
-                grant_approval_id is None
+                clean_grant_id is None
                 and base_used < counter.base_limit
                 and milestone_base_used < state.base_milestone_limit
             ):
@@ -1365,7 +1393,7 @@ class DurableRepairBudgetLedger:
                     task_id=task_id,
                     now=now,
                     target_paths=norm_paths,
-                    grant_approval_id=grant_approval_id,
+                    grant_approval_id=clean_grant_id,
                 )
                 if match is None:
                     return BudgetReservationDecision(
@@ -1411,6 +1439,7 @@ class DurableRepairBudgetLedger:
                 grant_approval_id=(
                     selected_grant.approval_id if selected_grant is not None else None
                 ),
+                grant_approval_id_explicit=(clean_grant_id is not None),
                 grant_sha256=(selected_grant.grant_sha256 if selected_grant is not None else None),
                 target_paths=norm_paths,
                 approval_id=loaded_policy.approval_id,
@@ -1565,6 +1594,11 @@ class DurableRepairBudgetLedger:
                 raise RepairBudgetError(
                     f"Repair reservation '{reservation_id}' already consumed; "
                     "replay dispatch rejected"
+                )
+            if res.status != "RESERVED":
+                raise RepairBudgetError(
+                    f"Cannot consume repair reservation '{reservation_id}' "
+                    f"from status '{res.status}'"
                 )
 
             consumed = res.model_copy(
@@ -1992,6 +2026,13 @@ class DurableRepairBudgetLedger:
                         loaded_policy.policy_sha256,
                     )
                 )
+                grant_mismatch = (
+                    clean_grant_id is not None
+                    and (
+                        existing.funding_source != "GRANT"
+                        or existing.grant_approval_id != clean_grant_id
+                    )
+                ) or (clean_grant_id is None and existing.grant_approval_id_explicit)
                 if (
                     existing.event_id != event_id
                     or existing.task_id != task_id
@@ -2006,16 +2047,14 @@ class DurableRepairBudgetLedger:
                     or existing.operation_id != clean_op
                     or existing.attempt_id != clean_att
                     or existing.target_paths != norm_paths
-                    or (clean_grant_id is not None and existing.grant_approval_id != clean_grant_id)
+                    or grant_mismatch
                     or policy_mismatch
                 ):
                     raise RepairBudgetError(
                         f"Conflicting replay for operation_id '{clean_op}' rejected"
                     )
                 if existing.status == "RESERVED":
-                    if loaded_policy is not None and (
-                        existing.funding_source == "GRANT" or existing.grant_approval_id is not None
-                    ):
+                    if existing.funding_source == "GRANT" or existing.grant_approval_id is not None:
                         self._validate_bound_grant(
                             state,
                             reservation=existing,
@@ -2108,6 +2147,7 @@ class DurableRepairBudgetLedger:
                 grant_approval_id=(
                     selected_grant.approval_id if selected_grant is not None else None
                 ),
+                grant_approval_id_explicit=(clean_grant_id is not None),
                 grant_sha256=(selected_grant.grant_sha256 if selected_grant is not None else None),
                 target_paths=norm_paths,
                 approval_id=(

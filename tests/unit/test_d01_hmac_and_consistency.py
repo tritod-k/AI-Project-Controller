@@ -3303,3 +3303,699 @@ def test_reserve_attempt_budget_conflicting_replay_rejected_and_identical_replay
             review_id="   ",
             loaded_policy=policy,
         )
+
+
+def _setup_replay_binding_env(
+    tmp_path: Path,
+) -> tuple[
+    DurableRepairBudgetLedger,
+    LoadedReviewGovernancePolicy,
+    PolicyTrustContext,
+    list[datetime],
+]:
+    ext_root = tmp_path / "external_runtime"
+    cand_root = tmp_path / "candidate_repo"
+    ext_root.mkdir(parents=True, exist_ok=True)
+    cand_root.mkdir(parents=True, exist_ok=True)
+
+    policy_payload = {
+        "policy_version": "1.0",
+        "policy_id": "pol-d01-test",
+        "operating_profile": "subscription_only",
+        "owner": "K.TRITOD",
+        "source_authority": "operator_owned_external_policy",
+        "review": {
+            "preserve_raw_review": True,
+            "preserve_canonical_verdict": True,
+            "require_exact_candidate_sha": True,
+            "default_independence": "prefer_cross_provider",
+            "require_objective_evidence_for_blockers": True,
+            "unsupported_or_unverifiable_critical_finding": "NEEDS_TRIAGE_HUMAN",
+            "advisory": {"auto_dispatch": False, "action": "AUDIT_BACKLOG_ONLY"},
+            "release_blocker": {
+                "allow_release": False,
+                "auto_dispatch_only_if_authorized_and_within_budget": True,
+            },
+            "needs_triage": {
+                "allow_release_if_credible_unresolved": False,
+                "action": "HUMAN_REVIEW_REQUIRED",
+            },
+        },
+        "repair_budget": {
+            "default_auto_code_repairs_per_task": 1,
+            "total_auto_code_repairs_per_milestone": 8,
+            "budget_exhausted_action": "HALT_ON_RETRY_EXHAUSTION",
+            "preserve_unresolved_blockers": True,
+            "counter_scope": "approved_milestone_and_root_task_lineage",
+            "persist_across_restarts": True,
+            "persist_across_provider_fallback": True,
+            "reject_counter_reset_by_task_splitting": True,
+            "extension": {
+                "human_commander_approval_required": True,
+                "requires_explicit_task_and_scope": True,
+                "requires_max_additional_attempts": True,
+                "auditable_and_expiring": True,
+            },
+        },
+        "change_scope": {
+            "cannot_expand_milestone_from_review": True,
+            "prohibit_speculative_security_hardening": True,
+            "no_second_phase_gate": True,
+            "no_auto_merge": True,
+            "no_auto_deploy": True,
+            "no_milestone_d": True,
+        },
+    }
+    policy_path = ext_root / "policy" / "policy.yaml"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_policy = yaml.safe_dump(policy_payload, sort_keys=False).encode("utf-8")
+    policy_path.write_bytes(raw_policy)
+    policy_sha = hashlib.sha256(raw_policy).hexdigest()
+
+    approval_path = ext_root / "approvals" / "approval.json"
+    evidence = MilestoneAuthorizationEvidence(
+        approval_id="appr-c5-01",
+        project_id="proj-d01",
+        milestone_id="milestone-c5",
+        decision="APPROVED",
+        authorized_by="K.TRITOD",
+        baseline_commit_sha=_MILESTONE_C5_BASELINE_SHA,
+        authorized_workstreams=("rg03",),
+    )
+    persist_milestone_authorization_evidence(approval_path, evidence)
+
+    trust_ctx = PolicyTrustContext(
+        policy_path=policy_path,
+        expected_sha256=policy_sha,
+        trusted_external_root=ext_root,
+        excluded_roots=(cand_root,),
+        approval_path=approval_path,
+        expected_approval_id="appr-c5-01",
+        expected_owner="K.TRITOD",
+        expected_project_id="proj-d01",
+        expected_milestone_id="milestone-c5",
+    )
+    loaded_policy = load_policy_trust_context(trust_ctx)
+
+    now_box = [_fixed_now()]
+    ledger = DurableRepairBudgetLedger(
+        ext_root / "repair_budget_ledger.json",
+        clock=lambda: now_box[0],
+    )
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["root-a"],
+        trust_context=trust_ctx,
+    )
+
+    contract = ApprovedTaskContract(
+        task_id="root-a",
+        phase_id="rg03",
+        milestone_id="milestone-c5",
+        title="D01 grant replay binding",
+        objective="Verify symmetric grant_approval_id replay binding.",
+        in_scope=("src/aipc/controller/",),
+        validation_commands=("pytest tests/unit/test_d01_hmac_and_consistency.py",),
+        approval_id="appr-c5-01",
+        approval_evidence_path=str(approval_path),
+    )
+    for grant_id in ("g1", "g2"):
+        grant_path = ext_root / "grants" / f"{grant_id}.json"
+        grant_path.parent.mkdir(parents=True, exist_ok=True)
+        grant_bytes = json.dumps(
+            {
+                "schema_version": "1.0",
+                "approval_id": grant_id,
+                "authorized_by": "K.TRITOD",
+                "decision": "APPROVED",
+                "milestone_id": "milestone-c5",
+                "root_task": "root-a",
+                "max_additional_repairs": 2,
+                "scope_paths": ["src/aipc/controller/"],
+                "issued_at": _fixed_now().isoformat(),
+                "expires_at": (_fixed_now() + timedelta(days=5)).isoformat(),
+                "single_use": True,
+                "counter_reset": False,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        grant_path.write_bytes(grant_bytes)
+        grant_sha = hashlib.sha256(grant_bytes).hexdigest()
+        ledger.apply_extension_grant(
+            trust_context=trust_ctx,
+            grant_path=grant_path,
+            contract=contract,
+            expected_grant_sha256=grant_sha,
+            loaded_policy=loaded_policy,
+        )
+
+    return ledger, loaded_policy, trust_ctx, now_box
+
+
+def test_reserve_repair_and_attempt_budget_grant_approval_id_replay_binding(
+    tmp_path: Path,
+) -> None:
+    ledger, policy, trust_ctx, _now = _setup_replay_binding_env(tmp_path)
+    target = ("src/aipc/controller/repair_budget.py",)
+
+    # Fresh blank grant_approval_id rejected for both reserve_repair and reserve_attempt_budget.
+    state_init = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="grant_approval_id must be a non-blank"):
+            ledger.reserve_repair(
+                loaded_policy=policy,
+                trust_context=trust_ctx,
+                event_id="ev-blank-fresh",
+                task_id="root-a",
+                attempt=1,
+                candidate_sha="a" * 40,
+                review_id="rev-blank-01",
+                route="REVIEW_COORDINATOR",
+                target_paths=target,
+                grant_approval_id=blank,
+            )
+        with pytest.raises(RepairBudgetError, match="grant_approval_id must be a non-blank"):
+            ledger.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id="op-blank-fresh",
+                attempt_id="att-blank-01",
+                target_paths=target,
+                loaded_policy=policy,
+                trust_context=trust_ctx,
+                grant_approval_id=blank,
+            )
+    assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
+        state_init.state_digest
+    )
+
+    # (a) BASE-funded reservation replayed with explicit grant_approval_id='g1' -> rejected.
+    base_res = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-base-01",
+        task_id="root-a",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-base-01",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert base_res.reservation is not None
+    assert base_res.reservation.funding_source == "BASE"
+    assert base_res.reservation.grant_approval_id_explicit is False
+    state_after_base = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+        ledger.reserve_repair(
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            event_id="ev-base-01",
+            task_id="root-a",
+            attempt=1,
+            candidate_sha="a" * 40,
+            review_id="rev-base-01",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+            grant_approval_id="g1",
+        )
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="grant_approval_id must be a non-blank"):
+            ledger.reserve_repair(
+                loaded_policy=policy,
+                trust_context=trust_ctx,
+                event_id="ev-base-01",
+                task_id="root-a",
+                attempt=1,
+                candidate_sha="a" * 40,
+                review_id="rev-base-01",
+                route="REVIEW_COORDINATOR",
+                target_paths=target,
+                grant_approval_id=blank,
+            )
+    assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
+        state_after_base.state_digest
+    )
+
+    # (c) Explicit GRANT reservation ('g1') replayed with None or 'g2' or blank -> rejected.
+    grant_res = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-grant-01",
+        task_id="root-a",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-grant-01",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id="g1",
+    )
+    assert grant_res.reservation is not None
+    assert grant_res.reservation.funding_source == "GRANT"
+    assert grant_res.reservation.grant_approval_id == "g1"
+    assert grant_res.reservation.grant_approval_id_explicit is True
+    state_after_grant = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    for bad_grant in (None, "g2"):
+        with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+            ledger.reserve_repair(
+                loaded_policy=policy,
+                trust_context=trust_ctx,
+                event_id="ev-grant-01",
+                task_id="root-a",
+                attempt=2,
+                candidate_sha="a" * 40,
+                review_id="rev-grant-01",
+                route="REVIEW_COORDINATOR",
+                target_paths=target,
+                grant_approval_id=bad_grant,
+            )
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="grant_approval_id must be a non-blank"):
+            ledger.reserve_repair(
+                loaded_policy=policy,
+                trust_context=trust_ctx,
+                event_id="ev-grant-01",
+                task_id="root-a",
+                attempt=2,
+                candidate_sha="a" * 40,
+                review_id="rev-grant-01",
+                route="REVIEW_COORDINATOR",
+                target_paths=target,
+                grant_approval_id=blank,
+            )
+    assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
+        state_after_grant.state_digest
+    )
+
+    # Same symmetric checks for reserve_attempt_budget (BASE -> 'g1', explicit GRANT -> None/'g2').
+    ledger2, policy2, trust_ctx2, _now2 = _setup_replay_binding_env(tmp_path / "attempt_case")
+    att_base = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-base-01",
+        attempt_id="att-base-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-att-base-01",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id=None,
+    )
+    assert att_base.funding_source == "BASE"
+    assert att_base.grant_approval_id_explicit is False
+    st2_base = ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2)
+
+    with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+        ledger2.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-base-01",
+            attempt_id="att-base-01",
+            attempt=1,
+            candidate_sha="a" * 40,
+            review_id="rev-att-base-01",
+            target_paths=target,
+            loaded_policy=policy2,
+            trust_context=trust_ctx2,
+            grant_approval_id="g1",
+        )
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="grant_approval_id must be a non-blank"):
+            ledger2.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id="op-base-01",
+                attempt_id="att-base-01",
+                attempt=1,
+                candidate_sha="a" * 40,
+                review_id="rev-att-base-01",
+                target_paths=target,
+                loaded_policy=policy2,
+                trust_context=trust_ctx2,
+                grant_approval_id=blank,
+            )
+    assert ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2).state_digest == (
+        st2_base.state_digest
+    )
+
+    att_grant = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-grant-01",
+        attempt_id="att-grant-01",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-att-grant-01",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id="g1",
+    )
+    assert att_grant.funding_source == "GRANT"
+    assert att_grant.grant_approval_id == "g1"
+    assert att_grant.grant_approval_id_explicit is True
+    st2_grant = ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2)
+
+    for bad_grant in (None, "g2"):
+        with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+            ledger2.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id="op-grant-01",
+                attempt_id="att-grant-01",
+                attempt=2,
+                candidate_sha="a" * 40,
+                review_id="rev-att-grant-01",
+                target_paths=target,
+                loaded_policy=policy2,
+                trust_context=trust_ctx2,
+                grant_approval_id=bad_grant,
+            )
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="grant_approval_id must be a non-blank"):
+            ledger2.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id="op-grant-01",
+                attempt_id="att-grant-01",
+                attempt=2,
+                candidate_sha="a" * 40,
+                review_id="rev-att-grant-01",
+                target_paths=target,
+                loaded_policy=policy2,
+                trust_context=trust_ctx2,
+                grant_approval_id=blank,
+            )
+    assert ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2).state_digest == (
+        st2_grant.state_digest
+    )
+
+
+def test_reserve_repair_and_attempt_budget_valid_replays_and_grant_expiry(
+    tmp_path: Path,
+) -> None:
+    ledger, policy, trust_ctx, now_box = _setup_replay_binding_env(tmp_path)
+    target = ("src/aipc/controller/repair_budget.py",)
+
+    # 1. BASE with None -> idempotent replay with None.
+    r_base = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-valid-base",
+        task_id="root-a",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-valid-base",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    st_after_base = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    r_base_rep = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-valid-base",
+        task_id="root-a",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-valid-base",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert r_base_rep.idempotent_replay is True
+    assert r_base_rep.reservation == r_base.reservation
+    assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
+        st_after_base.state_digest
+    )
+
+    # 2. Explicit GRANT with 'g1' -> idempotent replay with 'g1' and ' g1 '.
+    r_exp = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-valid-exp",
+        task_id="root-a",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-valid-exp",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id="g1",
+    )
+    st_after_exp = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    for gid in ("g1", " g1 "):
+        rep = ledger.reserve_repair(
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            event_id="ev-valid-exp",
+            task_id="root-a",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-valid-exp",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+            grant_approval_id=gid,
+        )
+        assert rep.idempotent_replay is True
+        assert rep.reservation == r_exp.reservation
+    assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
+        st_after_exp.state_digest
+    )
+
+    # 3. Auto-selected GRANT with None (base exhausted) -> idempotent replay with None.
+    r_auto = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-valid-auto",
+        task_id="root-a",
+        attempt=3,
+        candidate_sha="a" * 40,
+        review_id="rev-valid-auto",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert r_auto.reservation is not None
+    assert r_auto.reservation.funding_source == "GRANT"
+    assert r_auto.reservation.grant_approval_id_explicit is False
+    st_after_auto = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    r_auto_rep = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-valid-auto",
+        task_id="root-a",
+        attempt=3,
+        candidate_sha="a" * 40,
+        review_id="rev-valid-auto",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert r_auto_rep.idempotent_replay is True
+    assert r_auto_rep.reservation == r_auto.reservation
+    assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
+        st_after_auto.state_digest
+    )
+
+    # Expire grants -> both explicit and auto-selected grant replays fail closed.
+    now_box[0] = _fixed_now() + timedelta(days=10)
+    with pytest.raises(RepairBudgetError, match="expired"):
+        ledger.reserve_repair(
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            event_id="ev-valid-exp",
+            task_id="root-a",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-valid-exp",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+            grant_approval_id="g1",
+        )
+    with pytest.raises(RepairBudgetError, match="expired"):
+        ledger.reserve_repair(
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            event_id="ev-valid-auto",
+            task_id="root-a",
+            attempt=3,
+            candidate_sha="a" * 40,
+            review_id="rev-valid-auto",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+            grant_approval_id=None,
+        )
+
+    # Same valid replays and expiry (including loaded_policy=None) for reserve_attempt_budget.
+    ledger2, policy2, trust_ctx2, now_box2 = _setup_replay_binding_env(tmp_path / "attempt_valid")
+    a_base = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-v-base",
+        attempt_id="att-v-base",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-v-base",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id=None,
+    )
+    assert (
+        ledger2.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-v-base",
+            attempt_id="att-v-base",
+            attempt=1,
+            candidate_sha="a" * 40,
+            review_id="rev-v-base",
+            target_paths=target,
+            loaded_policy=policy2,
+            trust_context=trust_ctx2,
+            grant_approval_id=None,
+        )
+        == a_base
+    )
+
+    a_exp = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-v-exp",
+        attempt_id="att-v-exp",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-v-exp",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id="g1",
+    )
+    for gid in ("g1", " g1 "):
+        assert (
+            ledger2.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id="op-v-exp",
+                attempt_id="att-v-exp",
+                attempt=2,
+                candidate_sha="a" * 40,
+                review_id="rev-v-exp",
+                target_paths=target,
+                loaded_policy=policy2,
+                trust_context=trust_ctx2,
+                grant_approval_id=gid,
+            )
+            == a_exp
+        )
+
+    a_auto = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-v-auto",
+        attempt_id="att-v-auto",
+        attempt=3,
+        candidate_sha="a" * 40,
+        review_id="rev-v-auto",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id=None,
+    )
+    assert a_auto.funding_source == "GRANT"
+    assert a_auto.grant_approval_id_explicit is False
+    st2_before_exp = ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2)
+    assert (
+        ledger2.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-v-auto",
+            attempt_id="att-v-auto",
+            attempt=3,
+            candidate_sha="a" * 40,
+            review_id="rev-v-auto",
+            target_paths=target,
+            loaded_policy=None,
+            trust_context=trust_ctx2,
+            grant_approval_id=None,
+        )
+        == a_auto
+    )
+    assert ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2).state_digest == (
+        st2_before_exp.state_digest
+    )
+
+    now_box2[0] = _fixed_now() + timedelta(days=10)
+    with pytest.raises(RepairBudgetError, match="expired"):
+        ledger2.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-v-exp",
+            attempt_id="att-v-exp",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-v-exp",
+            target_paths=target,
+            loaded_policy=None,
+            trust_context=trust_ctx2,
+            grant_approval_id="g1",
+        )
+    with pytest.raises(RepairBudgetError, match="expired"):
+        ledger2.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-v-auto",
+            attempt_id="att-v-auto",
+            attempt=3,
+            candidate_sha="a" * 40,
+            review_id="rev-v-auto",
+            target_paths=target,
+            loaded_policy=None,
+            trust_context=trust_ctx2,
+            grant_approval_id=None,
+        )
+
+
+def test_released_reservation_replay_and_consume_rejected(tmp_path: Path) -> None:
+    ledger, policy, trust_ctx, _now = _setup_replay_binding_env(tmp_path)
+    target = ("src/aipc/controller/repair_budget.py",)
+
+    dec = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-rel-01",
+        task_id="root-a",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-rel-01",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+    )
+    assert dec.reservation is not None
+    res_id = dec.reservation.reservation_id
+
+    released = ledger.release_attempt_budget(
+        reservation_id=res_id,
+        reason="cancelled_before_dispatch",
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+    )
+    assert released.status == "RELEASED"
+    st_released = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    with pytest.raises(RepairBudgetError, match="already transitioned to 'RELEASED'"):
+        ledger.reserve_repair(
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            event_id="ev-rel-01",
+            task_id="root-a",
+            attempt=1,
+            candidate_sha="a" * 40,
+            review_id="rev-rel-01",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+        )
+    with pytest.raises(RepairBudgetError, match="Cannot consume repair reservation"):
+        ledger.consume_dispatch_reservation(
+            reservation_id=res_id,
+            task_id="root-a",
+            attempt=1,
+            attempt_id="att-rel-01",
+            worker_id="w-01",
+            provider="mock",
+            candidate_sha="a" * 40,
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            target_paths=target,
+        )
+    assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
+        st_released.state_digest
+    )
