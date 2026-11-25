@@ -347,7 +347,8 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   in both `reserve_repair()` and `reserve_attempt_budget()`, while enforcing symmetric
   non-blank identifier validation and `(reservation_id, operation_id)` / `attempt_id`
   pair cross-checks across `finalize_attempt_budget()`, `release_attempt_budget()`, and
-  `consume_dispatch_reservation()`,
+  `consume_dispatch_reservation()`. Finalization rejects explicit attempt IDs against unbound
+  legacy reservations. Controller-authorized dispatch recovery retains worker and provider failover,
   rejecting `RELEASED`/`INTERRUPTED` consumption in `consume_dispatch_reservation()`, strictly
   cross-checking `(reservation_id, operation_id)` pairs in `release_attempt_budget()`,
   enforcing `^plan-v[0-9]{4,}$`

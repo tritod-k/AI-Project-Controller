@@ -1,3 +1,31 @@
+# AIPC 2.0 Milestone D — Cycle #18 verification checkpoint
+
+Status AWAITING_REVIEW. Phase Gate PENDING. Tier-2 remediation cycle 17 under grant d21.
+
+Candidate branch `gemini/aipc-2.0-milestone-d` and tested source `65302634bc1cc7f01941097b9bcb840e4f2beb8d`. The preceding frozen checkpoint is `434ead09b004ff7b8b5cc59439b5fd191f4d8d51`.
+Stable Controller `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`. This documentation checkpoint is the input to exact-SHA CI and Codex review cycle 18.
+
+Gemini subscription Worker session `fe23b4cd-d957-4d29-8562-61f5073be692` authored the scoped repair. Independent Windows and read-only Docker checks verified the preserved patch under Commander-approved Path A. The original CISL precheck failure remains in the Worker receipt.
+The seven retained review locks and `.env.example` match their source baselines. Module proof SHA-256 `a6f2905d434de1d9ca5fafc8e3022385cc7b5480169df7cfa512dc4644ca791d`. Path A verification SHA-256 `d6b9d1948f648bea7552637f6477c0a3fed144edec6a64ef9a5548fab323e341`.
+
+## Verification receipts
+
+- `r18_d01_pytest_receipt.json` (97b7ff376345453f0debf0e93ec3523ba635fa1febcb091865214059d40c6c17). Windows 62 passed, 0 skipped, 0 failed. Linux Docker 62 passed, 0 skipped, 0 failed.
+- `r18_d02_pytest_receipt.json` (8614672ba9af0fe6ec1bcd31e6541b708d714e1e4f0e678f1d8c6eea30b0de8b). Windows 21 passed, 0 skipped, 0 failed. Linux Docker 21 passed, 0 skipped, 0 failed.
+- `r18_d03_pytest_receipt.json` (c3b6f829121186176fa7767f7cc4898482f27d97fb6334b7f38c5c27c1495a28). Windows 11 passed, 0 skipped, 0 failed. Linux Docker 11 passed, 0 skipped, 0 failed.
+- `r18_c567_compat_pytest_receipt.json` (2472af062282281fe4dbde3eff768c2c16174711a3ff9a64c8708b3b426aebf4). Windows 39 passed, 0 skipped, 0 failed. Linux Docker 39 passed, 0 skipped, 0 failed.
+- `r18_linux_docker_suite_receipt.json` (18e17c65071ef8ead0a2828a9df95b886d40bb59a73a41ae0e4686dabb948cb3). 94 passed, 0 skipped, 0 failed.
+- `r18_c03_isolated_receipt.json` (b2e884d2d77183bd33b1a08d229306276699398589bc70b7024dfcf22a88b6be). 1 passed, 0 skipped, 0 failed.
+- `r18_full_windows_pytest_receipt.json` (13e4dcabea91fb5103d3acfb2f88d361b7c77402093ee435f7cf7d16219e0c14). 1645 passed, 1 skipped, 0 failed.
+- `r18_static_and_wheel_receipt.json` (d6dc1786d47e37ce3bd540b8e72c7ca6883bb68c804a4bc94b41d22b98c4bdc8). Ruff lint, Ruff format, Git whitespace checks, and wheel build passed.
+- `r18_runtime_c_untouched_receipt.json` (bffeb2ab71d871d66924bf2cd2e4853e1a6c6a357e9d3eb62f7253662c6b8c32). Verified retained archive baseline for 107441 files.
+- `r18_commander_grant_hmac_verification_receipt.json` (3960109e4fdfa35111ae77c3246538c614bb6523a25a6c9dd8adad817839cd9c). 18 of 18 grant signatures and sidecars verified.
+- `r18_cumulative_budget_accounting_receipt.json` (aac01c11c71504c2af72c7529c896b9e87fc9536305a1f3a8d66928a02bd3229). Zero budget resets. The original Gemini dispatch and one CISL correction were reconciled using Path A.
+
+Next action is exact-SHA CI and independent review of this checkpoint.
+
+---
+
 # AIPC 2.0 Milestone D (`D01`–`D03`) — Tier-2 Remediation Cycle #16 (`d01-b-recovery16`) Freeze Checkpoint
 
 This section is the authoritative pre-review freeze checkpoint; older sections below are preserved historical records and do not override it.
