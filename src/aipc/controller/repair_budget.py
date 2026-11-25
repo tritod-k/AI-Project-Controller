@@ -1534,6 +1534,18 @@ class DurableRepairBudgetLedger:
             raise RepairBudgetError(
                 "Consuming a repair reservation requires controller loaded_policy and trust_context"
             )
+        if not isinstance(reservation_id, str) or not reservation_id.strip():
+            raise RepairBudgetError("reservation_id must be a non-blank string")
+        if not isinstance(attempt_id, str) or not attempt_id.strip():
+            raise RepairBudgetError("attempt_id must be a non-blank string")
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise RepairBudgetError("worker_id must be a non-blank string")
+        if not isinstance(provider, str) or not provider.strip():
+            raise RepairBudgetError("provider must be a non-blank string")
+        clean_res_id = reservation_id.strip()
+        clean_att_id = attempt_id.strip()
+        clean_worker_id = worker_id.strip()
+        clean_provider = provider.strip()
         norm_req_paths = _normalize_target_paths(target_paths)
         norm_contract_paths = _normalize_target_paths(contract_in_scope)
         if norm_req_paths is not None and norm_contract_paths is not None:
@@ -1552,31 +1564,31 @@ class DurableRepairBudgetLedger:
             ) != _normalize_milestone(expected_milestone_id):
                 raise RepairBudgetError("Ledger milestone_id mismatches queue milestone_id")
 
-            res = state.reservations.get(reservation_id)
+            res = state.reservations.get(clean_res_id)
             if res is None:
-                raise RepairBudgetError(f"Unknown or missing repair reservation '{reservation_id}'")
+                raise RepairBudgetError(f"Unknown or missing repair reservation '{clean_res_id}'")
             if _normalize_milestone(res.milestone_id) != _normalize_milestone(state.milestone_id):
-                raise RepairBudgetError(f"Repair reservation '{reservation_id}' milestone mismatch")
+                raise RepairBudgetError(f"Repair reservation '{clean_res_id}' milestone mismatch")
             if res.approval_id != loaded_policy.approval_id or not hmac.compare_digest(
                 res.policy_sha256, loaded_policy.policy_sha256
             ):
                 raise RepairBudgetError(
-                    f"Repair reservation '{reservation_id}' policy/approval binding mismatch"
+                    f"Repair reservation '{clean_res_id}' policy/approval binding mismatch"
                 )
             expected_root = self.resolve_root_task(state, task_id=task_id)
             if res.task_id != task_id or res.root_task != expected_root or res.attempt != attempt:
                 raise RepairBudgetError(
-                    f"Repair reservation '{reservation_id}' does not match "
+                    f"Repair reservation '{clean_res_id}' does not match "
                     f"task '{task_id}' attempt {attempt}"
                 )
             if candidate_sha is not None and res.candidate_sha != candidate_sha:
                 raise RepairBudgetError(
-                    f"Repair reservation '{reservation_id}' candidate SHA mismatch"
+                    f"Repair reservation '{clean_res_id}' candidate SHA mismatch"
                 )
             if res.target_paths is not None:
                 if effective_paths is None:
                     raise RepairBudgetError(
-                        f"Path-scoped reservation '{reservation_id}' requires target_paths "
+                        f"Path-scoped reservation '{clean_res_id}' requires target_paths "
                         "or contract_in_scope at dispatch"
                     )
                 allowed_res_paths = set(res.target_paths)
@@ -1589,7 +1601,7 @@ class DurableRepairBudgetLedger:
             if res.funding_source == "GRANT" or res.grant_approval_id is not None:
                 if effective_paths is None:
                     raise RepairBudgetError(
-                        f"Grant-funded reservation '{reservation_id}' requires target_paths "
+                        f"Grant-funded reservation '{clean_res_id}' requires target_paths "
                         "or contract_in_scope at dispatch"
                     )
                 self._validate_bound_grant(
@@ -1604,29 +1616,28 @@ class DurableRepairBudgetLedger:
                 )
 
             if res.status == "CONSUMED":
-                if allow_recovery_redispatch and res.consumed_attempt_id == attempt_id:
+                if allow_recovery_redispatch and res.consumed_attempt_id == clean_att_id:
                     return res
                 raise RepairBudgetError(
-                    f"Repair reservation '{reservation_id}' already consumed; "
+                    f"Repair reservation '{clean_res_id}' already consumed; "
                     "replay dispatch rejected"
                 )
             if res.status != "RESERVED":
                 raise RepairBudgetError(
-                    f"Cannot consume repair reservation '{reservation_id}' "
-                    f"from status '{res.status}'"
+                    f"Cannot consume repair reservation '{clean_res_id}' from status '{res.status}'"
                 )
 
             consumed = res.model_copy(
                 update={
                     "status": "CONSUMED",
-                    "consumed_attempt_id": attempt_id,
-                    "consumed_worker_id": worker_id,
-                    "consumed_provider": provider,
+                    "consumed_attempt_id": clean_att_id,
+                    "consumed_worker_id": clean_worker_id,
+                    "consumed_provider": clean_provider,
                     "consumed_at": now,
                 }
             )
             new_reservations = dict(state.reservations)
-            new_reservations[reservation_id] = consumed
+            new_reservations[clean_res_id] = consumed
             updated = _with_digest(
                 state.model_copy(update={"reservations": new_reservations, "updated_at": now})
             )
@@ -2237,38 +2248,65 @@ class DurableRepairBudgetLedger:
             raise RepairBudgetError(
                 "finalize_attempt_budget requires operation_id or reservation_id"
             )
+        clean_res_id: str | None = None
+        if reservation_id is not None:
+            if not isinstance(reservation_id, str) or not reservation_id.strip():
+                raise RepairBudgetError("reservation_id must be a non-blank string")
+            clean_res_id = reservation_id.strip()
+        clean_op: str | None = None
+        if operation_id is not None:
+            if not isinstance(operation_id, str) or not operation_id.strip():
+                raise RepairBudgetError("operation_id must be a non-blank string")
+            clean_op = operation_id.strip()
+        clean_att: str | None = None
+        if attempt_id is not None:
+            if not isinstance(attempt_id, str) or not attempt_id.strip():
+                raise RepairBudgetError("attempt_id must be a non-blank string")
+            clean_att = attempt_id.strip()
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise RepairBudgetError("worker_id must be a non-blank string")
+        clean_worker_id = worker_id.strip()
+        if not isinstance(provider, str) or not provider.strip():
+            raise RepairBudgetError("provider must be a non-blank string")
+        clean_provider = provider.strip()
+
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
             res: BudgetReservationRecord | None = None
-            if reservation_id is not None:
-                res = state.reservations.get(reservation_id)
-            elif operation_id is not None:
-                clean_op = operation_id.strip()
-                res = next(
-                    (r for r in state.reservations.values() if r.operation_id == clean_op),
-                    None,
-                )
+            if clean_res_id is not None and clean_op is not None:
+                res_by_id = state.reservations.get(clean_res_id)
+                res_by_op = [r for r in state.reservations.values() if r.operation_id == clean_op]
+                if (
+                    res_by_id is None
+                    or len(res_by_op) != 1
+                    or res_by_id.reservation_id != res_by_op[0].reservation_id
+                    or res_by_id.operation_id != clean_op
+                ):
+                    raise RepairBudgetError(
+                        "Mismatched or unknown reservation_id/operation_id pair "
+                        "in finalize_attempt_budget"
+                    )
+                res = res_by_id
+            elif clean_res_id is not None:
+                res = state.reservations.get(clean_res_id)
+            elif clean_op is not None:
+                res_by_op = [r for r in state.reservations.values() if r.operation_id == clean_op]
+                if len(res_by_op) == 1:
+                    res = res_by_op[0]
+                elif len(res_by_op) > 1:
+                    raise RepairBudgetError(
+                        f"Ambiguous multiple reservations for operation_id '{clean_op}'"
+                    )
             if res is None:
                 raise RepairBudgetError(
                     "Unknown or missing budget reservation for finalize_attempt_budget"
                 )
-            if (
-                operation_id is not None
-                and res.operation_id is not None
-                and res.operation_id != operation_id.strip()
-            ):
-                raise RepairBudgetError("operation_id mismatch finalizing budget reservation")
-            if (
-                attempt_id is not None
-                and res.attempt_id is not None
-                and res.attempt_id != attempt_id
-            ):
+            if clean_att is not None and res.attempt_id is not None and res.attempt_id != clean_att:
                 raise RepairBudgetError("attempt_id mismatch finalizing budget reservation")
             if res.status == "CONSUMED":
-                if (
-                    attempt_id is None
-                    or res.consumed_attempt_id == attempt_id
-                    or res.attempt_id == attempt_id
+                if clean_att is None or (
+                    res.consumed_attempt_id == clean_att
+                    and (res.attempt_id is None or res.attempt_id == clean_att)
                 ):
                     return res
                 raise RepairBudgetError(
@@ -2280,14 +2318,18 @@ class DurableRepairBudgetLedger:
                 )
 
             now = self._clock()
-            eff_attempt_id = attempt_id or res.attempt_id or f"att-{res.attempt:02d}-{res.task_id}"
+            eff_attempt_id = (
+                clean_att
+                if clean_att is not None
+                else (res.attempt_id or f"att-{res.attempt:02d}-{res.task_id}")
+            )
             consumed = res.model_copy(
                 update={
                     "status": "CONSUMED",
                     "attempt_id": eff_attempt_id,
                     "consumed_attempt_id": eff_attempt_id,
-                    "consumed_worker_id": worker_id,
-                    "consumed_provider": provider,
+                    "consumed_worker_id": clean_worker_id,
+                    "consumed_provider": clean_provider,
                     "consumed_at": now,
                 }
             )
