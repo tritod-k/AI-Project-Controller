@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 import tempfile
 import zipfile
@@ -42,6 +43,27 @@ _FORBIDDEN_MOUNT_FILENAMES: frozenset[str] = frozenset(
     }
 )
 _SHA256_CHUNK_BYTES = 65536
+_DOCKER_REGISTRY_RE = (
+    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*(?::[0-9]{1,5})?/)"
+)
+_DOCKER_REPO_SEG_RE = r"[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*"
+_DOCKER_NAME_RE = rf"(?:{_DOCKER_REGISTRY_RE})?{_DOCKER_REPO_SEG_RE}(?:/{_DOCKER_REPO_SEG_RE})*"
+_DOCKER_TAG_RE = r"(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})"
+_DOCKER_DIGEST_RE = r"(?:@sha256:[0-9a-f]{64})"
+_DOCKER_IMAGE_REF_RE = re.compile(rf"^{_DOCKER_NAME_RE}{_DOCKER_TAG_RE}?{_DOCKER_DIGEST_RE}?$")
+
+
+def _validate_docker_image_ref(image: str) -> str:
+    if not isinstance(image, str) or not image:
+        raise IsolationPolicyError("image must be a non-empty string")
+    if image.startswith("-"):
+        raise IsolationPolicyError(f"image cannot start with '-': {image!r}")
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in image):
+        raise IsolationPolicyError(f"image cannot contain whitespace or control chars: {image!r}")
+    if _DOCKER_IMAGE_REF_RE.fullmatch(image) is None:
+        raise IsolationPolicyError(f"Invalid Docker image reference: {image!r}")
+    return image
 
 
 class IsolationPolicyError(ValueError):
@@ -239,8 +261,7 @@ def build_minimal_docker_verify_argv(
     forbidden_mount_roots: Sequence[Path | str] = (),
 ) -> tuple[tuple[str, ...], IsolationLevelDisclosure]:
     """Build a fail-closed FINAL-05 minimal Docker verification argv and isolation disclosure."""
-    if not isinstance(image, str) or not image.strip() or "\x00" in image:
-        raise IsolationPolicyError("image must be a non-empty string")
+    validated_image = _validate_docker_image_ref(image)
     if network_mode != "none":
         raise IsolationPolicyError(f"FINAL-05 requires network_mode='none', got {network_mode!r}")
     if type(read_only_root) is not bool:
@@ -302,7 +323,7 @@ def build_minimal_docker_verify_argv(
     )
     if harness_resolved is not None:
         argv.extend(["-v", f"{harness_resolved}:/aipc_harness:ro"])
-    argv.extend(["-w", "/workspace", image.strip(), *cmd_parts])
+    argv.extend(["-w", "/workspace", validated_image, *cmd_parts])
 
     try:
         checked = assert_argv_no_credentials(argv)

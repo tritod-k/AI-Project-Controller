@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -733,60 +734,75 @@ def snapshot_approved_plan(
             f"Approved plan version already exists (immutable): {plan_version}"
         )
 
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".tmp-{plan_version}-", dir=str(approved_root)))
+    published = False
     try:
-        target_dir.mkdir(parents=False, exist_ok=False)
-    except FileExistsError as exc:
-        raise ProjectScaffoldingError(
-            f"Approved plan version already exists (immutable): {plan_version}"
-        ) from exc
-    except OSError as exc:
-        raise ProjectScaffoldingError(f"Cannot create plan directory: {target_dir}") from exc
+        staging_master_plan = staging_dir / "MASTER_PLAN.md"
+        master_plan_bytes = _write_text_atomic_guarded(
+            approved_root, staging_master_plan, plan_text, label="MASTER_PLAN.md"
+        )
+        master_plan_sha256 = hashlib.sha256(master_plan_bytes).hexdigest()
 
-    master_plan_path = target_dir / "MASTER_PLAN.md"
-    master_plan_bytes = _write_text_atomic_guarded(
-        approved_root, master_plan_path, plan_text, label="MASTER_PLAN.md"
-    )
-    master_plan_sha256 = hashlib.sha256(master_plan_bytes).hexdigest()
+        manifest_payload: dict[str, Any] = {
+            "schema_version": "1.0",
+            "project_id": clean_project_id,
+            "milestone_id": clean_milestone_id,
+            "plan_version": plan_version,
+            "approved_by": clean_approved_by,
+            "approved_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "master_plan_filename": "MASTER_PLAN.md",
+            "master_plan_sha256": master_plan_sha256,
+            "change_impact_source": change_impact_source,
+            "change_impact_sha256": change_impact_sha256,
+        }
+        try:
+            assert_no_secrets(manifest_payload)
+        except SecretExposureError as exc:
+            raise ProjectScaffoldingError("plan_manifest contains prohibited secret text") from exc
 
-    manifest_payload: dict[str, Any] = {
-        "schema_version": "1.0",
-        "project_id": clean_project_id,
-        "milestone_id": clean_milestone_id,
-        "plan_version": plan_version,
-        "approved_by": clean_approved_by,
-        "approved_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "master_plan_filename": "MASTER_PLAN.md",
-        "master_plan_sha256": master_plan_sha256,
-        "change_impact_source": change_impact_source,
-        "change_impact_sha256": change_impact_sha256,
-    }
-    try:
-        assert_no_secrets(manifest_payload)
-    except SecretExposureError as exc:
-        raise ProjectScaffoldingError("plan_manifest contains prohibited secret text") from exc
+        manifest_text = json.dumps(manifest_payload, indent=2, ensure_ascii=False, allow_nan=False)
+        manifest_text += "\n"
+        staging_manifest = staging_dir / "plan_manifest.json"
+        manifest_bytes = _write_text_atomic_guarded(
+            approved_root, staging_manifest, manifest_text, label="plan_manifest.json"
+        )
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
 
-    manifest_text = json.dumps(manifest_payload, indent=2, ensure_ascii=False, allow_nan=False)
-    manifest_text += "\n"
-    manifest_path = target_dir / "plan_manifest.json"
-    manifest_bytes = _write_text_atomic_guarded(
-        approved_root, manifest_path, manifest_text, label="plan_manifest.json"
-    )
-    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        staging_manifest_sha256 = staging_dir / "plan_manifest.json.sha256"
+        _write_text_atomic_guarded(
+            approved_root,
+            staging_manifest_sha256,
+            f"{manifest_sha256}  plan_manifest.json\n",
+            label="plan_manifest.json.sha256",
+        )
 
-    manifest_sha256_path = target_dir / "plan_manifest.json.sha256"
-    _write_text_atomic_guarded(
-        approved_root,
-        manifest_sha256_path,
-        f"{manifest_sha256}  plan_manifest.json\n",
-        label="plan_manifest.json.sha256",
-    )
+        if _assert_not_symlink_lstat(target_dir, label="plan_version_dir") is not None:
+            raise ProjectScaffoldingError(
+                f"Approved plan version already exists (immutable): {plan_version}"
+            )
+        try:
+            os.rename(staging_dir, target_dir)
+            published = True
+        except FileExistsError as exc:
+            raise ProjectScaffoldingError(
+                f"Approved plan version already exists (immutable): {plan_version}"
+            ) from exc
+        except OSError as exc:
+            if _assert_not_symlink_lstat(target_dir, label="plan_version_dir") is not None:
+                raise ProjectScaffoldingError(
+                    f"Approved plan version already exists (immutable): {plan_version}"
+                ) from exc
+            raise ProjectScaffoldingError(f"Cannot publish plan directory: {target_dir}") from exc
+    finally:
+        if not published:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     return ApprovedPlanSnapshot(
         plan_version=plan_version,
         plan_dir=target_dir,
-        master_plan_path=master_plan_path,
-        manifest_path=manifest_path,
-        manifest_sha256_path=manifest_sha256_path,
+        master_plan_path=target_dir / "MASTER_PLAN.md",
+        manifest_path=target_dir / "plan_manifest.json",
+        manifest_sha256_path=target_dir / "plan_manifest.json.sha256",
         master_plan_sha256=master_plan_sha256,
         manifest_sha256=manifest_sha256,
     )
@@ -909,6 +925,7 @@ def render_current_status_md(
         raise ProjectScaffoldingError(f"project_root must be an existing directory: {lexical_root}")
 
     validated_queue = _validate_template_file_path(Path(queue_path), label="queue_path")
+    authoritative_inputs: list[Path] = [validated_queue]
     queue_data = load_json(validated_queue)
     tasks = _extract_queue_tasks(queue_data)
 
@@ -941,6 +958,7 @@ def render_current_status_md(
         state_file = _validate_template_file_path(
             Path(project_state_path), label="project_state_path"
         )
+        authoritative_inputs.append(state_file)
         state_data = load_json(state_file)
         if isinstance(state_data, dict):
             lines.extend(["## Project State", ""])
@@ -969,6 +987,7 @@ def render_current_status_md(
         ledger_file = _validate_template_file_path(
             Path(budget_ledger_path), label="budget_ledger_path"
         )
+        authoritative_inputs.append(ledger_file)
         ledger_data = load_json(ledger_file)
         if isinstance(ledger_data, dict):
             lines.extend(["## Repair Budget", ""])
@@ -980,6 +999,7 @@ def render_current_status_md(
 
     if approvals_dir is not None:
         approval_files = _list_safe_json_files(Path(approvals_dir), label="approvals_dir")
+        authoritative_inputs.extend(approval_files)
         lines.extend(
             [
                 "## Approvals",
@@ -993,6 +1013,7 @@ def render_current_status_md(
 
     if receipts_dir is not None:
         receipt_files = _list_safe_json_files(Path(receipts_dir), label="receipts_dir")
+        authoritative_inputs.extend(receipt_files)
         lines.extend(
             [
                 "## Receipts",
@@ -1013,6 +1034,12 @@ def render_current_status_md(
         ) from exc
 
     target = lexical_root / "CURRENT_STATUS.md"
+    resolved_target = target.resolve()
+    for input_path in authoritative_inputs:
+        if input_path.resolve() == resolved_target:
+            raise ProjectScaffoldingError(
+                f"Refusing to overwrite authoritative JSON input at {target}"
+            )
     _write_text_atomic_guarded(lexical_root, target, rendered, label="CURRENT_STATUS.md")
     return target
 

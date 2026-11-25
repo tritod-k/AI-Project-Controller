@@ -955,3 +955,37 @@ def test_f_clean_git_checkout_restore_lf_and_quiescence(tmp_path: Path) -> None:
     assert b"\r\n" not in cloned_sha_file
     assert hashlib.sha256(cloned_receipt).hexdigest() == receipt_sha
     assert cloned_sha_file.decode("utf-8").split()[0] == receipt_sha
+
+
+def test_g_docker_verify_argv_rejects_option_shaped_or_invalid_image_refs(tmp_path: Path) -> None:
+    """(g) Strict Docker image reference validation rejects option injection and invalid refs."""
+    candidate = tmp_path / "candidate_wt"
+    candidate.mkdir(parents=True, exist_ok=True)
+
+    for bad_image in (
+        "--privileged",
+        "-v",
+        "--network=host",
+        "-e=FOO=BAR",
+        "img --privileged",
+        " aipc-cisl-verify:py313-v1",
+        "aipc-cisl-verify:py313-v1\n",
+        "img@sha256:" + "a" * 63,
+    ):
+        with pytest.raises(IsolationPolicyError):
+            build_minimal_docker_verify_argv(
+                image=bad_image,
+                candidate_worktree=candidate,
+                command=["pytest", "-q"],
+            )
+
+    for valid_image in (
+        "aipc-cisl-verify:py313-v1",
+        "ghcr.io/org/img:v1.0@sha256:" + "a" * 64,
+    ):
+        argv, _disclosure = build_minimal_docker_verify_argv(
+            image=valid_image,
+            candidate_worktree=candidate,
+            command=["pytest", "-q"],
+        )
+        assert valid_image in argv

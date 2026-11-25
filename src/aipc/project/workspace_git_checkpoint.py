@@ -310,6 +310,58 @@ def _add_range_boundaries(boundaries: set[int], lo_ch: str, hi_ch: str) -> None:
             boundaries.add(max(0, min(member + 1, 0x110000)))
 
 
+def _scan_bracket_expression_end(pat: str, open_idx: int) -> tuple[int, bool] | None:
+    """Return (closing_idx, has_posix_class) for a '[...]' starting at open_idx."""
+    n = len(pat)
+    j = open_idx + 1
+    if j < n and pat[j] in ("!", "^"):
+        j += 1
+    if j < n and pat[j] == "]":
+        j += 1
+    has_posix = False
+    while j < n:
+        if pat[j] == "\\" and j + 1 < n:
+            j += 2
+        elif pat[j] == "[" and j + 1 < n and pat[j + 1] in (":", ".", "="):
+            marker = pat[j + 1]
+            m = j + 2
+            while m + 1 < n:
+                if pat[m] == marker and pat[m + 1] == "]":
+                    has_posix = True
+                    j = m + 2
+                    break
+                m += 1
+            else:
+                j += 1
+        elif pat[j] == "]":
+            return j, has_posix
+        else:
+            j += 1
+    return None
+
+
+def _contains_posix_bracket_class(pat: str) -> bool:
+    """Return True if pat contains a Git POSIX bracket expression ([:...:], [....], [=...=])."""
+    i = 0
+    n = len(pat)
+    while i < n:
+        ch = pat[i]
+        if ch == "\\":
+            i += 2 if i + 1 < n else 1
+        elif ch == "[":
+            scanned = _scan_bracket_expression_end(pat, i)
+            if scanned is None:
+                i += 1
+            else:
+                close_idx, has_posix = scanned
+                if has_posix:
+                    return True
+                i = close_idx + 1
+        else:
+            i += 1
+    return False
+
+
 def _collect_pattern_boundaries(pat: str) -> set[int]:
     boundaries: set[int] = set()
     i = 0
@@ -327,21 +379,18 @@ def _collect_pattern_boundaries(pat: str) -> set[int]:
                 i += 1
             _add_char_boundaries(boundaries, lit)
         elif ch == "[":
-            j = i + 1
-            if j < n and pat[j] in ("!", "^"):
-                j += 1
-            content_start = j
-            if j < n and pat[j] == "]":
-                j += 1
-            while j < n and pat[j] != "]":
-                if pat[j] == "\\" and j + 1 < n:
-                    j += 2
-                else:
-                    j += 1
-            if j >= n:
+            scanned = _scan_bracket_expression_end(pat, i)
+            if scanned is None:
                 _add_char_boundaries(boundaries, "[")
                 i += 1
                 continue
+            j, has_posix = scanned
+            if has_posix:
+                i = j + 1
+                continue
+            content_start = i + 1
+            if content_start < j and pat[content_start] in ("!", "^"):
+                content_start += 1
             k = content_start
             while k < j:
                 lo_ch, next_k = _read_class_char(pat, k, j)
@@ -407,24 +456,22 @@ def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str
             matched = frozenset(a for a in alphabet if _char_matches_literal(a, lit))
             tokens.append(("char", matched))
         elif ch == "[":
-            j = i + 1
-            negated = False
-            if j < n and pat[j] in ("!", "^"):
-                negated = True
-                j += 1
-            content_start = j
-            if j < n and pat[j] == "]":
-                j += 1
-            while j < n and pat[j] != "]":
-                if pat[j] == "\\" and j + 1 < n:
-                    j += 2
-                else:
-                    j += 1
-            if j >= n:
+            scanned = _scan_bracket_expression_end(pat, i)
+            if scanned is None:
                 matched = frozenset(a for a in alphabet if _char_matches_literal(a, "["))
                 tokens.append(("char", matched))
                 i += 1
                 continue
+            j, has_posix = scanned
+            if has_posix:
+                tokens.append(("char", alphabet))
+                i = j + 1
+                continue
+            negated = False
+            content_start = i + 1
+            if content_start < j and pat[content_start] in ("!", "^"):
+                negated = True
+                content_start += 1
             class_chars: set[str] = set()
             k = content_start
             while k < j:
@@ -475,6 +522,8 @@ def _deduplicate_token_alphabet(
 
 
 def _segment_globs_intersect(pat_a: str, pat_b: str) -> bool:
+    if _contains_posix_bracket_class(pat_a) or _contains_posix_bracket_class(pat_b):
+        return True
     alphabet = _build_comparison_alphabet(pat_a, pat_b)
     tokens_a = _tokenize_segment_glob(pat_a, alphabet)
     tokens_b = _tokenize_segment_glob(pat_b, alphabet)

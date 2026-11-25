@@ -1430,6 +1430,38 @@ class DurableRepairBudgetLedger:
                         ),
                     )
                 selected_idx, selected_grant = match
+                remaining_root_base = sum(
+                    max(
+                        0,
+                        rc.base_limit
+                        - (rc.base_consumed if rc.base_consumed is not None else rc.consumed),
+                    )
+                    for rc in state.registered_roots.values()
+                )
+                reserved_milestone_base = min(
+                    max(0, state.base_milestone_limit - milestone_base_used),
+                    remaining_root_base,
+                )
+                remaining_milestone_capacity = state.milestone_limit - state.milestone_consumed
+                if remaining_milestone_capacity <= reserved_milestone_base:
+                    return BudgetReservationDecision(
+                        allowed=False,
+                        action="HALT_ON_RETRY_EXHAUSTION",
+                        root_task=root_task,
+                        task_id=task_id,
+                        reservation=None,
+                        root_consumed=counter.consumed,
+                        root_limit=counter.effective_limit,
+                        milestone_consumed=state.milestone_consumed,
+                        milestone_limit=state.milestone_limit,
+                        reason=(
+                            f"Grant-funded reservation for root '{root_task}' rejected: "
+                            f"remaining milestone capacity ({remaining_milestone_capacity}) "
+                            f"cannot displace reserved milestone base capacity "
+                            f"({reserved_milestone_base}); "
+                            "HALT_ON_RETRY_EXHAUSTION / HUMAN_REVIEW_REQUIRED."
+                        ),
+                    )
                 funding_source = "GRANT"
                 new_base_consumed = base_used
                 if not norm_paths:
@@ -2155,6 +2187,26 @@ class DurableRepairBudgetLedger:
                         "no eligible active extension grant is available"
                     )
                 selected_idx, selected_grant = match
+                remaining_root_base = sum(
+                    max(
+                        0,
+                        rc.base_limit
+                        - (rc.base_consumed if rc.base_consumed is not None else rc.consumed),
+                    )
+                    for rc in state.registered_roots.values()
+                )
+                reserved_milestone_base = min(
+                    max(0, state.base_milestone_limit - milestone_base_used),
+                    remaining_root_base,
+                )
+                remaining_milestone_capacity = state.milestone_limit - state.milestone_consumed
+                if remaining_milestone_capacity <= reserved_milestone_base:
+                    raise RepairBudgetError(
+                        f"Grant-funded attempt reservation for root '{root_task}' rejected: "
+                        f"remaining milestone capacity ({remaining_milestone_capacity}) "
+                        f"cannot displace reserved milestone base capacity "
+                        f"({reserved_milestone_base})"
+                    )
                 if not norm_paths:
                     raise RepairBudgetError(
                         "Grant-funded attempt reservation requires non-empty target_paths"

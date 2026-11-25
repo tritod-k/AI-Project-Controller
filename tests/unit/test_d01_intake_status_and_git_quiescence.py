@@ -1082,3 +1082,128 @@ def test_git_quiescence_direct_call_strips_prohibited_mixed_case_env_vars(
     assert blocked_report.passed is False
     assert blocked_report.checks["git_index_clean"] is False
     assert len(captured_calls) == calls_before_fail
+
+
+def test_verify_workspace_git_quiescence_posix_bracket_class_negation_fails_closed(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git executable not available")
+
+    ws = _setup_quiescent_workspace(tmp_path / "ws_posix_neg")
+    base_rules = "stable_c/\n**/runtime/worktrees/\n**/runtime/logs/\n**/*.lock\n*.key\n.env*\n"
+    neg_line = "![[:lower:]]*.lock"
+    (ws / ".gitignore").write_text(
+        f"{base_rules}{neg_line}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    subprocess.run(["git", "init"], cwd=ws, check=True, capture_output=True)
+    check_ignore_v = subprocess.run(
+        ["git", "check-ignore", "-v", "controller.lock"],
+        cwd=ws,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert check_ignore_v.returncode == 0
+    assert f":{neg_line}\t" in check_ignore_v.stdout
+
+    check_ignore = subprocess.run(
+        ["git", "check-ignore", "controller.lock"],
+        cwd=ws,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert check_ignore.returncode == 1
+
+    assert _segment_globs_intersect("[[:lower:]]*.lock", "*.lock") is True
+    rep = verify_workspace_git_quiescence(ws)
+    assert rep.passed is False
+    assert rep.checks["git_hygiene"] is False
+    assert any(neg_line in v for v in rep.violations)
+
+
+def test_snapshot_approved_plan_staging_rollback_and_immutability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, runtime_root = _init_project(tmp_path, "proj-snap-stage")
+    plan_src = tmp_path / "source_plan.md"
+    plan_src.write_text("# Approved Plan\n\nStep 1.\n", encoding="utf-8", newline="\n")
+
+    import aipc.project.scaffolding as scaffolding_mod
+
+    orig_write = scaffolding_mod._write_text_atomic_guarded
+    call_count = 0
+
+    def _fail_on_manifest(
+        root: Path,
+        target: Path,
+        text: str,
+        *,
+        label: str,
+    ) -> bytes:
+        nonlocal call_count
+        call_count += 1
+        if label == "plan_manifest.json":
+            raise ProjectScaffoldingError("simulated write failure during staging")
+        return orig_write(root, target, text, label=label)
+
+    monkeypatch.setattr(scaffolding_mod, "_write_text_atomic_guarded", _fail_on_manifest)
+
+    with pytest.raises(ProjectScaffoldingError, match="simulated write failure"):
+        snapshot_approved_plan(
+            runtime_root,
+            plan_version="plan-v0001",
+            source_plan_path=plan_src,
+            approved_by="K.TRITOD",
+            project_id="proj-snap-stage",
+            milestone_id="phase-24",
+        )
+
+    approved_root = runtime_root / "plans" / "approved"
+    assert not (approved_root / "plan-v0001").exists()
+    assert list(approved_root.iterdir()) == []
+
+    monkeypatch.setattr(scaffolding_mod, "_write_text_atomic_guarded", orig_write)
+    snap = snapshot_approved_plan(
+        runtime_root,
+        plan_version="plan-v0001",
+        source_plan_path=plan_src,
+        approved_by="K.TRITOD",
+        project_id="proj-snap-stage",
+        milestone_id="phase-24",
+    )
+    assert snap.plan_dir.is_dir()
+    assert snap.master_plan_path.is_file()
+    assert snap.manifest_path.is_file()
+    assert snap.manifest_sha256_path.is_file()
+    original_manifest_bytes = snap.manifest_path.read_bytes()
+
+    with pytest.raises(ProjectScaffoldingError, match="already exists"):
+        snapshot_approved_plan(
+            runtime_root,
+            plan_version="plan-v0001",
+            source_plan_path=plan_src,
+            approved_by="K.TRITOD",
+            project_id="proj-snap-stage",
+            milestone_id="phase-24",
+        )
+    assert snap.manifest_path.read_bytes() == original_manifest_bytes
+
+
+def test_render_current_status_md_refuses_to_overwrite_authoritative_json_input(
+    tmp_path: Path,
+) -> None:
+    _, project_root, _ = _init_project(tmp_path, "proj-status-guard")
+    queue_file = project_root / "CURRENT_STATUS.md"
+    original_bytes = b'{"tasks": [{"task_id": "t-01", "status": "ELIGIBLE"}]}\n'
+    queue_file.write_bytes(original_bytes)
+
+    with pytest.raises(ProjectScaffoldingError, match="authoritative JSON input"):
+        render_current_status_md(project_root, queue_path=queue_file)
+
+    assert queue_file.read_bytes() == original_bytes

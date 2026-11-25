@@ -4745,3 +4745,274 @@ def test_released_attempt_budget_reservation_replay_and_consume_rejected(tmp_pat
     assert st_after_consume.state_digest == st_released.state_digest
     assert st_after_consume.milestone_consumed == st_released.milestone_consumed
     assert st_after_consume.registered_roots == st_released.registered_roots
+
+
+def test_grant_reservation_cannot_displace_available_milestone_base_capacity(
+    tmp_path: Path,
+) -> None:
+    def _init_two_root_env(
+        base_dir: Path,
+    ) -> tuple[DurableRepairBudgetLedger, LoadedReviewGovernancePolicy, PolicyTrustContext]:
+        ext_root = base_dir / "external"
+        cand_root = base_dir / "candidate"
+        ext_root.mkdir(parents=True, exist_ok=True)
+        cand_root.mkdir(parents=True, exist_ok=True)
+
+        policy_payload = {
+            "policy_version": "1.0",
+            "policy_id": "pol-c5-base-protect",
+            "operating_profile": "subscription_only",
+            "owner": "K.TRITOD",
+            "source_authority": "operator_owned_external_policy",
+            "review": {
+                "preserve_raw_review": True,
+                "preserve_canonical_verdict": True,
+                "require_exact_candidate_sha": True,
+                "default_independence": "prefer_cross_provider",
+                "require_objective_evidence_for_blockers": True,
+                "unsupported_or_unverifiable_critical_finding": "NEEDS_TRIAGE_HUMAN",
+                "advisory": {"auto_dispatch": False, "action": "AUDIT_BACKLOG_ONLY"},
+                "release_blocker": {
+                    "allow_release": False,
+                    "auto_dispatch_only_if_authorized_and_within_budget": True,
+                },
+                "needs_triage": {
+                    "allow_release_if_credible_unresolved": False,
+                    "action": "HUMAN_REVIEW_REQUIRED",
+                },
+            },
+            "repair_budget": {
+                "default_auto_code_repairs_per_task": 2,
+                "total_auto_code_repairs_per_milestone": 4,
+                "budget_exhausted_action": "HALT_ON_RETRY_EXHAUSTION",
+                "preserve_unresolved_blockers": True,
+                "counter_scope": "approved_milestone_and_root_task_lineage",
+                "persist_across_restarts": True,
+                "persist_across_provider_fallback": True,
+                "reject_counter_reset_by_task_splitting": True,
+                "extension": {
+                    "human_commander_approval_required": True,
+                    "requires_explicit_task_and_scope": True,
+                    "requires_max_additional_attempts": True,
+                    "auditable_and_expiring": True,
+                },
+            },
+            "change_scope": {
+                "cannot_expand_milestone_from_review": True,
+                "prohibit_speculative_security_hardening": True,
+                "no_second_phase_gate": True,
+                "no_auto_merge": True,
+                "no_auto_deploy": True,
+                "no_milestone_d": True,
+            },
+        }
+        policy_path = ext_root / "policy" / "policy.yaml"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_policy = yaml.safe_dump(policy_payload, sort_keys=False).encode("utf-8")
+        policy_path.write_bytes(raw_policy)
+        policy_sha = hashlib.sha256(raw_policy).hexdigest()
+
+        approval_path = ext_root / "approvals" / "approval.json"
+        evidence = MilestoneAuthorizationEvidence(
+            approval_id="appr-c5-01",
+            project_id="proj-d01",
+            milestone_id="milestone-c5",
+            decision="APPROVED",
+            authorized_by="K.TRITOD",
+            baseline_commit_sha=_MILESTONE_C5_BASELINE_SHA,
+            authorized_workstreams=("rg03",),
+        )
+        persist_milestone_authorization_evidence(approval_path, evidence)
+
+        trust_ctx = PolicyTrustContext(
+            policy_path=policy_path,
+            expected_sha256=policy_sha,
+            trusted_external_root=ext_root,
+            excluded_roots=(cand_root,),
+            approval_path=approval_path,
+            expected_approval_id="appr-c5-01",
+            expected_owner="K.TRITOD",
+            expected_project_id="proj-d01",
+            expected_milestone_id="milestone-c5",
+        )
+        loaded_policy = load_policy_trust_context(trust_ctx)
+
+        ledger = DurableRepairBudgetLedger(
+            ext_root / "repair_budget_ledger.json",
+            clock=_fixed_now,
+        )
+        ledger.initialize(
+            loaded_policy=loaded_policy,
+            registered_roots=["root-a", "root-b"],
+            trust_context=trust_ctx,
+        )
+
+        contract = ApprovedTaskContract(
+            task_id="root-a",
+            phase_id="rg03",
+            milestone_id="milestone-c5",
+            title="Protect milestone base capacity",
+            objective="Ensure GRANT cannot displace available milestone BASE slots.",
+            in_scope=("src/aipc/controller/",),
+            validation_commands=("pytest tests/unit/test_d01_hmac_and_consistency.py",),
+            approval_id="appr-c5-01",
+            approval_evidence_path=str(approval_path),
+        )
+        grant_path = ext_root / "grants" / "grant-a.json"
+        grant_path.parent.mkdir(parents=True, exist_ok=True)
+        grant_bytes = json.dumps(
+            {
+                "schema_version": "1.0",
+                "approval_id": "grant-a",
+                "authorized_by": "K.TRITOD",
+                "decision": "APPROVED",
+                "milestone_id": "milestone-c5",
+                "root_task": "root-a",
+                "max_additional_repairs": 1,
+                "milestone_repair_limit": 4,
+                "scope_paths": ["src/aipc/controller/"],
+                "issued_at": _fixed_now().isoformat(),
+                "expires_at": (_fixed_now() + timedelta(days=5)).isoformat(),
+                "single_use": True,
+                "counter_reset": False,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        grant_path.write_bytes(grant_bytes)
+        grant_sha = hashlib.sha256(grant_bytes).hexdigest()
+        ledger.apply_extension_grant(
+            trust_context=trust_ctx,
+            grant_path=grant_path,
+            contract=contract,
+            expected_grant_sha256=grant_sha,
+            loaded_policy=loaded_policy,
+        )
+        return ledger, loaded_policy, trust_ctx
+
+    target = ("src/aipc/controller/repair_budget.py",)
+
+    # 1. Verify reserve_repair() rejects GRANT displacement without mutating ledger;
+    #    then root-b uses BASE.
+    ledger_r, policy_r, trust_r = _init_two_root_env(tmp_path / "repair_path")
+    for idx in (1, 2):
+        dec = ledger_r.reserve_repair(
+            loaded_policy=policy_r,
+            trust_context=trust_r,
+            event_id=f"ev-a-base-{idx}",
+            task_id="root-a",
+            attempt=idx,
+            candidate_sha="a" * 40,
+            review_id=f"rev-a-{idx}",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+        )
+        assert dec.allowed is True
+        assert dec.reservation is not None
+        assert dec.reservation.funding_source == "BASE"
+
+    raw_before_r = ledger_r.path.read_bytes()
+    st_before_r = ledger_r.load(loaded_policy=policy_r, trust_context=trust_r)
+    assert st_before_r.base_milestone_limit == 4
+    assert st_before_r.milestone_limit == 4
+    assert st_before_r.milestone_consumed == 2
+    assert _milestone_base_consumed(st_before_r) == 2
+
+    for gid in (None, "grant-a"):
+        halt_dec = ledger_r.reserve_repair(
+            loaded_policy=policy_r,
+            trust_context=trust_r,
+            event_id=f"ev-a-grant-{gid or 'auto'}",
+            task_id="root-a",
+            attempt=3,
+            candidate_sha="a" * 40,
+            review_id="rev-a-3",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+            grant_approval_id=gid,
+        )
+        assert halt_dec.allowed is False
+        assert halt_dec.action == "HALT_ON_RETRY_EXHAUSTION"
+        assert halt_dec.reservation is None
+        assert ledger_r.path.read_bytes() == raw_before_r
+        st_after_r = ledger_r.load(loaded_policy=policy_r, trust_context=trust_r)
+        assert st_after_r.state_digest == st_before_r.state_digest
+        assert st_after_r.milestone_consumed == 2
+        assert st_after_r.registered_roots == st_before_r.registered_roots
+        assert st_after_r.applied_grants == st_before_r.applied_grants
+
+    for idx in (1, 2):
+        dec_b = ledger_r.reserve_repair(
+            loaded_policy=policy_r,
+            trust_context=trust_r,
+            event_id=f"ev-b-base-{idx}",
+            task_id="root-b",
+            attempt=idx,
+            candidate_sha="b" * 40,
+            review_id=f"rev-b-{idx}",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+        )
+        assert dec_b.allowed is True
+        assert dec_b.reservation is not None
+        assert dec_b.reservation.funding_source == "BASE"
+
+    # 2. Verify reserve_attempt_budget() rejects GRANT displacement without mutating ledger;
+    #    then root-b uses BASE.
+    ledger_a, policy_a, trust_a = _init_two_root_env(tmp_path / "attempt_path")
+    for idx in (1, 2):
+        res_a = ledger_a.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id=f"op-a-base-{idx}",
+            attempt_id=f"att-a-{idx}",
+            attempt=idx,
+            candidate_sha="a" * 40,
+            review_id=f"rev-a-{idx}",
+            target_paths=target,
+            loaded_policy=policy_a,
+            trust_context=trust_a,
+        )
+        assert res_a.funding_source == "BASE"
+
+    raw_before_a = ledger_a.path.read_bytes()
+    st_before_a = ledger_a.load(loaded_policy=policy_a, trust_context=trust_a)
+    assert st_before_a.base_milestone_limit == 4
+    assert st_before_a.milestone_limit == 4
+    assert st_before_a.milestone_consumed == 2
+    assert _milestone_base_consumed(st_before_a) == 2
+
+    for gid in (None, "grant-a"):
+        with pytest.raises(
+            RepairBudgetError, match="cannot displace reserved milestone base capacity"
+        ):
+            ledger_a.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id=f"op-a-grant-{gid or 'auto'}",
+                attempt_id="att-a-3",
+                attempt=3,
+                candidate_sha="a" * 40,
+                review_id="rev-a-3",
+                target_paths=target,
+                loaded_policy=policy_a,
+                trust_context=trust_a,
+                grant_approval_id=gid,
+            )
+        assert ledger_a.path.read_bytes() == raw_before_a
+        st_after_a = ledger_a.load(loaded_policy=policy_a, trust_context=trust_a)
+        assert st_after_a.state_digest == st_before_a.state_digest
+        assert st_after_a.milestone_consumed == 2
+        assert st_after_a.registered_roots == st_before_a.registered_roots
+        assert st_after_a.applied_grants == st_before_a.applied_grants
+
+    for idx in (1, 2):
+        res_b = ledger_a.reserve_attempt_budget(
+            task_id="root-b",
+            operation_id=f"op-b-base-{idx}",
+            attempt_id=f"att-b-{idx}",
+            attempt=idx,
+            candidate_sha="b" * 40,
+            review_id=f"rev-b-{idx}",
+            target_paths=target,
+            loaded_policy=policy_a,
+            trust_context=trust_a,
+        )
+        assert res_b.funding_source == "BASE"
