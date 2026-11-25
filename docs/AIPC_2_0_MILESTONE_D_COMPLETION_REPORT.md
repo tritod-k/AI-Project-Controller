@@ -1,7 +1,8 @@
 # AIPC 2.0 Milestone D (`D01`–`D03`) — Completion Report
 
-**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI on `frozenSHA_d_r18` + AST-Closed 2-Wave Codex Review Cycle #18 `PASS` + 7 preserved byte-identical `PASS 1.0` locks + Commander K.TRITOD merge approval)
+**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI on `frozenSHA_d_r19` + AST-Closed 2-Wave Codex Review Cycle #19 `PASS` + 7 preserved byte-identical `PASS 1.0` locks + Commander K.TRITOD merge approval)
 **Architecture Baseline:** Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`
+**Tested source for Cycle #19:** `6c64f13c677aa3d0bac7f9787c22c64d84569fe8`
 **Tested source for Cycle #18:** `65302634bc1cc7f01941097b9bcb840e4f2beb8d`
 **Branch:** `gemini/aipc-2.0-milestone-d` (`tested_source_sha_d_r17`: `ce492169b0dc68f74543c20d018e6ac51ad9990a`; prior `frozenSHA_d_r15`: `9213f057fdc23355e2d0e42b1e4073d9a63ff966`; prior `frozenSHA_d_r14`: `74b257ca9eeca9394a65aa3e0e440701f2874119`; prior `frozenSHA_d_r13`: `57befe85ac538176c79ded83eb7f1e3d35e465fa`; prior `frozenSHA_d_r12`: `a93de7d0a0fc4da11c47e96dfd1bacaabf910ea8`; prior `frozenSHA_d_r11`: `62ea3031f653a63e1b4356e9251bbbd28a2b4acc`; prior `frozenSHA_d_r10`: `179d38d1a30ff092e97651b51e31cc6a63b0febb`; prior `frozenSHA_d_r9`: `5c19b73733848b3d95a6e4c821fce24e661058b5`; prior `frozenSHA_d_r8`: `3517b898514ea57e83fdc7e594713b3ef5e4cce0`; prior `frozenSHA_d_r7`: `e6ad749f32213d1feb6e0d8661fdc48841f830ba`; prior `frozenSHA_d_r4`: `c1624e357a1bc3c8ecb89adfed59f16aed4386f8`; `1,645 passed, 1 skipped, 0 failed` Windows; `94 passed, 0 skipped, 0 failed` Linux Docker)
 **Owner / Human Commander:** K.TRITOD
