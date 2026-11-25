@@ -1,3 +1,31 @@
+# AIPC 2.0 Milestone D — Cycle #20 verification checkpoint
+
+Status AWAITING_REVIEW. Phase Gate PENDING. Tier-2 remediation cycle 19 under grant d23 (consolidated batch repair across 7 non-locked files).
+
+Candidate branch `gemini/aipc-2.0-milestone-d` and tested source `77eab24e64bfefec0fba2b007b6031c51c25c495`. The preceding frozen checkpoint is `1de9374338e7b36cf5a843e566e9d0a191fa01c9`.
+Stable Controller `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`. This documentation checkpoint is the input to exact-SHA CI and Codex review cycle 20.
+
+Gemini subscription Worker `d01_b_recovery19` (sessions `6b5de3aa-399b-4c3b-abd7-f0aa7b3d1e73`, `6d5ea248-38f4-4f8c-b267-3c0d9978eec6`) consolidated all 4 Cycle #19 batch-sweep fixes (repair_budget GRANT headroom, workspace_git_checkpoint POSIX bracket class fail-closed, scaffolding atomic staging & status input-overwrite guard, isolation_and_closeout strict Docker image ref validation) with zero diff bytes in locked modules.
+All 10 preserved file-disjoint `PASS 1.0` review locks (7 prior + 3 Cycle #19 task_queue locks) and `.env.example` match their source baselines. Module proof SHA-256 `dc587cb769faadc9b91a7c545686215918744db360cbd7f84e1ed55f67f1d08a`.
+
+## Verification receipts
+
+- `r20_d01_pytest_receipt.json` (6a88634671520e401f5cd978a3c62fdec0f9c380ccf9da55b2e41811ad083190). Windows 68 passed, 0 skipped, 0 failed. Linux Docker 68 passed, 0 skipped, 0 failed.
+- `r20_d02_pytest_receipt.json` (bbae21691c0035288373e74c3cf6b5f202b86708275c19ba1bdb096d1ca6d7ab). Windows 21 passed, 0 skipped, 0 failed. Linux Docker 21 passed, 0 skipped, 0 failed.
+- `r20_d03_pytest_receipt.json` (a9f8640c362eca929282dd1523f382be231c7e8f255cf0ffd2acec02f855c074). Windows 12 passed, 0 skipped, 0 failed. Linux Docker 12 passed, 0 skipped, 0 failed.
+- `r20_c567_compat_pytest_receipt.json` (52309a8e0926167a647b0421112d017fa726f9558bb354fa235fcedb255090d8). Windows 39 passed, 0 skipped, 0 failed. Linux Docker 39 passed, 0 skipped, 0 failed.
+- `r20_linux_docker_suite_receipt.json` (bd9cc6ac02ddedd851e4f8070f3c7eae2fc94ca2c1ced652eaf3741bac163fed). 101 passed, 0 skipped, 0 failed.
+- `r20_c03_isolated_receipt.json` (c1a155df982542824d167d4bf0048368e7a1d981c81506ab9cfc5ffdcc1470df). 1 passed, 0 skipped, 0 failed.
+- `r20_full_windows_pytest_receipt.json` (c5e71f4b81c2748ba2867077b24eed7a87aad95454f74a30ef7b552e6e58d48d). 1652 passed, 1 skipped, 0 failed.
+- `r20_static_and_wheel_receipt.json` (656b024480b9e8bba4af4887a4a1676e7c193f6f9e994b516814a4b65abb065b). Ruff lint, Ruff format, Git whitespace checks, and wheel build passed.
+- `r20_runtime_c_untouched_receipt.json` (699c9cea0a189ed4f7bcdc4a53af6cba62b20f2009f6c51c410b8bfa00ebe5b6). Verified retained archive baseline for 107441 files.
+- `r20_commander_grant_hmac_verification_receipt.json` (0e03351ba7da308811428fb7e11223401a6816667b1ffe129d3a7f4a8a138f43). 20 of 20 grant signatures and sidecars verified.
+- `r20_cumulative_budget_accounting_receipt.json` (ad4a594500ac2fc9f04058c8890cfa42e32f1ca7eed30c24d7f3963290209680). Zero budget resets. Consolidated batch worker d01_b_recovery19 resolved all 4 Cycle #19 code/test findings with 0 diff bytes in locked modules.
+
+Next action is exact-SHA CI and independent Codex review cycle 20 (non-locked Wave 1 jobs + Wave 2).
+
+---
+
 # AIPC 2.0 Milestone D — Cycle #19 verification checkpoint
 
 Status AWAITING_REVIEW. Phase Gate PENDING. Tier-2 remediation cycle 18 under grant d22 (test-only, 0 diff bytes in src/**).
