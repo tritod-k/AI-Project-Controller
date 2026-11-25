@@ -4532,3 +4532,216 @@ def test_released_reservation_replay_and_consume_rejected(tmp_path: Path) -> Non
     assert ledger.load(loaded_policy=policy, trust_context=trust_ctx).state_digest == (
         st_released.state_digest
     )
+
+
+def test_implicit_grant_reservation_explicit_same_id_replay_rejected(tmp_path: Path) -> None:
+    target = ("src/aipc/controller/repair_budget.py",)
+
+    ledger, policy, trust_ctx, _now = _setup_replay_binding_env(tmp_path)
+    base_dec = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-imp-base",
+        task_id="root-a",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-base",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert base_dec.reservation is not None
+    assert base_dec.reservation.funding_source == "BASE"
+
+    imp_dec = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-imp-grant",
+        task_id="root-a",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-grant",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert imp_dec.reservation is not None
+    assert imp_dec.reservation.funding_source == "GRANT"
+    assert imp_dec.reservation.grant_approval_id is not None
+    assert imp_dec.reservation.grant_approval_id_explicit is False
+    grant_id = imp_dec.reservation.grant_approval_id
+
+    raw_sha = hashlib.sha256(ledger.path.read_bytes()).hexdigest()
+    st_snap = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    with pytest.raises(RepairBudgetError):
+        ledger.reserve_repair(
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            event_id="ev-imp-grant",
+            task_id="root-a",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-imp-grant",
+            route="REVIEW_COORDINATOR",
+            target_paths=target,
+            grant_approval_id=grant_id,
+        )
+    assert hashlib.sha256(ledger.path.read_bytes()).hexdigest() == raw_sha
+    st_after_err = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    assert st_after_err.state_digest == st_snap.state_digest
+    assert st_after_err.milestone_consumed == st_snap.milestone_consumed
+    assert st_after_err.registered_roots == st_snap.registered_roots
+    assert st_after_err.applied_grants == st_snap.applied_grants
+
+    rep_dec = ledger.reserve_repair(
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+        event_id="ev-imp-grant",
+        task_id="root-a",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-grant",
+        route="REVIEW_COORDINATOR",
+        target_paths=target,
+        grant_approval_id=None,
+    )
+    assert rep_dec.idempotent_replay is True
+    assert rep_dec.reservation == imp_dec.reservation
+    assert hashlib.sha256(ledger.path.read_bytes()).hexdigest() == raw_sha
+
+    ledger2, policy2, trust_ctx2, _now2 = _setup_replay_binding_env(tmp_path / "attempt_imp")
+    a_base = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-imp-base",
+        attempt_id="att-imp-base",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-base",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id=None,
+    )
+    assert a_base.funding_source == "BASE"
+
+    a_imp = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-imp-grant",
+        attempt_id="att-imp-grant",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-grant",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id=None,
+    )
+    assert a_imp.funding_source == "GRANT"
+    assert a_imp.grant_approval_id is not None
+    assert a_imp.grant_approval_id_explicit is False
+    grant_id2 = a_imp.grant_approval_id
+
+    raw_sha2 = hashlib.sha256(ledger2.path.read_bytes()).hexdigest()
+    st_snap2 = ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2)
+
+    with pytest.raises(RepairBudgetError):
+        ledger2.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-imp-grant",
+            attempt_id="att-imp-grant",
+            attempt=2,
+            candidate_sha="a" * 40,
+            review_id="rev-imp-grant",
+            target_paths=target,
+            loaded_policy=policy2,
+            trust_context=trust_ctx2,
+            grant_approval_id=grant_id2,
+        )
+    assert hashlib.sha256(ledger2.path.read_bytes()).hexdigest() == raw_sha2
+    st_after_err2 = ledger2.load(loaded_policy=policy2, trust_context=trust_ctx2)
+    assert st_after_err2.state_digest == st_snap2.state_digest
+    assert st_after_err2.milestone_consumed == st_snap2.milestone_consumed
+    assert st_after_err2.registered_roots == st_snap2.registered_roots
+    assert st_after_err2.applied_grants == st_snap2.applied_grants
+
+    a_rep = ledger2.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-imp-grant",
+        attempt_id="att-imp-grant",
+        attempt=2,
+        candidate_sha="a" * 40,
+        review_id="rev-imp-grant",
+        target_paths=target,
+        loaded_policy=policy2,
+        trust_context=trust_ctx2,
+        grant_approval_id=None,
+    )
+    assert a_rep == a_imp
+    assert hashlib.sha256(ledger2.path.read_bytes()).hexdigest() == raw_sha2
+
+
+def test_released_attempt_budget_reservation_replay_and_consume_rejected(tmp_path: Path) -> None:
+    ledger, policy, trust_ctx, _now = _setup_replay_binding_env(tmp_path)
+    target = ("src/aipc/controller/repair_budget.py",)
+
+    res = ledger.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-rel-01",
+        attempt_id="att-rel-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-rel-01",
+        target_paths=target,
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+    )
+    assert res.status == "RESERVED"
+
+    released = ledger.release_attempt_budget(
+        reservation_id=res.reservation_id,
+        reason="cancelled_before_dispatch",
+        loaded_policy=policy,
+        trust_context=trust_ctx,
+    )
+    assert released.status == "RELEASED"
+
+    raw_sha = hashlib.sha256(ledger.path.read_bytes()).hexdigest()
+    st_released = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+
+    with pytest.raises(RepairBudgetError):
+        ledger.reserve_attempt_budget(
+            task_id="root-a",
+            operation_id="op-rel-01",
+            attempt_id="att-rel-01",
+            attempt=1,
+            candidate_sha="a" * 40,
+            review_id="rev-rel-01",
+            target_paths=target,
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+        )
+    assert hashlib.sha256(ledger.path.read_bytes()).hexdigest() == raw_sha
+    st_after_replay = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    assert st_after_replay.state_digest == st_released.state_digest
+    assert st_after_replay.milestone_consumed == st_released.milestone_consumed
+    assert st_after_replay.registered_roots == st_released.registered_roots
+
+    with pytest.raises(RepairBudgetError):
+        ledger.consume_dispatch_reservation(
+            reservation_id=res.reservation_id,
+            task_id="root-a",
+            attempt=1,
+            attempt_id="att-rel-01",
+            worker_id="w-01",
+            provider="mock",
+            candidate_sha="a" * 40,
+            loaded_policy=policy,
+            trust_context=trust_ctx,
+            target_paths=target,
+        )
+    assert hashlib.sha256(ledger.path.read_bytes()).hexdigest() == raw_sha
+    st_after_consume = ledger.load(loaded_policy=policy, trust_context=trust_ctx)
+    assert st_after_consume.state_digest == st_released.state_digest
+    assert st_after_consume.milestone_consumed == st_released.milestone_consumed
+    assert st_after_consume.registered_roots == st_released.registered_roots
