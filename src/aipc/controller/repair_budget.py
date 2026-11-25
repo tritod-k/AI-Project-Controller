@@ -2301,13 +2301,10 @@ class DurableRepairBudgetLedger:
                 raise RepairBudgetError(
                     "Unknown or missing budget reservation for finalize_attempt_budget"
                 )
-            if clean_att is not None and res.attempt_id is not None and res.attempt_id != clean_att:
+            if clean_att is not None and res.attempt_id != clean_att:
                 raise RepairBudgetError("attempt_id mismatch finalizing budget reservation")
             if res.status == "CONSUMED":
-                if clean_att is None or (
-                    res.consumed_attempt_id == clean_att
-                    and (res.attempt_id is None or res.attempt_id == clean_att)
-                ):
+                if clean_att is None or res.consumed_attempt_id == clean_att:
                     return res
                 raise RepairBudgetError(
                     f"Reservation '{res.reservation_id}' already CONSUMED by different attempt"

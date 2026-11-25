@@ -1968,6 +1968,21 @@ def test_finalize_attempt_budget_rejects_malformed_and_mismatched_identifiers(
         )
     _assert_unchanged(sha_after_r1, r1.reservation_id, expected_status="CONSUMED")
 
+    replay_r1 = ledger.finalize_attempt_budget(
+        reservation_id=f" {r1.reservation_id} ",
+        operation_id=" op-fin-01 ",
+        attempt_id=" att-01-task-01 ",
+    )
+    assert replay_r1 == fin_r1
+    _assert_unchanged(sha_after_r1, r1.reservation_id, expected_status="CONSUMED")
+
+    replay_r1_omitted_att = ledger.finalize_attempt_budget(
+        operation_id="op-fin-01",
+        attempt_id=None,
+    )
+    assert replay_r1_omitted_att == fin_r1
+    _assert_unchanged(sha_after_r1, r1.reservation_id, expected_status="CONSUMED")
+
     # 3. Legacy RESERVED reservation (operation_id=None, attempt_id=None)
     for bad_op in ("", "   ", "op-unbound"):
         with pytest.raises(RepairBudgetError):
@@ -1986,6 +2001,14 @@ def test_finalize_attempt_budget_rejects_malformed_and_mismatched_identifiers(
             )
         _assert_unchanged(sha_after_r1, legacy_res_id)
 
+    with pytest.raises(RepairBudgetError, match="attempt_id mismatch"):
+        ledger.finalize_attempt_budget(
+            reservation_id=legacy_res_id,
+            operation_id=None,
+            attempt_id="att-02-task-01",
+        )
+    _assert_unchanged(sha_after_r1, legacy_res_id)
+
     fin_legacy = ledger.finalize_attempt_budget(
         reservation_id=legacy_res_id,
         operation_id=None,
@@ -2000,7 +2023,46 @@ def test_finalize_attempt_budget_rejects_malformed_and_mismatched_identifiers(
         attempt_id=None,
     )
     assert replay_legacy == fin_legacy
-    assert _raw_sha() == sha_after_legacy
+    _assert_unchanged(sha_after_legacy, legacy_res_id, expected_status="CONSUMED")
+
+    replay_legacy_att = ledger.finalize_attempt_budget(
+        reservation_id=legacy_res_id,
+        operation_id=None,
+        attempt_id="att-02-task-01",
+    )
+    assert replay_legacy_att == fin_legacy
+    _assert_unchanged(sha_after_legacy, legacy_res_id, expected_status="CONSUMED")
+
+    with pytest.raises(RepairBudgetError, match="attempt_id mismatch"):
+        ledger.finalize_attempt_budget(
+            reservation_id=legacy_res_id,
+            operation_id=None,
+            attempt_id="att-other",
+        )
+    _assert_unchanged(sha_after_legacy, legacy_res_id, expected_status="CONSUMED")
+
+    # 4. Operation-only finalization and reservation-only replay on r2
+    fin_r2 = ledger.finalize_attempt_budget(
+        operation_id="op-fin-02",
+        attempt_id="att-01-task-02",
+    )
+    assert fin_r2.status == "CONSUMED"
+    assert fin_r2.consumed_attempt_id == "att-01-task-02"
+    sha_after_r2 = _raw_sha()
+
+    replay_r2_by_res = ledger.finalize_attempt_budget(
+        reservation_id=r2.reservation_id,
+        attempt_id="att-01-task-02",
+    )
+    assert replay_r2_by_res == fin_r2
+    _assert_unchanged(sha_after_r2, r2.reservation_id, expected_status="CONSUMED")
+
+    with pytest.raises(RepairBudgetError, match="attempt_id mismatch"):
+        ledger.finalize_attempt_budget(
+            operation_id="op-fin-02",
+            attempt_id="att-02-task-02",
+        )
+    _assert_unchanged(sha_after_r2, r2.reservation_id, expected_status="CONSUMED")
 
 
 @pytest.mark.parametrize("ledger_filename", ("repair_budget_ledger.json", "budget.json"))
