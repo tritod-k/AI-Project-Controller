@@ -34,6 +34,7 @@ from aipc.controller.repair_budget import (
     DurableRepairBudgetLedger,
     RepairBudgetError,
     _milestone_base_consumed,
+    _with_digest,
     load_policy_trust_context,
 )
 from aipc.controller.task_queue import (
@@ -65,6 +66,7 @@ from aipc.review.governance_policy import (
     default_review_governance_policy,
     load_review_governance_policy,
 )
+from aipc.storage.json_store import write_json_atomic
 
 
 def _fixed_now() -> datetime:
@@ -3550,6 +3552,73 @@ def test_reserve_attempt_budget_conflicting_replay_rejected_and_identical_replay
                 grant_approval_id=bad_gid,
             )
         assert _snap(ldg_a, pol_a, ctx_a) == snap_exp_a
+
+    # (f) Unconditional policy-binding parity on replay even when loaded_policy=None.
+    ldg_np = DurableRepairBudgetLedger(tmp_path / "no_policy_replay.json", clock=_fixed_now)
+    ldg_np.initialize(loaded_policy=policy, registered_roots=["root-a"])
+    orig_np = ldg_np.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-np-01",
+        attempt_id="att-np-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-np-01",
+        route="REVIEW_COORDINATOR",
+        target_paths=("src/a.py",),
+        loaded_policy=None,
+    )
+    raw_np = ldg_np.path.read_bytes()
+    sha_np = hashlib.sha256(raw_np).hexdigest()
+
+    replayed_np = ldg_np.reserve_attempt_budget(
+        task_id="root-a",
+        operation_id="op-np-01",
+        attempt_id="att-np-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-np-01",
+        route="REVIEW_COORDINATOR",
+        target_paths=("src/a.py",),
+        loaded_policy=None,
+    )
+    assert replayed_np == orig_np
+    assert ldg_np.path.read_bytes() == raw_np
+    assert hashlib.sha256(ldg_np.path.read_bytes()).hexdigest() == sha_np
+    st_np = ldg_np.load()
+    assert st_np.milestone_consumed == 1
+    assert st_np.registered_roots["root-a"].consumed == 1
+
+    for mutate_field, mutate_val in (
+        ("approval_id", "appr-tampered"),
+        ("policy_sha256", "f" * 64),
+    ):
+        mut_res = st_np.reservations[orig_np.reservation_id].model_copy(
+            update={mutate_field: mutate_val}
+        )
+        mut_state = _with_digest(
+            st_np.model_copy(update={"reservations": {orig_np.reservation_id: mut_res}})
+        )
+        write_json_atomic(ldg_np.path, mut_state.model_dump(mode="json"))
+        mut_raw = ldg_np.path.read_bytes()
+        mut_sha = hashlib.sha256(mut_raw).hexdigest()
+
+        with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+            ldg_np.reserve_attempt_budget(
+                task_id="root-a",
+                operation_id="op-np-01",
+                attempt_id="att-np-01",
+                attempt=1,
+                candidate_sha="a" * 40,
+                review_id="rev-np-01",
+                route="REVIEW_COORDINATOR",
+                target_paths=("src/a.py",),
+                loaded_policy=None,
+            )
+        assert ldg_np.path.read_bytes() == mut_raw
+        assert hashlib.sha256(ldg_np.path.read_bytes()).hexdigest() == mut_sha
+        after_mut = ldg_np.load()
+        assert after_mut.milestone_consumed == 1
+        assert after_mut.registered_roots["root-a"].consumed == 1
 
 
 def _setup_replay_binding_env(

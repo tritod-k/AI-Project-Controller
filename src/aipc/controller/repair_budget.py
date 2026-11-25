@@ -1290,10 +1290,23 @@ class DurableRepairBudgetLedger:
                 explicit_root_task=explicit_root_task,
             )
             counter = state.registered_roots[root_task]
+            effective_approval_id = (
+                loaded_policy.approval_id if loaded_policy is not None else state.approval_id
+            )
+            effective_policy_sha256 = (
+                loaded_policy.policy_sha256 if loaded_policy is not None else state.policy_sha256
+            )
 
             existing_res_id = state.event_to_reservation.get(event_id)
             if existing_res_id is not None:
                 existing = state.reservations[existing_res_id]
+                policy_mismatch = (
+                    existing.approval_id != effective_approval_id
+                    or not hmac.compare_digest(
+                        existing.policy_sha256,
+                        effective_policy_sha256,
+                    )
+                )
                 grant_mismatch = (
                     (clean_grant_id is not None) != existing.grant_approval_id_explicit
                 ) or (
@@ -1304,7 +1317,8 @@ class DurableRepairBudgetLedger:
                     )
                 )
                 if (
-                    existing.task_id != task_id
+                    existing.event_id != event_id
+                    or existing.task_id != task_id
                     or existing.root_task != root_task
                     or existing.milestone_id != state.milestone_id
                     or existing.attempt != attempt
@@ -1314,8 +1328,7 @@ class DurableRepairBudgetLedger:
                     or existing.bucket != "OUTER_REPAIR"
                     or existing.inner_pass_index != 0
                     or existing.target_paths != norm_paths
-                    or existing.approval_id != loaded_policy.approval_id
-                    or not hmac.compare_digest(existing.policy_sha256, loaded_policy.policy_sha256)
+                    or policy_mismatch
                     or grant_mismatch
                 ):
                     raise RepairBudgetError(
@@ -1444,8 +1457,8 @@ class DurableRepairBudgetLedger:
                 grant_approval_id_explicit=(clean_grant_id is not None),
                 grant_sha256=(selected_grant.grant_sha256 if selected_grant is not None else None),
                 target_paths=norm_paths,
-                approval_id=loaded_policy.approval_id,
-                policy_sha256=loaded_policy.policy_sha256,
+                approval_id=effective_approval_id,
+                policy_sha256=effective_policy_sha256,
                 created_at=now,
             )
             new_counter = counter.model_copy(
@@ -2017,15 +2030,21 @@ class DurableRepairBudgetLedger:
                 explicit_root_task=explicit_root_task,
             )
             counter = state.registered_roots[root_task]
+            effective_approval_id = (
+                loaded_policy.approval_id if loaded_policy is not None else state.approval_id
+            )
+            effective_policy_sha256 = (
+                loaded_policy.policy_sha256 if loaded_policy is not None else state.policy_sha256
+            )
 
             existing_res_id = state.event_to_reservation.get(event_id)
             if existing_res_id is not None:
                 existing = state.reservations[existing_res_id]
-                policy_mismatch = loaded_policy is not None and (
-                    existing.approval_id != loaded_policy.approval_id
+                policy_mismatch = (
+                    existing.approval_id != effective_approval_id
                     or not hmac.compare_digest(
                         existing.policy_sha256,
-                        loaded_policy.policy_sha256,
+                        effective_policy_sha256,
                     )
                 )
                 grant_mismatch = (
@@ -2154,14 +2173,8 @@ class DurableRepairBudgetLedger:
                 grant_approval_id_explicit=(clean_grant_id is not None),
                 grant_sha256=(selected_grant.grant_sha256 if selected_grant is not None else None),
                 target_paths=norm_paths,
-                approval_id=(
-                    loaded_policy.approval_id if loaded_policy is not None else state.approval_id
-                ),
-                policy_sha256=(
-                    loaded_policy.policy_sha256
-                    if loaded_policy is not None
-                    else state.policy_sha256
-                ),
+                approval_id=effective_approval_id,
+                policy_sha256=effective_policy_sha256,
                 created_at=now,
             )
             new_counter = counter.model_copy(
