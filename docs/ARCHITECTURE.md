@@ -341,9 +341,10 @@ with zero competing subsystems, zero external databases, and zero `checkpoint_ma
   milestone `BASE`-funded vs. `GRANT`-funded consumption independently via `_milestone_base_consumed()`
   in `reserve_attempt_budget()` and `reserve_dispatch()`, validating full reservation-binding
   field parity (`root_task`, `attempt`, `candidate_sha`, normalized `review_id`, `route`,
-  `target_paths`, symmetric `grant_approval_id` / `grant_approval_id_explicit` and policy
-  binding, and non-released status) before accepting idempotent replay in both
-  `reserve_repair()` and `reserve_attempt_budget()`,
+  `target_paths`, symmetric `grant_approval_id` / `grant_approval_id_explicit`, and
+  unconditional effective policy binding (`approval_id` / `policy_sha256`, even when
+  `loaded_policy is None`), and non-released status) before accepting idempotent replay
+  in both `reserve_repair()` and `reserve_attempt_budget()`,
   rejecting `RELEASED`/`INTERRUPTED` consumption in `consume_dispatch_reservation()`, strictly
   cross-checking `(reservation_id, operation_id)` pairs in `release_attempt_budget()`,
   enforcing `^plan-v[0-9]{4,}$`
