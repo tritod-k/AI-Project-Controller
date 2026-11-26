@@ -655,6 +655,21 @@ def _gitignore_covers_exclusion(active_lines: Sequence[str], required: str) -> b
     return covered
 
 
+def _strip_unescaped_trailing_spaces(line: str) -> str:
+    """Strip unescaped trailing spaces per gitignore(5), preserving leading whitespace."""
+    end = len(line)
+    while end > 0 and line[end - 1] == " ":
+        bs = 0
+        idx = end - 2
+        while idx >= 0 and line[idx] == "\\":
+            bs += 1
+            idx -= 1
+        if bs % 2 == 1:
+            break
+        end -= 1
+    return line[:end]
+
+
 def _check_git_hygiene(workspace_root: Path) -> list[str]:
     violations: list[str] = []
     gitattributes = workspace_root / ".gitattributes"
@@ -703,11 +718,12 @@ def _check_git_hygiene(workspace_root: Path) -> list[str]:
             except (OSError, UnicodeError) as exc:
                 violations.append(f"Cannot read .gitignore: {exc}")
             else:
-                active_lines = [
-                    line.strip()
-                    for line in ign_text.splitlines()
-                    if line.strip() and not line.lstrip().startswith("#")
-                ]
+                active_lines = []
+                for raw_line in ign_text.splitlines():
+                    cleaned = _strip_unescaped_trailing_spaces(raw_line)
+                    if not cleaned or cleaned.startswith("#"):
+                        continue
+                    active_lines.append(cleaned)
                 for req in _REQUIRED_GITIGNORE_EXCLUSIONS:
                     covered, negated_by = _evaluate_gitignore_exclusion(active_lines, req)
                     if negated_by is not None:

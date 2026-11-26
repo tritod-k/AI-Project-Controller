@@ -2329,7 +2329,6 @@ def reconcile_queue_and_budget_consistency(
         escalated_ids: list[str] = []
         unresolved_res_ids: list[str] = list(snap.unresolved_reservation_ids)
         reasons: list[str] = []
-        queue_dirty = False
 
         if snap.reconciliation_required:
             reasons.extend(r for r in snap.reconciliation_reasons if r not in reasons)
@@ -2349,7 +2348,6 @@ def reconcile_queue_and_budget_consistency(
                 )
                 if missing_reason not in reasons:
                     reasons.append(missing_reason)
-                queue_dirty = True
                 continue
             if res.status != "RESERVED":
                 continue
@@ -2370,7 +2368,6 @@ def reconcile_queue_and_budget_consistency(
                     )
                     if missing_reason not in reasons:
                         reasons.append(missing_reason)
-                    queue_dirty = True
                 elif _task_never_dispatched(latest_task):
                     ledger.release_attempt_budget(  # type: ignore[attr-defined]
                         reservation_id=res_id,
@@ -2468,7 +2465,6 @@ def reconcile_queue_and_budget_consistency(
                             )
 
                 if esc_reason is not None:
-                    queue_dirty = True
                     if tid not in escalated_ids:
                         escalated_ids.append(tid)
                     if esc_reason not in reasons:
@@ -2494,7 +2490,6 @@ def reconcile_queue_and_budget_consistency(
                     f"RECONCILIATION_REQUIRED: task '{tid}' (status={task.status}) has "
                     f"unfinalized RESERVED ledger entries {res_list}"
                 )
-                queue_dirty = True
                 if tid not in escalated_ids:
                     escalated_ids.append(tid)
                 if esc_reason not in reasons:
@@ -2513,26 +2508,37 @@ def reconcile_queue_and_budget_consistency(
                 updated_tasks.append(task)
 
         has_blocker = bool(escalated_ids or unresolved_res_ids or snap.reconciliation_required)
-        if queue_dirty or has_blocker:
-            merged_reasons = tuple(
+        merged_reasons = (
+            tuple(
                 dict.fromkeys(
                     r
                     for r in (*snap.reconciliation_reasons, *reasons)
                     if isinstance(r, str) and r.strip()
                 )
             )
-            merged_unresolved = tuple(dict.fromkeys(unresolved_res_ids))
+            if has_blocker
+            else snap.reconciliation_reasons
+        )
+        merged_unresolved = (
+            tuple(dict.fromkeys(unresolved_res_ids))
+            if has_blocker
+            else snap.unresolved_reservation_ids
+        )
+        new_tasks = tuple(updated_tasks)
+        state_changed = (
+            has_blocker != snap.reconciliation_required
+            or merged_reasons != snap.reconciliation_reasons
+            or merged_unresolved != snap.unresolved_reservation_ids
+            or new_tasks != snap.tasks
+        )
+        if state_changed:
             queue._save(
                 snap.model_copy(
                     update={
                         "reconciliation_required": has_blocker,
-                        "reconciliation_reasons": (
-                            merged_reasons if has_blocker else snap.reconciliation_reasons
-                        ),
-                        "unresolved_reservation_ids": (
-                            merged_unresolved if has_blocker else snap.unresolved_reservation_ids
-                        ),
-                        "tasks": tuple(updated_tasks),
+                        "reconciliation_reasons": merged_reasons,
+                        "unresolved_reservation_ids": merged_unresolved,
+                        "tasks": new_tasks,
                         "updated_at": queue._clock(),
                     }
                 )

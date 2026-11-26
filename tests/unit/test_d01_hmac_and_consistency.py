@@ -5016,3 +5016,248 @@ def test_grant_reservation_cannot_displace_available_milestone_base_capacity(
             trust_context=trust_a,
         )
         assert res_b.funding_source == "BASE"
+
+
+def test_reconcile_repeated_escalation_preserves_raw_queue_and_ledger_bytes_with_advancing_clock(
+    tmp_path: Path,
+) -> None:
+    tick = [0]
+
+    def _advancing_clock() -> datetime:
+        tick[0] += 1
+        return _fixed_now() + timedelta(seconds=tick[0])
+
+    loaded_policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(tmp_path / "budget.json", clock=_advancing_clock)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+
+    queue_path = tmp_path / "queue.json"
+    queue = PersistentTaskQueue(
+        queue_path,
+        repair_budget_path=ledger.path,
+        clock=_advancing_clock,
+    )
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=[_make_contract("task-01")],
+    )
+
+    # Create an unfinalized RESERVED ledger entry for a RUNNING task so reconciliation escalates.
+    ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-esc-01",
+        attempt_id="att-esc-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        loaded_policy=loaded_policy,
+    )
+    snap = queue.load()
+    running_task = snap.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "active_attempt_id": "att-esc-01",
+        }
+    )
+    queue._save(
+        snap.model_copy(update={"tasks": (running_task,), "updated_at": _advancing_clock()})
+    )
+
+    first_res = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert first_res.status == "RECONCILIATION_REQUIRED"
+    assert "task-01" in first_res.escalated_task_ids
+
+    raw_queue_after_first = queue_path.read_bytes()
+    raw_ledger_after_first = ledger.path.read_bytes()
+    tick_before_second = tick[0]
+
+    second_res = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert second_res.status == "RECONCILIATION_REQUIRED"
+    assert queue_path.read_bytes() == raw_queue_after_first
+    assert ledger.path.read_bytes() == raw_ledger_after_first
+    assert tick[0] == tick_before_second
+
+
+def test_cross_method_reservation_replay_rejected_in_both_directions(tmp_path: Path) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(tmp_path / "budget.json", clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01", "task-02"])
+
+    # (a) Reserve via reserve_attempt_budget, then replay same event_id via reserve_repair -> fail.
+    rec_attempt = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="cross-01",
+        attempt_id="att-cross-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-cross-01",
+        route="REVIEW_COORDINATOR",
+        loaded_policy=loaded_policy,
+    )
+    raw_after_a = ledger.path.read_bytes()
+    state_after_a = ledger.load(loaded_policy=loaded_policy)
+
+    with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+        ledger.reserve_repair(
+            loaded_policy=loaded_policy,
+            event_id="op-cross-01",
+            task_id="task-01",
+            attempt=1,
+            candidate_sha="a" * 40,
+            review_id="rev-cross-01",
+            route="REVIEW_COORDINATOR",
+        )
+    assert ledger.path.read_bytes() == raw_after_a
+    assert (
+        ledger.load(loaded_policy=loaded_policy).milestone_consumed
+        == state_after_a.milestone_consumed
+    )
+
+    # Same-method replay of reserve_attempt_budget remains idempotent.
+    replay_attempt = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="cross-01",
+        attempt_id="att-cross-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        review_id="rev-cross-01",
+        route="REVIEW_COORDINATOR",
+        loaded_policy=loaded_policy,
+    )
+    assert replay_attempt.reservation_id == rec_attempt.reservation_id
+
+    # (b) Reserve via reserve_repair, then replay same event_id via reserve_attempt_budget -> fail.
+    dec_repair = ledger.reserve_repair(
+        loaded_policy=loaded_policy,
+        event_id="op-cross-02",
+        task_id="task-02",
+        attempt=1,
+        candidate_sha="b" * 40,
+        review_id="rev-cross-02",
+        route="REVIEW_COORDINATOR",
+    )
+    assert dec_repair.allowed is True
+    assert dec_repair.reservation is not None
+    raw_after_b = ledger.path.read_bytes()
+    state_after_b = ledger.load(loaded_policy=loaded_policy)
+
+    with pytest.raises(RepairBudgetError, match="Conflicting replay"):
+        ledger.reserve_attempt_budget(
+            task_id="task-02",
+            operation_id="cross-02",
+            attempt_id="att-cross-02",
+            attempt=1,
+            candidate_sha="b" * 40,
+            review_id="rev-cross-02",
+            route="REVIEW_COORDINATOR",
+            loaded_policy=loaded_policy,
+        )
+    assert ledger.path.read_bytes() == raw_after_b
+    assert (
+        ledger.load(loaded_policy=loaded_policy).milestone_consumed
+        == state_after_b.milestone_consumed
+    )
+
+    # Same-method replay of reserve_repair remains idempotent.
+    replay_repair = ledger.reserve_repair(
+        loaded_policy=loaded_policy,
+        event_id="op-cross-02",
+        task_id="task-02",
+        attempt=1,
+        candidate_sha="b" * 40,
+        review_id="rev-cross-02",
+        route="REVIEW_COORDINATOR",
+    )
+    assert replay_repair.idempotent_replay is True
+    assert replay_repair.reservation is not None
+    assert replay_repair.reservation.reservation_id == dec_repair.reservation.reservation_id
+
+
+def test_finalize_attempt_budget_rejects_mismatched_map_key_and_embedded_reservation_id(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(tmp_path / "budget.json", clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+
+    rec = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-mismatch-01",
+        attempt_id="att-mismatch-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        loaded_policy=loaded_policy,
+    )
+    state = ledger.load(loaded_policy=loaded_policy)
+    mismatched_key = "res-other-key"
+    new_reservations = {mismatched_key: rec}
+    new_events = {rec.event_id: mismatched_key}
+    tampered = _with_digest(
+        state.model_copy(
+            update={"reservations": new_reservations, "event_to_reservation": new_events}
+        )
+    )
+    write_json_atomic(ledger.path, tampered.model_dump(mode="json"))
+    raw_before = ledger.path.read_bytes()
+
+    with pytest.raises(RepairBudgetError, match="mismatches embedded reservation_id"):
+        ledger.finalize_attempt_budget(
+            reservation_id=mismatched_key,
+            loaded_policy=loaded_policy,
+        )
+    with pytest.raises(RepairBudgetError, match="mismatches embedded reservation_id"):
+        ledger.finalize_attempt_budget(
+            operation_id="op-mismatch-01",
+            loaded_policy=loaded_policy,
+        )
+
+    assert ledger.path.read_bytes() == raw_before
+    st_after = ledger.load(loaded_policy=loaded_policy)
+    assert st_after.reservations[mismatched_key].status == "RESERVED"
+    assert st_after.milestone_consumed == 1
+
+
+def test_release_attempt_budget_rejects_worker_invocation_bucket_without_mutation(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(tmp_path / "budget.json", clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+
+    inv_dec = ledger.reserve_worker_invocation(
+        loaded_policy=loaded_policy,
+        event_id="ev-inv-rel-01",
+        task_id="task-01",
+        outer_attempt=1,
+        inner_pass_index=0,
+        candidate_sha="a" * 40,
+    )
+    assert inv_dec.reservation is not None
+    res_id = inv_dec.reservation.reservation_id
+
+    state = ledger.load(loaded_policy=loaded_policy)
+    patched_rec = state.reservations[res_id].model_copy(update={"operation_id": "op-inv-rel-01"})
+    new_reservations = dict(state.reservations)
+    new_reservations[res_id] = patched_rec
+    tampered = _with_digest(state.model_copy(update={"reservations": new_reservations}))
+    write_json_atomic(ledger.path, tampered.model_dump(mode="json"))
+
+    raw_before = ledger.path.read_bytes()
+    st_before = ledger.load(loaded_policy=loaded_policy)
+
+    with pytest.raises(RepairBudgetError, match="only OUTER_REPAIR reservations are releasable"):
+        ledger.release_attempt_budget(
+            reservation_id=res_id,
+            operation_id="op-inv-rel-01",
+            loaded_policy=loaded_policy,
+        )
+
+    assert ledger.path.read_bytes() == raw_before
+    st_after = ledger.load(loaded_policy=loaded_policy)
+    assert st_after.reservations[res_id].status == "RESERVED"
+    assert st_after.milestone_consumed == st_before.milestone_consumed
+    assert (
+        st_after.milestone_worker_invocations_consumed
+        == st_before.milestone_worker_invocations_consumed
+    )
+    assert st_after.registered_roots == st_before.registered_roots

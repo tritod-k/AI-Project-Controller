@@ -63,6 +63,23 @@ def _validate_docker_image_ref(image: str) -> str:
         raise IsolationPolicyError(f"image cannot contain whitespace or control chars: {image!r}")
     if _DOCKER_IMAGE_REF_RE.fullmatch(image) is None:
         raise IsolationPolicyError(f"Invalid Docker image reference: {image!r}")
+    name_part = image.split("@", 1)[0]
+    last_slash = name_part.rfind("/")
+    if ":" in name_part[last_slash + 1 :]:
+        name_part = name_part[: name_part.rfind(":")]
+    slash_idx = name_part.find("/")
+    if slash_idx != -1:
+        first_seg = name_part[:slash_idx]
+        if "." in first_seg or ":" in first_seg or first_seg == "localhost":
+            repo_name = name_part[slash_idx + 1 :]
+        else:
+            repo_name = name_part
+    else:
+        repo_name = name_part
+    if len(repo_name) > 255:
+        raise IsolationPolicyError(
+            f"Docker image repository name exceeds 255 characters ({len(repo_name)}): {image!r}"
+        )
     return image
 
 
@@ -563,6 +580,7 @@ def verify_and_restore_closeout_zip(
         with zipfile.ZipFile(zip_resolved, mode="r") as zf:
             infos = zf.infolist()
             validated_entries: list[tuple[zipfile.ZipInfo, Path, str]] = []
+            seen_member_names: set[str] = set()
             for info in infos:
                 unix_mode = info.external_attr >> 16
                 if stat.S_ISLNK(unix_mode):
@@ -572,6 +590,12 @@ def verify_and_restore_closeout_zip(
                 if info.is_dir():
                     continue
                 rel_posix = _validate_zip_entry_name(info.filename)
+                norm_name = rel_posix.as_posix()
+                if norm_name in seen_member_names:
+                    raise IsolationPolicyError(
+                        f"Duplicate zip member name rejected in closeout zip: {norm_name!r}"
+                    )
+                seen_member_names.add(norm_name)
                 if _is_excluded_closeout_entry(rel_posix.parts, rel_posix.name):
                     raise IsolationPolicyError(
                         f"Excluded/sensitive entry rejected in closeout zip: {info.filename!r}"
@@ -581,7 +605,7 @@ def verify_and_restore_closeout_zip(
                     raise IsolationPolicyError(
                         f"Zip entry escapes restore_target_dir: {info.filename!r}"
                     )
-                validated_entries.append((info, dest_path, rel_posix.as_posix()))
+                validated_entries.append((info, dest_path, norm_name))
 
             for info, dest_path, rel_str in validated_entries:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)

@@ -989,3 +989,50 @@ def test_g_docker_verify_argv_rejects_option_shaped_or_invalid_image_refs(tmp_pa
             command=["pytest", "-q"],
         )
         assert valid_image in argv
+
+
+def test_docker_image_ref_repository_name_length_boundary(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate_wt"
+    candidate.mkdir(parents=True, exist_ok=True)
+
+    for valid_image in (
+        "a" * 255,
+        "ghcr.io/" + "a" * 255 + ":v1",
+    ):
+        argv, _disclosure = build_minimal_docker_verify_argv(
+            image=valid_image,
+            candidate_worktree=candidate,
+            command=["pytest", "-q"],
+        )
+        assert valid_image in argv
+
+    for invalid_image in (
+        "a" * 256,
+        "ghcr.io/" + "a" * 256 + ":v1",
+    ):
+        with pytest.raises(IsolationPolicyError, match="exceeds 255 characters"):
+            build_minimal_docker_verify_argv(
+                image=invalid_image,
+                candidate_worktree=candidate,
+                command=["pytest", "-q"],
+            )
+
+
+def test_closeout_restore_rejects_duplicate_zip_member_names(tmp_path: Path) -> None:
+    dup_zip = tmp_path / "duplicate_closeout.zip"
+    with zipfile.ZipFile(dup_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("audit/receipt.json", b'{"ok": 1}\n')
+        zf.writestr("audit/receipt.json", b'{"ok": 2}\n')
+
+    zip_sha = hashlib.sha256(dup_zip.read_bytes()).hexdigest()
+    Path(f"{dup_zip}.sha256").write_text(
+        f"{zip_sha}  {dup_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    restore_dir = tmp_path / "restored"
+    with pytest.raises(IsolationPolicyError, match="Duplicate zip member name rejected"):
+        verify_and_restore_closeout_zip(dup_zip, restore_dir)
+
+    assert not (restore_dir / "audit" / "receipt.json").exists()

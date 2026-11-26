@@ -1328,6 +1328,8 @@ class DurableRepairBudgetLedger:
                     or existing.bucket != "OUTER_REPAIR"
                     or existing.inner_pass_index != 0
                     or existing.target_paths != norm_paths
+                    or existing.operation_id is not None
+                    or existing.attempt_id is not None
                     or policy_mismatch
                     or grant_mismatch
                 ):
@@ -2325,33 +2327,48 @@ class DurableRepairBudgetLedger:
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
             res: BudgetReservationRecord | None = None
+            selected_key: str | None = None
             if clean_res_id is not None and clean_op is not None:
                 res_by_id = state.reservations.get(clean_res_id)
-                res_by_op = [r for r in state.reservations.values() if r.operation_id == clean_op]
+                op_matches = [
+                    (k, r) for k, r in state.reservations.items() if r.operation_id == clean_op
+                ]
                 if (
                     res_by_id is None
-                    or len(res_by_op) != 1
-                    or res_by_id.reservation_id != res_by_op[0].reservation_id
+                    or len(op_matches) != 1
+                    or res_by_id.reservation_id != op_matches[0][1].reservation_id
                     or res_by_id.operation_id != clean_op
+                    or op_matches[0][0] != clean_res_id
                 ):
                     raise RepairBudgetError(
                         "Mismatched or unknown reservation_id/operation_id pair "
                         "in finalize_attempt_budget"
                     )
+                selected_key = clean_res_id
                 res = res_by_id
             elif clean_res_id is not None:
+                selected_key = clean_res_id
                 res = state.reservations.get(clean_res_id)
             elif clean_op is not None:
-                res_by_op = [r for r in state.reservations.values() if r.operation_id == clean_op]
-                if len(res_by_op) == 1:
-                    res = res_by_op[0]
-                elif len(res_by_op) > 1:
+                op_matches = [
+                    (k, r) for k, r in state.reservations.items() if r.operation_id == clean_op
+                ]
+                if len(op_matches) == 1:
+                    selected_key, res = op_matches[0]
+                elif len(op_matches) > 1:
                     raise RepairBudgetError(
                         f"Ambiguous multiple reservations for operation_id '{clean_op}'"
                     )
             if res is None:
                 raise RepairBudgetError(
                     "Unknown or missing budget reservation for finalize_attempt_budget"
+                )
+            if selected_key != res.reservation_id or (
+                clean_res_id is not None and clean_res_id != selected_key
+            ):
+                raise RepairBudgetError(
+                    f"Reservation map key '{selected_key}' mismatches embedded "
+                    f"reservation_id '{res.reservation_id}'"
                 )
             if clean_att is not None and res.attempt_id != clean_att:
                 raise RepairBudgetError("attempt_id mismatch finalizing budget reservation")
@@ -2448,6 +2465,11 @@ class DurableRepairBudgetLedger:
             if res is None:
                 raise RepairBudgetError(
                     "Unknown or missing budget reservation for release_attempt_budget"
+                )
+            if res.bucket != "OUTER_REPAIR":
+                raise RepairBudgetError(
+                    f"Cannot release reservation '{res.reservation_id}' with bucket "
+                    f"'{res.bucket}'; only OUTER_REPAIR reservations are releasable"
                 )
             if res.status == "RELEASED":
                 return res

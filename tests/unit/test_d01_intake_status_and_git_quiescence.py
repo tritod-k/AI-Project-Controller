@@ -1207,3 +1207,109 @@ def test_render_current_status_md_refuses_to_overwrite_authoritative_json_input(
         render_current_status_md(project_root, queue_path=queue_file)
 
     assert queue_file.read_bytes() == original_bytes
+
+
+def test_git_quiescence_rejects_posix_negation_followed_by_indented_non_restoring_rule(
+    tmp_path: Path,
+) -> None:
+    ws = _setup_quiescent_workspace(tmp_path)
+    (ws / ".gitignore").write_text(
+        "stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\n.env*\n!.[[:lower:]]nv*\n  .env*\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (ws / ".env").write_text("DUMMY=1\n", encoding="utf-8", newline="\n")
+
+    subprocess.run(["git", "-C", str(ws), "init"], check=True, capture_output=True)
+    check_proc = subprocess.run(
+        ["git", "-C", str(ws), "check-ignore", ".env"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert check_proc.returncode == 1
+
+    report = verify_workspace_git_quiescence(ws)
+    assert report.passed is False
+    assert report.status == "FAIL"
+    assert report.checks["git_hygiene"] is False
+
+
+def test_snapshot_approved_plan_no_replace_when_destination_appears_at_publish_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aipc.project.scaffolding as scaffolding_mod
+
+    _, _, runtime_root = _init_project(tmp_path, "proj-snap-noreplace")
+    plan_src = tmp_path / "MASTER_PLAN.md"
+    plan_src.write_text("# Approved Plan\n", encoding="utf-8", newline="\n")
+
+    orig_publish = scaffolding_mod._publish_dir_noreplace
+
+    def _race_mkdir_then_publish(src: Path, dst: Path) -> None:
+        dst.mkdir(parents=True, exist_ok=True)
+        orig_publish(src, dst)
+
+    monkeypatch.setattr(scaffolding_mod, "_publish_dir_noreplace", _race_mkdir_then_publish)
+
+    with pytest.raises(ProjectScaffoldingError, match="already exists"):
+        snapshot_approved_plan(
+            runtime_root,
+            plan_version="plan-v0001",
+            source_plan_path=plan_src,
+            approved_by="K.TRITOD",
+            project_id="proj-snap-noreplace",
+            milestone_id="phase-24",
+        )
+
+    approved_root = runtime_root / "plans" / "approved"
+    target_dir = approved_root / "plan-v0001"
+    assert target_dir.is_dir()
+    assert list(target_dir.iterdir()) == []
+    assert [p.name for p in approved_root.iterdir()] == ["plan-v0001"]
+
+
+def test_snapshot_approved_plan_injected_publish_failure_leaves_version_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aipc.project.scaffolding as scaffolding_mod
+
+    _, _, runtime_root = _init_project(tmp_path, "proj-snap-retry")
+    plan_src = tmp_path / "MASTER_PLAN.md"
+    plan_src.write_text("# Retryable Plan\n", encoding="utf-8", newline="\n")
+
+    orig_publish = scaffolding_mod._publish_dir_noreplace
+
+    def _fail_publish(src: Path, dst: Path) -> None:
+        raise OSError("injected publish failure")
+
+    monkeypatch.setattr(scaffolding_mod, "_publish_dir_noreplace", _fail_publish)
+
+    with pytest.raises(ProjectScaffoldingError, match="Cannot publish plan directory"):
+        snapshot_approved_plan(
+            runtime_root,
+            plan_version="plan-v0001",
+            source_plan_path=plan_src,
+            approved_by="K.TRITOD",
+            project_id="proj-snap-retry",
+            milestone_id="phase-24",
+        )
+
+    approved_root = runtime_root / "plans" / "approved"
+    assert not (approved_root / "plan-v0001").exists()
+    assert list(approved_root.iterdir()) == []
+
+    monkeypatch.setattr(scaffolding_mod, "_publish_dir_noreplace", orig_publish)
+    snap = snapshot_approved_plan(
+        runtime_root,
+        plan_version="plan-v0001",
+        source_plan_path=plan_src,
+        approved_by="K.TRITOD",
+        project_id="proj-snap-retry",
+        milestone_id="phase-24",
+    )
+    assert snap.plan_dir.is_dir()
+    assert snap.master_plan_path.is_file()
+    assert snap.manifest_path.is_file()

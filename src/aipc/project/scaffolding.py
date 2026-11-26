@@ -656,6 +656,39 @@ def _validate_nonempty_token(value: str, *, label: str) -> str:
     return value.strip()
 
 
+def _publish_dir_noreplace(src: Path, dst: Path) -> None:
+    """Atomically publish directory ``src`` to ``dst`` without replacing an existing ``dst``."""
+    if sys.platform.startswith("linux"):
+        import ctypes
+        import ctypes.util
+        import errno
+
+        at_fdcwd = -100
+        rename_noreplace = 1
+        libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        libc = ctypes.CDLL(libc_name, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            libc = ctypes.CDLL(None, use_errno=True)
+            renameat2 = libc.renameat2
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        rc = renameat2(at_fdcwd, os.fsencode(src), at_fdcwd, os.fsencode(dst), rename_noreplace)
+        if rc != 0:
+            err = ctypes.get_errno()
+            if err == errno.ENOTEMPTY:
+                err = errno.EEXIST
+            raise OSError(err, os.strerror(err), str(src), None, str(dst))
+        return
+    os.rename(src, dst)
+
+
 def snapshot_approved_plan(
     runtime_root: Path | str,
     *,
@@ -781,7 +814,7 @@ def snapshot_approved_plan(
                 f"Approved plan version already exists (immutable): {plan_version}"
             )
         try:
-            os.rename(staging_dir, target_dir)
+            _publish_dir_noreplace(staging_dir, target_dir)
             published = True
         except FileExistsError as exc:
             raise ProjectScaffoldingError(
