@@ -1128,3 +1128,37 @@ def test_closeout_restore_rejects_ambiguous_windows_names_and_file_dir_collision
         with pytest.raises(IsolationPolicyError, match="collision"):
             verify_and_restore_closeout_zip(col_zip, restore_dir)
         assert list(restore_dir.rglob("*")) == []
+
+
+def test_closeout_restore_rejects_raw_unnormalized_win32_after_valid_member(
+    tmp_path: Path,
+) -> None:
+    def _write_zip_with_sidecar(zip_path: Path, entries: list[tuple[str, bytes]]) -> None:
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, payload in entries:
+                zf.writestr(name, payload)
+        zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        Path(f"{zip_path}.sha256").write_text(
+            f"{zip_sha}  {zip_path.name}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    invalid_cases = (
+        ("win32_con_space_ext", [("valid/ok.txt", b"ok\n"), ("CON .txt", b"bad\n")]),
+        ("win32_aux_space_ext", [("valid/ok.txt", b"ok\n"), ("aux .json", b"bad\n")]),
+        ("win32_nul_dots", [("valid/ok.txt", b"ok\n"), ("NUL...", b"bad\n")]),
+        ("win32_com_sup", [("valid/ok.txt", b"ok\n"), ("COM\u00b2.txt", b"bad\n")]),
+        ("double_slash", [("valid/ok.txt", b"ok\n"), ("a//b.txt", b"bad\n")]),
+        ("double_slash_dir", [("valid/ok.txt", b"ok\n"), ("dir//", b"")]),
+        ("dot_segment", [("valid/ok.txt", b"ok\n"), ("./a.txt", b"bad\n")]),
+        ("colliding_member", [("valid/ok.txt", b"ok\n"), ("valid", b"collision\n")]),
+    )
+
+    for idx, (label, entries) in enumerate(invalid_cases):
+        bad_zip = tmp_path / f"raw_bad_{label}_{idx}.zip"
+        _write_zip_with_sidecar(bad_zip, entries)
+        restore_dir = tmp_path / f"restore_raw_{label}_{idx}"
+        with pytest.raises(IsolationPolicyError):
+            verify_and_restore_closeout_zip(bad_zip, restore_dir)
+        assert list(restore_dir.rglob("*")) == []

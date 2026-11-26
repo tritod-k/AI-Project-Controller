@@ -1289,6 +1289,8 @@ class DurableRepairBudgetLedger:
         grant_approval_id: str | None = None,
     ) -> BudgetReservationDecision:
         """Atomically check and reserve one code-repair slot, idempotent on exact replay."""
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise RepairBudgetError("attempt must be a positive integer >= 1")
         clean_grant_id: str | None = None
         if grant_approval_id is not None:
             if not isinstance(grant_approval_id, str) or not grant_approval_id.strip():

@@ -2369,7 +2369,10 @@ def reconcile_queue_and_budget_consistency(
                     if missing_reason not in reasons:
                         reasons.append(missing_reason)
                 elif _task_never_dispatched(latest_task):
-                    if res.bucket == "OUTER_REPAIR":
+                    if (
+                        res.bucket == "OUTER_REPAIR"
+                        and res_id not in latest_snap.unresolved_reservation_ids
+                    ):
                         ledger.release_attempt_budget(  # type: ignore[attr-defined]
                             reservation_id=res_id,
                             reason="orphan_reserved_task_not_in_progress",
@@ -2385,12 +2388,13 @@ def reconcile_queue_and_budget_consistency(
                             unresolved_res_ids.append(res_id)
                         if res.task_id not in escalated_ids:
                             escalated_ids.append(res.task_id)
-                        non_outer_reason = (
-                            f"RECONCILIATION_REQUIRED: never-dispatched task '{res.task_id}' "
-                            f"has non-releasable {res.bucket} RESERVED ledger entry '{res_id}'"
-                        )
-                        if non_outer_reason not in reasons:
-                            reasons.append(non_outer_reason)
+                        if res_id not in latest_snap.unresolved_reservation_ids:
+                            non_outer_reason = (
+                                f"RECONCILIATION_REQUIRED: never-dispatched task '{res.task_id}' "
+                                f"has non-releasable {res.bucket} RESERVED ledger entry '{res_id}'"
+                            )
+                            if non_outer_reason not in reasons:
+                                reasons.append(non_outer_reason)
                 else:
                     reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
             else:
@@ -2424,12 +2428,21 @@ def reconcile_queue_and_budget_consistency(
                     if r.task_id == tid and r.status in ("RESERVED", "CONSUMED")
                 ]
                 reserved_res = [r for r in active_res if r.status == "RESERVED"]
-                op_id = _clean_non_empty_str(task.operation_id) or (
+                task_op_id = _clean_non_empty_str(task.operation_id)
+                att_op_id = (
                     _clean_non_empty_str(task.attempts[-1].operation_id) if task.attempts else None
                 )
-                att_id = _clean_non_empty_str(task.active_attempt_id) or (
+                task_att_id = _clean_non_empty_str(task.active_attempt_id)
+                att_att_id = (
                     _clean_non_empty_str(task.attempts[-1].attempt_id) if task.attempts else None
                 )
+                att_res_id = (
+                    _clean_non_empty_str(getattr(task.attempts[-1], "reservation_id", None))
+                    if task.attempts
+                    else None
+                )
+                op_id = task_op_id or att_op_id
+                att_id = task_att_id or att_att_id
 
                 esc_reason: str | None = None
                 if reserved_res:
@@ -2440,6 +2453,18 @@ def reconcile_queue_and_budget_consistency(
                     esc_reason = (
                         f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' has unfinalized "
                         f"RESERVED ledger entries {res_list}"
+                    )
+                elif task_op_id is not None and att_op_id is not None and task_op_id != att_op_id:
+                    esc_reason = (
+                        f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' operation_id "
+                        f"'{task_op_id}' mismatches attempt record '{att_op_id}'"
+                    )
+                elif (
+                    task_att_id is not None and att_att_id is not None and task_att_id != att_att_id
+                ):
+                    esc_reason = (
+                        f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' active_attempt_id "
+                        f"'{task_att_id}' mismatches attempt record '{att_att_id}'"
                     )
                 elif not op_id:
                     esc_reason = (
@@ -2476,6 +2501,12 @@ def reconcile_queue_and_budget_consistency(
                             esc_reason = (
                                 f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' attempt_id "
                                 f"'{att_id}' mismatches ledger '{res_att}'"
+                            )
+                        elif att_res_id is not None and att_res_id != matching[0].reservation_id:
+                            esc_reason = (
+                                f"RECONCILIATION_REQUIRED: IN_PROGRESS task '{tid}' attempt "
+                                f"reservation_id '{att_res_id}' mismatches ledger "
+                                f"'{matching[0].reservation_id}'"
                             )
 
                 if esc_reason is not None:

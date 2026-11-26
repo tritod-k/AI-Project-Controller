@@ -433,7 +433,22 @@ def _char_matches_range(rep: str, lo_ord: int, hi_ord: int) -> bool:
     return any(lo_ord <= cp <= hi_ord for cp in equiv_groups.get(_case_key(rep), ()))
 
 
-def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str, frozenset[str]]]:
+def _tokenize_segment_glob(
+    pat: str,
+    alphabet: frozenset[str],
+    *,
+    ignorecase: bool = True,
+) -> list[tuple[str, frozenset[str]]]:
+    def _lit_match(rep: str, lit: str) -> bool:
+        if ignorecase:
+            return _char_matches_literal(rep, lit)
+        return rep != "/" and rep == lit
+
+    def _rng_match(rep: str, lo_ord: int, hi_ord: int) -> bool:
+        if ignorecase:
+            return _char_matches_range(rep, lo_ord, hi_ord)
+        return rep != "/" and lo_ord <= ord(rep) <= hi_ord
+
     tokens: list[tuple[str, frozenset[str]]] = []
     i = 0
     n = len(pat)
@@ -453,12 +468,12 @@ def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str
             else:
                 lit = "\\"
                 i += 1
-            matched = frozenset(a for a in alphabet if _char_matches_literal(a, lit))
+            matched = frozenset(a for a in alphabet if _lit_match(a, lit))
             tokens.append(("char", matched))
         elif ch == "[":
             scanned = _scan_bracket_expression_end(pat, i)
             if scanned is None:
-                matched = frozenset(a for a in alphabet if _char_matches_literal(a, "["))
+                matched = frozenset(a for a in alphabet if _lit_match(a, "["))
                 tokens.append(("char", matched))
                 i += 1
                 continue
@@ -482,18 +497,18 @@ def _tokenize_segment_glob(pat: str, alphabet: frozenset[str]) -> list[tuple[str
                     hi_ord = ord(hi_ch)
                     if lo_ord <= hi_ord:
                         for a in alphabet:
-                            if _char_matches_range(a, lo_ord, hi_ord):
+                            if _rng_match(a, lo_ord, hi_ord):
                                 class_chars.add(a)
                 else:
                     for a in alphabet:
-                        if _char_matches_literal(a, lo_ch):
+                        if _lit_match(a, lo_ch):
                             class_chars.add(a)
                     k = next_k
             matched = alphabet - class_chars if negated else frozenset(class_chars)
             tokens.append(("char", matched))
             i = j + 1
         else:
-            matched = frozenset(a for a in alphabet if _char_matches_literal(a, ch))
+            matched = frozenset(a for a in alphabet if _lit_match(a, ch))
             tokens.append(("char", matched))
             i += 1
     return tokens
@@ -521,13 +536,10 @@ def _deduplicate_token_alphabet(
     return dedup_a, dedup_b
 
 
-def _segment_globs_intersect(pat_a: str, pat_b: str) -> bool:
-    if _contains_posix_bracket_class(pat_a) or _contains_posix_bracket_class(pat_b):
-        return True
-    alphabet = _build_comparison_alphabet(pat_a, pat_b)
-    tokens_a = _tokenize_segment_glob(pat_a, alphabet)
-    tokens_b = _tokenize_segment_glob(pat_b, alphabet)
-    tokens_a, tokens_b = _deduplicate_token_alphabet(alphabet, tokens_a, tokens_b)
+def _segment_tokens_intersect(
+    tokens_a: list[tuple[str, frozenset[str]]],
+    tokens_b: list[tuple[str, frozenset[str]]],
+) -> bool:
     len_a = len(tokens_a)
     len_b = len(tokens_b)
     dp = [[False] * (len_b + 1) for _ in range(len_a + 1)]
@@ -570,7 +582,28 @@ def _segment_globs_intersect(pat_a: str, pat_b: str) -> bool:
     return dp[0][0]
 
 
-def _path_globs_intersect(seq_a: Sequence[str], seq_b: Sequence[str]) -> bool:
+def _segment_globs_intersect(
+    pat_a: str,
+    pat_b: str,
+    *,
+    case_sensitive: bool = False,
+) -> bool:
+    if _contains_posix_bracket_class(pat_a) or _contains_posix_bracket_class(pat_b):
+        return True
+    alphabet = _build_comparison_alphabet(pat_a, pat_b)
+    ignorecase = not case_sensitive
+    tokens_a = _tokenize_segment_glob(pat_a, alphabet, ignorecase=ignorecase)
+    tokens_b = _tokenize_segment_glob(pat_b, alphabet, ignorecase=ignorecase)
+    tokens_a, tokens_b = _deduplicate_token_alphabet(alphabet, tokens_a, tokens_b)
+    return _segment_tokens_intersect(tokens_a, tokens_b)
+
+
+def _path_globs_intersect(
+    seq_a: Sequence[str],
+    seq_b: Sequence[str],
+    *,
+    case_sensitive: bool = False,
+) -> bool:
     len_a = len(seq_a)
     len_b = len(seq_b)
     dp = [[False] * (len_b + 1) for _ in range(len_a + 1)]
@@ -597,7 +630,11 @@ def _path_globs_intersect(seq_a: Sequence[str], seq_b: Sequence[str]) -> bool:
                 and j < len_b
                 and seq_a[i] != "**"
                 and seq_b[j] != "**"
-                and _segment_globs_intersect(seq_a[i], seq_b[j])
+                and _segment_globs_intersect(
+                    seq_a[i],
+                    seq_b[j],
+                    case_sensitive=case_sensitive,
+                )
                 and dp[i + 1][j + 1]
             ):
                 can_match = True
@@ -615,21 +652,32 @@ def _negation_affects_exclusion(neg_pattern: str, required: str) -> bool:
     last = parts[-1]
     if required in ("stable_c/", "worktrees/", "logs/"):
         dir_name = required.rstrip("/")
-        if any(_segment_globs_intersect(part, dir_name) for part in parts):
-            return True
-        if _path_globs_intersect(parts, (dir_name, "**")):
-            return True
-        return _path_globs_intersect(parts, ("**", dir_name, "**"))
+        for case_sensitive in (False, True):
+            if any(
+                _segment_globs_intersect(part, dir_name, case_sensitive=case_sensitive)
+                for part in parts
+            ):
+                return True
+            if _path_globs_intersect(parts, (dir_name, "**"), case_sensitive=case_sensitive):
+                return True
+            if _path_globs_intersect(
+                parts,
+                ("**", dir_name, "**"),
+                case_sensitive=case_sensitive,
+            ):
+                return True
+        return False
     if required in _PROTECTED_FILE_GLOBS:
         if last == "**":
             return True
         for prot in _PROTECTED_FILE_GLOBS[required]:
-            if _segment_globs_intersect(last, prot):
-                return True
-            if _path_globs_intersect(parts, ("**", prot)):
-                return True
-            if _path_globs_intersect(parts, (prot,)):
-                return True
+            for case_sensitive in (False, True):
+                if _segment_globs_intersect(last, prot, case_sensitive=case_sensitive):
+                    return True
+                if _path_globs_intersect(parts, ("**", prot), case_sensitive=case_sensitive):
+                    return True
+                if _path_globs_intersect(parts, (prot,), case_sensitive=case_sensitive):
+                    return True
         return False
     return False
 

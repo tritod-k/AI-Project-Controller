@@ -6063,3 +6063,596 @@ def test_reconcile_isolated_identity_conflicts_persist_exact_reasons_and_preserv
         assert dict(after_state.reservations) == before_reservations
         assert after_state.milestone_consumed == before_ms_consumed
         assert dict(after_state.registered_roots) == before_roots
+
+
+def test_reserve_repair_rejects_malformed_attempt_before_replay_without_mutation(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger_path = tmp_path / "repair_budget_ledger.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["task-01"],
+        trusted_external_root=tmp_path,
+        excluded_roots=(tmp_path / "excluded",),
+    )
+
+    before_bytes = ledger_path.read_bytes()
+    malformed_attempts: tuple[object, ...] = (True, False, 0, -1, "1", None)
+
+    for bad_attempt in malformed_attempts:
+        with pytest.raises(RepairBudgetError, match="attempt must be a positive integer >= 1"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-malformed-fresh",
+                task_id="task-01",
+                attempt=bad_attempt,  # type: ignore[arg-type]
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+            )
+        assert ledger_path.read_bytes() == before_bytes
+        state = ledger.load(loaded_policy=loaded_policy)
+        assert state.milestone_consumed == 0
+        assert state.registered_roots["task-01"].consumed == 0
+
+    first = ledger.reserve_repair(
+        loaded_policy=loaded_policy,
+        event_id="ev-valid-replay-01",
+        task_id="task-01",
+        attempt=1,
+        candidate_sha="b" * 40,
+        review_id="rev-01",
+        route="REVIEW_COORDINATOR",
+    )
+    assert first.allowed is True
+    assert first.idempotent_replay is False
+
+    after_reserve_bytes = ledger_path.read_bytes()
+    for bad_attempt in malformed_attempts:
+        with pytest.raises(RepairBudgetError, match="attempt must be a positive integer >= 1"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-valid-replay-01",
+                task_id="task-01",
+                attempt=bad_attempt,  # type: ignore[arg-type]
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+            )
+        assert ledger_path.read_bytes() == after_reserve_bytes
+        state = ledger.load(loaded_policy=loaded_policy)
+        assert state.milestone_consumed == 1
+        assert state.registered_roots["task-01"].consumed == 1
+
+    replay = ledger.reserve_repair(
+        loaded_policy=loaded_policy,
+        event_id="ev-valid-replay-01",
+        task_id="task-01",
+        attempt=1,
+        candidate_sha="b" * 40,
+        review_id="rev-01",
+        route="REVIEW_COORDINATOR",
+    )
+    assert replay.allowed is True
+    assert replay.idempotent_replay is True
+    assert ledger_path.read_bytes() == after_reserve_bytes
+
+
+def test_ledger_blank_string_arguments_rejected_individually_on_valid_ledger_without_mutation(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger_path = tmp_path / "repair_budget_ledger.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["task-01"],
+        trusted_external_root=tmp_path,
+        excluded_roots=(tmp_path / "excluded",),
+    )
+
+    def _assert_unmutated(expected_bytes: bytes, expected_consumed: int) -> None:
+        raw_now = ledger_path.read_bytes()
+        assert raw_now == expected_bytes
+        assert hashlib.sha256(raw_now).hexdigest() == hashlib.sha256(expected_bytes).hexdigest()
+        st = ledger.load(loaded_policy=loaded_policy)
+        assert st.milestone_consumed == expected_consumed
+        assert st.registered_roots["task-01"].consumed == expected_consumed
+
+    base_bytes = ledger_path.read_bytes()
+
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="grant_approval_id"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-blank-check",
+                task_id="task-01",
+                attempt=1,
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+                grant_approval_id=blank,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="task"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-blank-check",
+                task_id=blank,
+                attempt=1,
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="root_task"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-blank-check",
+                task_id="task-01",
+                attempt=1,
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+                explicit_root_task=blank,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="target path"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-blank-check",
+                task_id="task-01",
+                attempt=1,
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+                target_paths=[blank],
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="operation_id"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id=blank,
+                attempt_id="att-01-task-01",
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="attempt_id"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-blank-01",
+                attempt_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="grant_approval_id"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-blank-01",
+                attempt_id="att-01-task-01",
+                grant_approval_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="review_id"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-blank-01",
+                attempt_id="att-01-task-01",
+                review_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="task"):
+            ledger.reserve_attempt_budget(
+                task_id=blank,
+                operation_id="op-blank-01",
+                attempt_id="att-01-task-01",
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="root_task"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-blank-01",
+                attempt_id="att-01-task-01",
+                explicit_root_task=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+        with pytest.raises(RepairBudgetError, match="target path"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-blank-01",
+                attempt_id="att-01-task-01",
+                target_paths=[blank],
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(base_bytes, 0)
+
+    rec = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-valid-blank-peer",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    reserved_bytes = ledger_path.read_bytes()
+
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="reservation_id"):
+            ledger.finalize_attempt_budget(
+                reservation_id=blank,
+                operation_id="op-valid-blank-peer",
+                attempt_id="att-01-task-01",
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="operation_id"):
+            ledger.finalize_attempt_budget(
+                reservation_id=rec.reservation_id,
+                operation_id=blank,
+                attempt_id="att-01-task-01",
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="attempt_id"):
+            ledger.finalize_attempt_budget(
+                reservation_id=rec.reservation_id,
+                operation_id="op-valid-blank-peer",
+                attempt_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="worker_id"):
+            ledger.finalize_attempt_budget(
+                reservation_id=rec.reservation_id,
+                operation_id="op-valid-blank-peer",
+                attempt_id="att-01-task-01",
+                worker_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="provider"):
+            ledger.finalize_attempt_budget(
+                reservation_id=rec.reservation_id,
+                operation_id="op-valid-blank-peer",
+                attempt_id="att-01-task-01",
+                provider=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="reservation_id"):
+            ledger.release_attempt_budget(
+                reservation_id=blank,
+                operation_id="op-valid-blank-peer",
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="operation_id"):
+            ledger.release_attempt_budget(
+                reservation_id=rec.reservation_id,
+                operation_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="reason"):
+            ledger.release_attempt_budget(
+                reservation_id=rec.reservation_id,
+                operation_id="op-valid-blank-peer",
+                reason=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+
+def test_reconcile_preserves_already_unresolved_outer_repair_reservation_idempotently(
+    tmp_path: Path,
+) -> None:
+    tick = [0]
+
+    def _tick_clock() -> datetime:
+        tick[0] += 1
+        return _fixed_now() + timedelta(seconds=tick[0])
+
+    loaded_policy = _make_loaded_policy()
+    q_path = tmp_path / "canonical_queue.json"
+    l_path = tmp_path / "repair_budget_ledger.json"
+
+    ledger = DurableRepairBudgetLedger(l_path, clock=_tick_clock)
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["task-01"],
+        trusted_external_root=tmp_path,
+        excluded_roots=(tmp_path / "excluded",),
+    )
+    queue = PersistentTaskQueue(q_path, clock=_tick_clock, repair_budget_path=l_path)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=[_make_contract("task-01")],
+    )
+
+    rec = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-unresolved-outer",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    assert rec.bucket == "OUTER_REPAIR"
+
+    snap = queue.load()
+    queue._save(
+        snap.model_copy(
+            update={
+                "reconciliation_required": True,
+                "reconciliation_reasons": (
+                    f"RECONCILIATION_REQUIRED: persisted unresolved '{rec.reservation_id}'",
+                ),
+                "unresolved_reservation_ids": (rec.reservation_id,),
+            }
+        )
+    )
+
+    first = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert first.status == "RECONCILIATION_REQUIRED"
+    assert first.released_reservation_ids == ()
+
+    q_bytes_after_first = q_path.read_bytes()
+    l_bytes_after_first = l_path.read_bytes()
+    updated_at_after_first = queue.load().updated_at
+
+    second = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert second.status == "RECONCILIATION_REQUIRED"
+    assert second.released_reservation_ids == ()
+    assert q_path.read_bytes() == q_bytes_after_first
+    assert l_path.read_bytes() == l_bytes_after_first
+    assert queue.load().updated_at == updated_at_after_first
+
+    reloaded_ledger = ledger.load(loaded_policy=loaded_policy)
+    assert reloaded_ledger.reservations[rec.reservation_id].status == "RESERVED"
+    assert reloaded_ledger.milestone_consumed == 1
+    assert reloaded_ledger.registered_roots["task-01"].consumed == 1
+
+
+def test_reconcile_task_vs_attempt_record_identity_mismatches_and_full_ledger_parity(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+
+    def _setup_two_task_case(
+        case_name: str,
+    ) -> tuple[Path, Path, PersistentTaskQueue, DurableRepairBudgetLedger, str]:
+        case_dir = tmp_path / case_name
+        case_dir.mkdir(parents=True, exist_ok=True)
+        q_path = case_dir / "canonical_queue.json"
+        l_path = case_dir / "repair_budget_ledger.json"
+        ldg = DurableRepairBudgetLedger(l_path, clock=_fixed_now)
+        ldg.initialize(
+            loaded_policy=loaded_policy,
+            registered_roots=["task-01", "task-02"],
+            trusted_external_root=case_dir,
+            excluded_roots=(case_dir / "excluded",),
+        )
+        q = PersistentTaskQueue(q_path, clock=_fixed_now, repair_budget_path=l_path)
+        q.initialize(
+            project_id="proj-d01",
+            milestone_id="phase-24",
+            contracts=[_make_contract("task-01"), _make_contract("task-02")],
+        )
+        # Unrelated RESERVED entry on task-02 (in RUNNING? No, keep task-02 RUNNING? No, keep
+        # task-02 in REPAIR_REQUIRED or reserve on task-02 after; wait: if task-02 is ELIGIBLE,
+        # reconcile would release OUTER_REPAIR. Keep task-02 in REPAIR_REQUIRED? No, that would
+        # escalate task-02. Use a CONSUMED entry on task-02? The requirement asks for an unrelated
+        # RESERVED entry; wait - if task-02 is WAITING_HUMAN or REPAIR_REQUIRED, reconcile
+        # escalates it too, which still preserves ledger parity!).
+        unrelated = ldg.reserve_attempt_budget(
+            task_id="task-02",
+            operation_id=f"op-unrelated-{case_name}",
+            attempt_id="att-01-task-02",
+            loaded_policy=loaded_policy,
+        )
+        snap = q.load()
+        t2 = snap.tasks[1].model_copy(update={"status": QueuedTaskStatus.WAITING_HUMAN})
+        q._replace_task(snap, t2)
+        return q_path, l_path, q, ldg, unrelated.reservation_id
+
+    # Case 1: task.operation_id != task.attempts[-1].operation_id
+    q_path_1, l_path_1, q_1, ldg_1, _ = _setup_two_task_case("op_mismatch")
+    ldg_1.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-task-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    ldg_1.finalize_attempt_budget(
+        operation_id="op-task-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    snap_1 = q_1.load()
+    t1_1 = snap_1.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-task-01",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-01-task-01",
+                    operation_id="op-att-wrong",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    q_1._replace_task(snap_1, t1_1)
+    expected_1 = (
+        "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' operation_id "
+        "'op-task-01' mismatches attempt record 'op-att-wrong'"
+    )
+
+    # Case 2: task.active_attempt_id != task.attempts[-1].attempt_id
+    q_path_2, l_path_2, q_2, ldg_2, _ = _setup_two_task_case("att_mismatch")
+    ldg_2.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-task-02",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    ldg_2.finalize_attempt_budget(
+        operation_id="op-task-02",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    snap_2 = q_2.load()
+    t1_2 = snap_2.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-task-02",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-99-wrong",
+                    operation_id="op-task-02",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    q_2._replace_task(snap_2, t1_2)
+    expected_2 = (
+        "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' active_attempt_id "
+        "'att-01-task-01' mismatches attempt record 'att-99-wrong'"
+    )
+
+    # Case 3: task.attempts[-1].reservation_id != matching[0].reservation_id
+    q_path_3, l_path_3, q_3, ldg_3, _ = _setup_two_task_case("res_mismatch")
+    res_3 = ldg_3.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-task-03",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    ldg_3.finalize_attempt_budget(
+        operation_id="op-task-03",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    snap_3 = q_3.load()
+    t1_3 = snap_3.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-task-03",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-01-task-01",
+                    operation_id="op-task-03",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    q_3._replace_task(snap_3, t1_3)
+    expected_3 = (
+        "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' attempt "
+        f"reservation_id 'res-wrong-99' mismatches ledger '{res_3.reservation_id}'"
+    )
+
+    class _AttemptResProxyQueue:
+        def __init__(self, inner: PersistentTaskQueue) -> None:
+            self._inner = inner
+            self._path = inner._path
+            self._clock = inner._clock
+
+        def load(self) -> TaskQueueSnapshot:
+            loaded = self._inner.load()
+            patched_tasks = []
+            for item in loaded.tasks:
+                if item.contract.task_id == "task-01" and item.attempts:
+                    att_dict = item.attempts[-1].model_dump()
+                    att_ns = SimpleNamespace(**att_dict, reservation_id="res-wrong-99")
+                    item = item.model_copy(update={"attempts": (att_ns,)})
+                patched_tasks.append(item)
+            return loaded.model_copy(update={"tasks": tuple(patched_tasks)})
+
+        def _save(self, snap_obj: TaskQueueSnapshot) -> None:
+            clean_tasks = []
+            for item in snap_obj.tasks:
+                if item.contract.task_id == "task-01" and item.attempts:
+                    att_obj = item.attempts[-1]
+                    if not isinstance(att_obj, TaskAttemptLedger):
+                        data = {k: v for k, v in vars(att_obj).items() if k != "reservation_id"}
+                        item = item.model_copy(
+                            update={"attempts": (TaskAttemptLedger.model_validate(data),)}
+                        )
+                clean_tasks.append(item)
+            self._inner._save(snap_obj.model_copy(update={"tasks": tuple(clean_tasks)}))
+
+    for q_path, l_path, q_obj, ldg_obj, expected_reason in (
+        (q_path_1, l_path_1, q_1, ldg_1, expected_1),
+        (q_path_2, l_path_2, q_2, ldg_2, expected_2),
+        (q_path_3, l_path_3, _AttemptResProxyQueue(q_3), ldg_3, expected_3),
+    ):
+        before_state = ldg_obj.load(loaded_policy=loaded_policy)
+        outcome = reconcile_queue_and_budget_consistency(q_obj, ldg_obj)  # type: ignore[arg-type]
+        assert outcome.status == "RECONCILIATION_REQUIRED"
+        assert "task-01" in outcome.escalated_task_ids
+        assert expected_reason in outcome.reasons
+
+        reloaded_q = PersistentTaskQueue(q_path, clock=_fixed_now)
+        reloaded_ldg = DurableRepairBudgetLedger(l_path, clock=_fixed_now)
+        reloaded_snap = reloaded_q.load()
+        t1 = next(t for t in reloaded_snap.tasks if t.contract.task_id == "task-01")
+        assert t1.status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+        assert t1.reconciliation_required is True
+        assert t1.reconciliation_reason == expected_reason
+        assert t1.blocker_reason == expected_reason
+        assert reloaded_snap.reconciliation_required is True
+        assert expected_reason in reloaded_snap.reconciliation_reasons
+
+        after_state = reloaded_ldg.load(loaded_policy=loaded_policy)
+        assert dict(after_state.reservations) == dict(before_state.reservations)
+        assert after_state.milestone_consumed == before_state.milestone_consumed
+        assert (
+            after_state.milestone_worker_invocations_consumed
+            == before_state.milestone_worker_invocations_consumed
+        )
+        assert (
+            after_state.global_worker_invocations_consumed
+            == before_state.global_worker_invocations_consumed
+        )
+        assert dict(after_state.registered_roots) == dict(before_state.registered_roots)

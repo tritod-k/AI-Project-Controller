@@ -529,7 +529,9 @@ _WINDOWS_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
         "AUX",
         "NUL",
         *(f"COM{i}" for i in range(1, 10)),
+        *(f"COM{sup}" for sup in ("\u00b9", "\u00b2", "\u00b3")),
         *(f"LPT{i}" for i in range(1, 10)),
+        *(f"LPT{sup}" for sup in ("\u00b9", "\u00b2", "\u00b3")),
     }
 )
 _UNSAFE_ZIP_ENTRY_CHARS: frozenset[str] = frozenset(':<>"|?*')
@@ -540,20 +542,20 @@ def _validate_zip_entry_name(name: str) -> PurePosixPath:
         raise IsolationPolicyError(f"Unsafe zip entry name: {name!r}")
     if name.startswith("/") or PureWindowsPath(name).drive or PurePosixPath(name).is_absolute():
         raise IsolationPolicyError(f"Absolute zip entry path rejected: {name!r}")
-    posix = PurePosixPath(name)
-    if any(part in ("", ".", "..") for part in posix.parts):
-        raise IsolationPolicyError(f"Zip-slip or invalid relative path rejected: {name!r}")
-    for part in posix.parts:
-        if part.endswith((".", " ")):
+    raw_segments = name.split("/")
+    for segment in raw_segments:
+        if segment in ("", ".", ".."):
+            raise IsolationPolicyError(f"Zip-slip or invalid relative path rejected: {name!r}")
+        if segment.endswith((".", " ")):
             raise IsolationPolicyError(
                 f"Ambiguous trailing dot/space zip entry segment rejected: {name!r}"
             )
-        stem = part.split(".", 1)[0].upper()
-        if stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+        win32_stem = segment.rstrip(" .").split(".", 1)[0].split(":", 1)[0].rstrip(" .").upper()
+        if win32_stem in _WINDOWS_RESERVED_DEVICE_NAMES:
             raise IsolationPolicyError(
                 f"Reserved Windows device name in zip entry rejected: {name!r}"
             )
-    return posix
+    return PurePosixPath(*raw_segments)
 
 
 def verify_and_restore_closeout_zip(
@@ -613,7 +615,11 @@ def verify_and_restore_closeout_zip(
                         f"Symlink entry rejected in closeout zip: {info.filename!r}"
                     )
                 is_dir_entry = info.is_dir()
-                raw_member = info.filename.rstrip("/") if is_dir_entry else info.filename
+                raw_member = (
+                    info.filename[:-1]
+                    if is_dir_entry and info.filename.endswith("/")
+                    else info.filename
+                )
                 rel_posix = _validate_zip_entry_name(raw_member)
                 norm_name = rel_posix.as_posix()
                 norm_cf = norm_name.casefold()

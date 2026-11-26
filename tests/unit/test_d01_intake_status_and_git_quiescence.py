@@ -1404,3 +1404,37 @@ def test_git_quiescence_rejects_embedded_bare_cr_in_gitignore_matching_real_git(
     assert report.passed is False
     assert report.status == "FAIL"
     assert report.checks["git_hygiene"] is False
+
+
+def test_git_quiescence_rejects_negated_bracket_overlap_across_case_modes(tmp_path: Path) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git executable not available")
+
+    assert _segment_globs_intersect(".[!E]nv", ".env*", case_sensitive=True) is True
+
+    for ignorecase_val in ("false", "true"):
+        ws = _setup_quiescent_workspace(tmp_path / f"ws_case_{ignorecase_val}")
+        (ws / ".gitignore").write_text(
+            "stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\n.env*\n!.[!E]nv\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        subprocess.run(["git", "-C", str(ws), "init"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(ws), "config", "core.ignorecase", ignorecase_val],
+            check=True,
+            capture_output=True,
+        )
+        check_proc = subprocess.run(
+            ["git", "-C", str(ws), "check-ignore", ".env"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if ignorecase_val == "false":
+            assert check_proc.returncode == 1
+
+        report = verify_workspace_git_quiescence(ws)
+        assert report.passed is False
+        assert report.status == "FAIL"
+        assert report.checks["git_hygiene"] is False
