@@ -2,7 +2,7 @@
 
 # AIPC 2.0 Universal Subscription Orchestration Roadmap
 
-**Milestone D Status** AWAITING_REVIEW. Cycle 19 of 19 (consolidated batch repair) verified at `77eab24e64bfefec0fba2b007b6031c51c25c495`. The Cycle #20 review and exact-SHA CI bind to `frozenSHA_d_r20`. Ratified posture remains supervised and experimental.
+**Milestone D Status** AWAITING_REVIEW. Cycle 20 of 20 (consolidated final repair) verified at `47db0d6f4eec8b61a8984a170a591ce418f9620a`. The Cycle #21 review and exact-SHA CI bind to `frozenSHA_d_r21`. Ratified posture remains supervised and experimental.
 
 ---
 
