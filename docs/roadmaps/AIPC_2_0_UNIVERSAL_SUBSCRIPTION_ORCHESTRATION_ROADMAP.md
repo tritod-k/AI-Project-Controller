@@ -2,7 +2,7 @@
 
 # AIPC 2.0 Universal Subscription Orchestration Roadmap
 
-**Milestone D Status** AWAITING_REVIEW. Cycle 21 of 21 (final convergence 5-item repair) verified at `50b3f7253e70388022417c47e7d4ea3ac74d0589`. The Cycle #22 review and exact-SHA CI bind to `frozenSHA_d_r22`. Ratified posture remains supervised and experimental.
+**Milestone D Status** AWAITING_REVIEW. Cycle 22 of 22 (final 6-subjob closure 5-item repair) verified at `335055ce23b2cf51f664e379e9cbaf5e2869243f`. The Cycle #23 review and exact-SHA CI bind to `frozenSHA_d_r23`. Ratified posture remains supervised and experimental.
 
 ---
 
