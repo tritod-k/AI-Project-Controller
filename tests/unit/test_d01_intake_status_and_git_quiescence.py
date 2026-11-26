@@ -1313,3 +1313,62 @@ def test_snapshot_approved_plan_injected_publish_failure_leaves_version_retryabl
     assert snap.plan_dir.is_dir()
     assert snap.master_plan_path.is_file()
     assert snap.manifest_path.is_file()
+
+
+def test_git_quiescence_rejects_unicode_separator_and_whitespace_after_negation(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git executable not available")
+
+    from aipc.project.workspace_git_checkpoint import _evaluate_gitignore_exclusion
+
+    # (a) Unicode line/paragraph separator (\u2028) inside a pattern is NOT split
+    ws_uni = _setup_quiescent_workspace(tmp_path / "ws_unicode_sep")
+    (ws_uni / ".gitignore").write_text(
+        "stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\n.env*\u2028ignored\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    subprocess.run(["git", "-C", str(ws_uni), "init"], check=True, capture_output=True)
+    proc_uni = subprocess.run(
+        ["git", "-C", str(ws_uni), "check-ignore", ".env"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc_uni.returncode == 1
+
+    rep_uni = verify_workspace_git_quiescence(ws_uni)
+    assert rep_uni.passed is False
+    assert rep_uni.checks["git_hygiene"] is False
+
+    # (b) Whitespace immediately after '!' (! .env) is preserved in evaluator and rejected
+    assert _evaluate_gitignore_exclusion([".env*", "! .env"], ".env*") == (True, None)
+    assert _evaluate_gitignore_exclusion([".env*", "!.env"], ".env*") == (False, "!.env")
+
+    ws_neg = _setup_quiescent_workspace(tmp_path / "ws_space_neg")
+    (ws_neg / ".gitignore").write_text(
+        "stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\n.env*\n! .env\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    subprocess.run(["git", "-C", str(ws_neg), "init"], check=True, capture_output=True)
+    proc_env = subprocess.run(
+        ["git", "-C", str(ws_neg), "check-ignore", ".env"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    proc_sp_env = subprocess.run(
+        ["git", "-C", str(ws_neg), "check-ignore", " .env"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc_env.returncode == 0
+    assert proc_sp_env.returncode == 1
+
+    rep_neg = verify_workspace_git_quiescence(ws_neg)
+    assert rep_neg.passed is False
+    assert rep_neg.checks["git_hygiene"] is False

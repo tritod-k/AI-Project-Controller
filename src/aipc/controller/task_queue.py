@@ -2369,14 +2369,28 @@ def reconcile_queue_and_budget_consistency(
                     if missing_reason not in reasons:
                         reasons.append(missing_reason)
                 elif _task_never_dispatched(latest_task):
-                    ledger.release_attempt_budget(  # type: ignore[attr-defined]
-                        reservation_id=res_id,
-                        reason="orphan_reserved_task_not_in_progress",
-                    )
-                    released_ids.append(res_id)
-                    reasons.append(
-                        f"Released orphan RESERVED reservation '{res_id}' for task '{res.task_id}'"
-                    )
+                    if res.bucket == "OUTER_REPAIR":
+                        ledger.release_attempt_budget(  # type: ignore[attr-defined]
+                            reservation_id=res_id,
+                            reason="orphan_reserved_task_not_in_progress",
+                        )
+                        released_ids.append(res_id)
+                        reasons.append(
+                            f"Released orphan RESERVED reservation '{res_id}' "
+                            f"for task '{res.task_id}'"
+                        )
+                    else:
+                        reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
+                        if res_id not in unresolved_res_ids:
+                            unresolved_res_ids.append(res_id)
+                        if res.task_id not in escalated_ids:
+                            escalated_ids.append(res.task_id)
+                        non_outer_reason = (
+                            f"RECONCILIATION_REQUIRED: never-dispatched task '{res.task_id}' "
+                            f"has non-releasable {res.bucket} RESERVED ledger entry '{res_id}'"
+                        )
+                        if non_outer_reason not in reasons:
+                            reasons.append(non_outer_reason)
                 else:
                     reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
             else:

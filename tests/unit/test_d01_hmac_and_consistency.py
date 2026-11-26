@@ -5261,3 +5261,343 @@ def test_release_attempt_budget_rejects_worker_invocation_bucket_without_mutatio
         == st_before.milestone_worker_invocations_consumed
     )
     assert st_after.registered_roots == st_before.registered_roots
+
+
+def test_release_attempt_budget_rejects_mismatched_map_key_and_blank_args_without_mutation(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(tmp_path / "budget.json", clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+
+    rec = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-rel-mismatch-01",
+        attempt_id="att-rel-mismatch-01",
+        attempt=1,
+        candidate_sha="a" * 40,
+        loaded_policy=loaded_policy,
+    )
+    state = ledger.load(loaded_policy=loaded_policy)
+    mismatched_key = "res-mismatched-key"
+    tampered = _with_digest(
+        state.model_copy(
+            update={
+                "reservations": {mismatched_key: rec},
+                "event_to_reservation": {rec.event_id: mismatched_key},
+            }
+        )
+    )
+    write_json_atomic(ledger.path, tampered.model_dump(mode="json"))
+    raw_before = ledger.path.read_bytes()
+
+    for kwargs in (
+        {"reservation_id": mismatched_key},
+        {"operation_id": "op-rel-mismatch-01"},
+        {"reservation_id": mismatched_key, "operation_id": "op-rel-mismatch-01"},
+    ):
+        with pytest.raises(RepairBudgetError, match="mismatches embedded reservation_id"):
+            ledger.release_attempt_budget(loaded_policy=loaded_policy, **kwargs)
+        assert ledger.path.read_bytes() == raw_before
+        st = ledger.load(loaded_policy=loaded_policy)
+        assert st.milestone_consumed == 1
+        assert st.registered_roots["task-01"].consumed == 1
+
+    # (b) Blank/whitespace identifier arguments rejected without mutating ledger
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id=blank,
+                attempt_id="att-valid",
+                loaded_policy=loaded_policy,
+            )
+        with pytest.raises(RepairBudgetError):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-valid-02",
+                attempt_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        with pytest.raises(RepairBudgetError):
+            ledger.finalize_attempt_budget(
+                reservation_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        with pytest.raises(RepairBudgetError):
+            ledger.finalize_attempt_budget(
+                operation_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        with pytest.raises(RepairBudgetError):
+            ledger.release_attempt_budget(
+                reservation_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        with pytest.raises(RepairBudgetError):
+            ledger.release_attempt_budget(
+                operation_id=blank,
+                loaded_policy=loaded_policy,
+            )
+        with pytest.raises(RepairBudgetError):
+            ledger.release_attempt_budget(
+                operation_id="op-rel-mismatch-01",
+                reason=blank,
+                loaded_policy=loaded_policy,
+            )
+        assert ledger.path.read_bytes() == raw_before
+        assert ledger.load(loaded_policy=loaded_policy).milestone_consumed == 1
+
+
+def test_reconcile_never_dispatched_non_outer_repair_reserved_persists_blocker_without_aborting(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(tmp_path / "budget.json", clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+
+    queue = PersistentTaskQueue(tmp_path / "queue.json", clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"),),
+    )
+
+    inv_dec = ledger.reserve_worker_invocation(
+        loaded_policy=loaded_policy,
+        event_id="ev-init-01",
+        task_id="task-01",
+        outer_attempt=1,
+        inner_pass_index=0,
+        candidate_sha="a" * 40,
+    )
+    assert inv_dec.reservation is not None
+    inv_res_id = inv_dec.reservation.reservation_id
+
+    outer_res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-outer-orphan-01",
+        attempt_id="att-01-task-01",
+        candidate_sha="a" * 40,
+        loaded_policy=loaded_policy,
+    )
+
+    outcome1 = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome1.status == "RECONCILIATION_REQUIRED"
+    assert outer_res.reservation_id in outcome1.released_reservation_ids
+    assert inv_res_id not in outcome1.released_reservation_ids
+    assert "task-01" in outcome1.escalated_task_ids
+
+    reloaded_ledger = ledger.load(loaded_policy=loaded_policy)
+    assert reloaded_ledger.reservations[outer_res.reservation_id].status == "RELEASED"
+    assert reloaded_ledger.reservations[inv_res_id].status == "RESERVED"
+
+    snap1 = queue.load()
+    assert snap1.reconciliation_required is True
+    assert inv_res_id in snap1.unresolved_reservation_ids
+    assert snap1.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+
+    raw_queue_1 = (tmp_path / "queue.json").read_bytes()
+    raw_ledger_1 = (tmp_path / "budget.json").read_bytes()
+
+    outcome2 = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome2.status == "RECONCILIATION_REQUIRED"
+    assert (tmp_path / "queue.json").read_bytes() == raw_queue_1
+    assert (tmp_path / "budget.json").read_bytes() == raw_ledger_1
+
+
+def test_reconcile_escalation_covers_missing_mismatched_op_duplicate_consumed_and_mismatched_attempt_ids(  # noqa: E501
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+
+    # (a) RUNNING task with missing/mismatched operation_id
+    case_a = tmp_path / "case_a"
+    case_a.mkdir()
+    ledger_a = DurableRepairBudgetLedger(case_a / "budget.json", clock=_fixed_now)
+    ledger_a.initialize(loaded_policy=loaded_policy, registered_roots=["task-01", "task-02"])
+    queue_a = PersistentTaskQueue(case_a / "queue.json", clock=_fixed_now)
+    queue_a.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"), _make_contract("task-02")),
+    )
+    ledger_a.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-a-ledger",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    ledger_a.finalize_attempt_budget(
+        operation_id="op-a-ledger",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    res_a2 = ledger_a.reserve_attempt_budget(
+        task_id="task-02",
+        operation_id="op-a2-reserved",
+        attempt_id="att-01-task-02",
+        loaded_policy=loaded_policy,
+    )
+    queue_a.begin_dispatch(
+        "task-02", worker_id="w-02", provider="mock", operation_id="op-a2-reserved"
+    )
+    queue_a.mark_interrupted("task-02", reason="crash", quota_exhausted=False)
+    snap_a = queue_a.load()
+    t1_a = snap_a.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-a-mismatched",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-01-task-01",
+                    operation_id="op-a-mismatched",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    queue_a._replace_task(snap_a, t1_a)
+    out_a = reconcile_queue_and_budget_consistency(queue_a, ledger_a)
+    assert out_a.status == "RECONCILIATION_REQUIRED"
+    assert queue_a.load().reconciliation_required is True
+    assert ledger_a.load().reservations[res_a2.reservation_id].status == "RESERVED"
+    assert ledger_a.load().milestone_consumed == 2
+    with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
+        queue_a.begin_dispatch("task-01", worker_id="w-x", provider="mock")
+
+    # (b) Duplicate CONSUMED ledger reservations matching the same operation_id
+    case_b = tmp_path / "case_b"
+    case_b.mkdir()
+    ledger_b = DurableRepairBudgetLedger(case_b / "budget.json", clock=_fixed_now)
+    ledger_b.initialize(loaded_policy=loaded_policy, registered_roots=["task-01", "task-02"])
+    queue_b = PersistentTaskQueue(case_b / "queue.json", clock=_fixed_now)
+    queue_b.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"), _make_contract("task-02")),
+    )
+    r_b1 = ledger_b.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-dup-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    c_b1 = ledger_b.finalize_attempt_budget(
+        operation_id="op-dup-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    res_b2 = ledger_b.reserve_attempt_budget(
+        task_id="task-02",
+        operation_id="op-b2-reserved",
+        attempt_id="att-01-task-02",
+        loaded_policy=loaded_policy,
+    )
+    queue_b.begin_dispatch(
+        "task-02", worker_id="w-02", provider="mock", operation_id="op-b2-reserved"
+    )
+    queue_b.mark_interrupted("task-02", reason="crash", quota_exhausted=False)
+    st_b = ledger_b.load(loaded_policy=loaded_policy)
+    c_b1_dup = c_b1.model_copy(update={"reservation_id": f"{r_b1.reservation_id}-dup"})
+    new_res_b = dict(st_b.reservations)
+    new_res_b[c_b1_dup.reservation_id] = c_b1_dup
+    write_json_atomic(
+        ledger_b.path,
+        _with_digest(st_b.model_copy(update={"reservations": new_res_b})).model_dump(mode="json"),
+    )
+    snap_b = queue_b.load()
+    t1_b = snap_b.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-dup-01",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-01-task-01",
+                    operation_id="op-dup-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    queue_b._replace_task(snap_b, t1_b)
+    out_b = reconcile_queue_and_budget_consistency(queue_b, ledger_b)
+    assert out_b.status == "RECONCILIATION_REQUIRED"
+    assert queue_b.load().reconciliation_required is True
+    assert ledger_b.load().reservations[res_b2.reservation_id].status == "RESERVED"
+    assert ledger_b.load().milestone_consumed == 2
+    with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
+        queue_b.begin_dispatch("task-01", worker_id="w-x", provider="mock")
+
+    # (c) RUNNING task with mismatched non-empty attempt_id
+    case_c = tmp_path / "case_c"
+    case_c.mkdir()
+    ledger_c = DurableRepairBudgetLedger(case_c / "budget.json", clock=_fixed_now)
+    ledger_c.initialize(loaded_policy=loaded_policy, registered_roots=["task-01", "task-02"])
+    queue_c = PersistentTaskQueue(case_c / "queue.json", clock=_fixed_now)
+    queue_c.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"), _make_contract("task-02")),
+    )
+    ledger_c.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-c-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    ledger_c.finalize_attempt_budget(
+        operation_id="op-c-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    res_c2 = ledger_c.reserve_attempt_budget(
+        task_id="task-02",
+        operation_id="op-c2-reserved",
+        attempt_id="att-01-task-02",
+        loaded_policy=loaded_policy,
+    )
+    queue_c.begin_dispatch(
+        "task-02", worker_id="w-02", provider="mock", operation_id="op-c2-reserved"
+    )
+    queue_c.mark_interrupted("task-02", reason="crash", quota_exhausted=False)
+    snap_c = queue_c.load()
+    t1_c = snap_c.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-99-wrong",
+            "operation_id": "op-c-01",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-99-wrong",
+                    operation_id="op-c-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    queue_c._replace_task(snap_c, t1_c)
+    out_c = reconcile_queue_and_budget_consistency(queue_c, ledger_c)
+    assert out_c.status == "RECONCILIATION_REQUIRED"
+    assert queue_c.load().reconciliation_required is True
+    assert ledger_c.load().reservations[res_c2.reservation_id].status == "RESERVED"
+    assert ledger_c.load().milestone_consumed == 2
+    with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
+        queue_c.begin_dispatch("task-01", worker_id="w-x", provider="mock")

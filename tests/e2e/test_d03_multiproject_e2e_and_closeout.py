@@ -1036,3 +1036,40 @@ def test_closeout_restore_rejects_duplicate_zip_member_names(tmp_path: Path) -> 
         verify_and_restore_closeout_zip(dup_zip, restore_dir)
 
     assert not (restore_dir / "audit" / "receipt.json").exists()
+
+
+def test_closeout_restore_rejects_duplicate_dir_entries_and_case_collisions(tmp_path: Path) -> None:
+    # (a) Repeated directory entries ('audit/' twice) fail closed with zero files written
+    dup_dir_zip = tmp_path / "dup_dir_closeout.zip"
+    with zipfile.ZipFile(dup_dir_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("audit/", b"")
+        zf.writestr("audit/", b"")
+        zf.writestr("audit/receipt.json", b'{"ok": 1}\n')
+
+    dup_dir_sha = hashlib.sha256(dup_dir_zip.read_bytes()).hexdigest()
+    Path(f"{dup_dir_zip}.sha256").write_text(
+        f"{dup_dir_sha}  {dup_dir_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    restore_dir_a = tmp_path / "restored_dup_dir"
+    with pytest.raises(IsolationPolicyError, match="Duplicate zip member name rejected"):
+        verify_and_restore_closeout_zip(dup_dir_zip, restore_dir_a)
+    assert list(restore_dir_a.rglob("*")) == []
+
+    # (b) Case-only colliding file entries ('audit/Receipt.json' and 'audit/receipt.json')
+    case_zip = tmp_path / "case_collision_closeout.zip"
+    with zipfile.ZipFile(case_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("audit/Receipt.json", b'{"ok": 1}\n')
+        zf.writestr("audit/receipt.json", b'{"ok": 2}\n')
+
+    case_sha = hashlib.sha256(case_zip.read_bytes()).hexdigest()
+    Path(f"{case_zip}.sha256").write_text(
+        f"{case_sha}  {case_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    restore_dir_b = tmp_path / "restored_case_collision"
+    with pytest.raises(IsolationPolicyError, match="Duplicate zip member name rejected"):
+        verify_and_restore_closeout_zip(case_zip, restore_dir_b)
+    assert list(restore_dir_b.rglob("*")) == []

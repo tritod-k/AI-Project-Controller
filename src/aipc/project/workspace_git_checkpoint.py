@@ -606,7 +606,7 @@ def _path_globs_intersect(seq_a: Sequence[str], seq_b: Sequence[str]) -> bool:
 
 
 def _negation_affects_exclusion(neg_pattern: str, required: str) -> bool:
-    norm = neg_pattern.strip().strip("/")
+    norm = neg_pattern.strip("/")
     if not norm:
         return False
     parts = [part for part in norm.split("/") if part]
@@ -643,7 +643,7 @@ def _evaluate_gitignore_exclusion(lines: Sequence[str], required: str) -> tuple[
             covered = True
             negated_by = None
         elif line.startswith("!"):
-            neg_pattern = line[1:].strip()
+            neg_pattern = _strip_unescaped_trailing_spaces(line[1:])
             if _negation_affects_exclusion(neg_pattern, required):
                 covered = False
                 negated_by = line
@@ -719,11 +719,16 @@ def _check_git_hygiene(workspace_root: Path) -> list[str]:
                 violations.append(f"Cannot read .gitignore: {exc}")
             else:
                 active_lines = []
-                for raw_line in ign_text.splitlines():
+                for raw_line in re.split(r"\r\n|\n", ign_text):
                     cleaned = _strip_unescaped_trailing_spaces(raw_line)
                     if not cleaned or cleaned.startswith("#"):
                         continue
                     active_lines.append(cleaned)
+                for line in active_lines:
+                    if line.startswith("!") and len(line) > 1 and line[1].isspace():
+                        violations.append(
+                            f".gitignore has ambiguous negation with leading whitespace: {line}"
+                        )
                 for req in _REQUIRED_GITIGNORE_EXCLUSIONS:
                     covered, negated_by = _evaluate_gitignore_exclusion(active_lines, req)
                     if negated_by is not None:

@@ -581,21 +581,26 @@ def verify_and_restore_closeout_zip(
             infos = zf.infolist()
             validated_entries: list[tuple[zipfile.ZipInfo, Path, str]] = []
             seen_member_names: set[str] = set()
+            seen_member_casefold: set[str] = set()
             for info in infos:
                 unix_mode = info.external_attr >> 16
                 if stat.S_ISLNK(unix_mode):
                     raise IsolationPolicyError(
                         f"Symlink entry rejected in closeout zip: {info.filename!r}"
                     )
-                if info.is_dir():
-                    continue
-                rel_posix = _validate_zip_entry_name(info.filename)
+                is_dir_entry = info.is_dir()
+                raw_member = info.filename.rstrip("/") if is_dir_entry else info.filename
+                rel_posix = _validate_zip_entry_name(raw_member)
                 norm_name = rel_posix.as_posix()
-                if norm_name in seen_member_names:
+                norm_casefold = norm_name.casefold()
+                if norm_name in seen_member_names or norm_casefold in seen_member_casefold:
                     raise IsolationPolicyError(
                         f"Duplicate zip member name rejected in closeout zip: {norm_name!r}"
                     )
                 seen_member_names.add(norm_name)
+                seen_member_casefold.add(norm_casefold)
+                if is_dir_entry:
+                    continue
                 if _is_excluded_closeout_entry(rel_posix.parts, rel_posix.name):
                     raise IsolationPolicyError(
                         f"Excluded/sensitive entry rejected in closeout zip: {info.filename!r}"
