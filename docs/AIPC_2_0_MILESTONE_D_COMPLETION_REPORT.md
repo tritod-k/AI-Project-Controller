@@ -1,7 +1,8 @@
 # AIPC 2.0 Milestone D (`D01`–`D03`) — Completion Report
 
-**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI on `frozenSHA_d_r21` + AST-Closed 2-Wave Codex Review Cycle #21 `PASS` + 7 preserved byte-identical `PASS 1.0` locks + Commander K.TRITOD merge approval)
+**Status:** `AWAITING_REVIEW` (`PhaseGate: PENDING` until exact-SHA CI on `frozenSHA_d_r22` + AST-Closed 2-Wave Codex Review Cycle #22 `PASS` + 7 preserved byte-identical `PASS 1.0` locks + Commander K.TRITOD merge approval)
 **Architecture Baseline:** Ratified Workspace Architecture `v1.2 — ACCEPT_V1_2`
+**Tested source for Cycle #22:** `50b3f7253e70388022417c47e7d4ea3ac74d0589`
 **Tested source for Cycle #21:** `47db0d6f4eec8b61a8984a170a591ce418f9620a`
 **Tested source for Cycle #20:** `77eab24e64bfefec0fba2b007b6031c51c25c495`
 **Tested source for Cycle #19:** `6c64f13c677aa3d0bac7f9787c22c64d84569fe8`
