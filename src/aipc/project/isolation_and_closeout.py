@@ -522,14 +522,37 @@ def export_release_closeout_zip(
     )
 
 
+_WINDOWS_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+)
+_UNSAFE_ZIP_ENTRY_CHARS: frozenset[str] = frozenset(':<>"|?*')
+
+
 def _validate_zip_entry_name(name: str) -> PurePosixPath:
-    if not name or "\x00" in name or "\\" in name:
+    if not name or "\\" in name or any(ord(c) < 32 or c in _UNSAFE_ZIP_ENTRY_CHARS for c in name):
         raise IsolationPolicyError(f"Unsafe zip entry name: {name!r}")
     if name.startswith("/") or PureWindowsPath(name).drive or PurePosixPath(name).is_absolute():
         raise IsolationPolicyError(f"Absolute zip entry path rejected: {name!r}")
     posix = PurePosixPath(name)
     if any(part in ("", ".", "..") for part in posix.parts):
         raise IsolationPolicyError(f"Zip-slip or invalid relative path rejected: {name!r}")
+    for part in posix.parts:
+        if part.endswith((".", " ")):
+            raise IsolationPolicyError(
+                f"Ambiguous trailing dot/space zip entry segment rejected: {name!r}"
+            )
+        stem = part.split(".", 1)[0].upper()
+        if stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+            raise IsolationPolicyError(
+                f"Reserved Windows device name in zip entry rejected: {name!r}"
+            )
     return posix
 
 
@@ -580,8 +603,9 @@ def verify_and_restore_closeout_zip(
         with zipfile.ZipFile(zip_resolved, mode="r") as zf:
             infos = zf.infolist()
             validated_entries: list[tuple[zipfile.ZipInfo, Path, str]] = []
-            seen_member_names: set[str] = set()
-            seen_member_casefold: set[str] = set()
+            seen_files: dict[str, str] = {}
+            seen_explicit_dirs: dict[str, str] = {}
+            seen_implicit_dirs: dict[str, str] = {}
             for info in infos:
                 unix_mode = info.external_attr >> 16
                 if stat.S_ISLNK(unix_mode):
@@ -592,15 +616,47 @@ def verify_and_restore_closeout_zip(
                 raw_member = info.filename.rstrip("/") if is_dir_entry else info.filename
                 rel_posix = _validate_zip_entry_name(raw_member)
                 norm_name = rel_posix.as_posix()
-                norm_casefold = norm_name.casefold()
-                if norm_name in seen_member_names or norm_casefold in seen_member_casefold:
+                norm_cf = norm_name.casefold()
+                for parent in rel_posix.parents:
+                    if parent == PurePosixPath("."):
+                        continue
+                    p_name = parent.as_posix()
+                    p_cf = p_name.casefold()
+                    if p_cf in seen_files:
+                        raise IsolationPolicyError(
+                            f"File/directory collision rejected in closeout zip: {norm_name!r}"
+                        )
+                    if (p_cf in seen_explicit_dirs and seen_explicit_dirs[p_cf] != p_name) or (
+                        p_cf in seen_implicit_dirs and seen_implicit_dirs[p_cf] != p_name
+                    ):
+                        raise IsolationPolicyError(
+                            f"Case-colliding directory path rejected in closeout zip: {norm_name!r}"
+                        )
+                    seen_implicit_dirs.setdefault(p_cf, p_name)
+                if is_dir_entry:
+                    if norm_cf in seen_explicit_dirs:
+                        raise IsolationPolicyError(
+                            f"Duplicate zip member name rejected in closeout zip: {norm_name!r}"
+                        )
+                    if norm_cf in seen_files:
+                        raise IsolationPolicyError(
+                            f"File/directory collision rejected in closeout zip: {norm_name!r}"
+                        )
+                    if norm_cf in seen_implicit_dirs and seen_implicit_dirs[norm_cf] != norm_name:
+                        raise IsolationPolicyError(
+                            f"Case-colliding directory path rejected in closeout zip: {norm_name!r}"
+                        )
+                    seen_explicit_dirs[norm_cf] = norm_name
+                    continue
+                if norm_cf in seen_files:
                     raise IsolationPolicyError(
                         f"Duplicate zip member name rejected in closeout zip: {norm_name!r}"
                     )
-                seen_member_names.add(norm_name)
-                seen_member_casefold.add(norm_casefold)
-                if is_dir_entry:
-                    continue
+                if norm_cf in seen_explicit_dirs or norm_cf in seen_implicit_dirs:
+                    raise IsolationPolicyError(
+                        f"File/directory collision rejected in closeout zip: {norm_name!r}"
+                    )
+                seen_files[norm_cf] = norm_name
                 if _is_excluded_closeout_entry(rel_posix.parts, rel_posix.name):
                     raise IsolationPolicyError(
                         f"Excluded/sensitive entry rejected in closeout zip: {info.filename!r}"

@@ -1073,3 +1073,58 @@ def test_closeout_restore_rejects_duplicate_dir_entries_and_case_collisions(tmp_
     with pytest.raises(IsolationPolicyError, match="Duplicate zip member name rejected"):
         verify_and_restore_closeout_zip(case_zip, restore_dir_b)
     assert list(restore_dir_b.rglob("*")) == []
+
+
+def test_closeout_restore_rejects_ambiguous_windows_names_and_file_dir_collisions_with_zero_writes(
+    tmp_path: Path,
+) -> None:
+    def _write_zip_with_sidecar(zip_path: Path, entries: list[tuple[str, bytes]]) -> None:
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, payload in entries:
+                zf.writestr(name, payload)
+        zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        Path(f"{zip_path}.sha256").write_text(
+            f"{zip_sha}  {zip_path.name}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    bad_name_cases = (
+        ("trailing_dot", "audit/report."),
+        ("trailing_space", "audit/report "),
+        ("win_nul_ext", "audit/NUL.txt"),
+        ("win_aux_ext", "audit/aux.json"),
+        ("win_com1", "audit/COM1"),
+    )
+    for idx, (label, bad_member) in enumerate(bad_name_cases):
+        bad_zip = tmp_path / f"bad_{label}_{idx}.zip"
+        _write_zip_with_sidecar(
+            bad_zip,
+            [("audit/valid.json", b'{"ok": true}\n'), (bad_member, b"bad\n")],
+        )
+        restore_dir = tmp_path / f"restore_{label}_{idx}"
+        with pytest.raises(IsolationPolicyError):
+            verify_and_restore_closeout_zip(bad_zip, restore_dir)
+        assert list(restore_dir.rglob("*")) == []
+
+    collision_cases = (
+        (
+            "file_vs_implicit_parent",
+            [("audit/receipt.json", b'{"ok": 1}\n'), ("audit", b"file-at-dir")],
+        ),
+        (
+            "casefolded_file_vs_implicit_parent",
+            [("audit/receipt.json", b'{"ok": 1}\n'), ("AUDIT", b"file-at-dir")],
+        ),
+        (
+            "file_before_explicit_dir",
+            [("audit", b"file-first"), ("Audit/", b"")],
+        ),
+    )
+    for idx, (label, entries) in enumerate(collision_cases):
+        col_zip = tmp_path / f"col_{label}_{idx}.zip"
+        _write_zip_with_sidecar(col_zip, entries)
+        restore_dir = tmp_path / f"restore_col_{label}_{idx}"
+        with pytest.raises(IsolationPolicyError, match="collision"):
+            verify_and_restore_closeout_zip(col_zip, restore_dir)
+        assert list(restore_dir.rglob("*")) == []

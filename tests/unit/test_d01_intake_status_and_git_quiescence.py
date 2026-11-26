@@ -1372,3 +1372,35 @@ def test_git_quiescence_rejects_unicode_separator_and_whitespace_after_negation(
     rep_neg = verify_workspace_git_quiescence(ws_neg)
     assert rep_neg.passed is False
     assert rep_neg.checks["git_hygiene"] is False
+
+
+def test_git_quiescence_rejects_embedded_bare_cr_in_gitignore_matching_real_git(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git executable not available")
+
+    ws = _setup_quiescent_workspace(tmp_path / "ws_bare_cr")
+    (ws / ".gitignore").write_bytes(b"stable_c/\nworktrees/\nlogs/\n*.lock\n*.key\nfoo\r.env*\n")
+    (ws / ".env").write_text("DUMMY=1\n", encoding="utf-8", newline="\n")
+
+    subprocess.run(["git", "-C", str(ws), "init"], check=True, capture_output=True)
+    check_proc = subprocess.run(
+        ["git", "-C", str(ws), "check-ignore", ".env"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert check_proc.returncode == 1
+    status_proc = subprocess.run(
+        ["git", "-C", str(ws), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert ".env" in status_proc.stdout
+
+    report = verify_workspace_git_quiescence(ws)
+    assert report.passed is False
+    assert report.status == "FAIL"
+    assert report.checks["git_hygiene"] is False

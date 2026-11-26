@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
+import sys
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -568,35 +568,48 @@ def _acquire_ledger_lock(ledger_path: Path, *, timeout_seconds: float = 5.0) -> 
     proc_lock = _get_in_process_lock(resolved)
     with _acquire_queue_ledger_lock(None, resolved), proc_lock:
         deadline = time.monotonic() + timeout_seconds
-        fd: int | None = None
-        while True:
-            try:
-                fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode("ascii"))
-                os.close(fd)
-                fd = None
-                break
-            except FileExistsError:
-                if time.monotonic() >= deadline:
-                    raise RepairBudgetError(
-                        f"Timed out acquiring single-writer lock for '{resolved}'"
-                    ) from None
-                time.sleep(0.01)
-            except OSError as exc:
-                if fd is not None:
-                    os.close(fd)
-                raise RepairBudgetError(
-                    f"Failed acquiring single-writer lock for '{resolved}': {exc}"
-                ) from exc
         try:
+            fh = open(lock_file, "a+b")
+        except OSError as exc:
+            raise RepairBudgetError(
+                f"Failed acquiring single-writer lock for '{resolved}': {exc}"
+            ) from exc
+        locked = False
+        try:
+            while True:
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
+
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise RepairBudgetError(
+                            f"Timed out acquiring single-writer lock for '{resolved}'"
+                        ) from None
+                    time.sleep(0.01)
             yield
         finally:
             try:
-                lock_file.unlink(missing_ok=True)
-            except OSError as exc:
-                raise RepairBudgetError(
-                    f"Failed releasing single-writer lock for '{resolved}': {exc}"
-                ) from exc
+                if locked:
+                    if sys.platform == "win32":
+                        import msvcrt
+
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
 
 
 _DISALLOWED_OPERATIVE_GRANT_FIELDS = frozenset(
@@ -2051,8 +2064,8 @@ class DurableRepairBudgetLedger:
             raise RepairBudgetError("reserve_attempt_budget requires a non-blank operation_id")
         if not clean_att:
             raise RepairBudgetError("reserve_attempt_budget requires a non-blank attempt_id")
-        if attempt < 1:
-            raise RepairBudgetError("attempt must be >= 1")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise RepairBudgetError("attempt must be a positive integer >= 1")
         clean_grant_id: str | None = None
         if grant_approval_id is not None:
             if not isinstance(grant_approval_id, str) or not grant_approval_id.strip():

@@ -5601,3 +5601,465 @@ def test_reconcile_escalation_covers_missing_mismatched_op_duplicate_consumed_an
     assert ledger_c.load().milestone_consumed == 2
     with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
         queue_c.begin_dispatch("task-01", worker_id="w-x", provider="mock")
+
+
+def test_reserve_attempt_budget_rejects_malformed_attempt_before_replay_without_mutation(
+    tmp_path: Path,
+) -> None:
+    ledger_path = tmp_path / "budget.json"
+    policy = _make_loaded_policy()
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+
+    bad_attempts: tuple[object, ...] = (True, False, 0, -1, "1", None, 1.5)
+
+    # (a) Fresh reservation rejects malformed attempt values with zero ledger/counter mutation
+    fresh_before_bytes = ledger_path.read_bytes()
+    fresh_before_state = ledger.load(loaded_policy=policy)
+    for bad_att in bad_attempts:
+        with pytest.raises(RepairBudgetError, match="positive integer >= 1"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-fresh-bad",
+                attempt_id="att-01-task-01",
+                attempt=bad_att,  # type: ignore[arg-type]
+                loaded_policy=policy,
+            )
+        assert ledger_path.read_bytes() == fresh_before_bytes
+        after_state = ledger.load(loaded_policy=policy)
+        assert after_state.milestone_consumed == fresh_before_state.milestone_consumed
+        assert (
+            after_state.registered_roots["task-01"].consumed
+            == fresh_before_state.registered_roots["task-01"].consumed
+        )
+
+    # (b) Existing (operation_id, attempt_id) rejects malformed attempt BEFORE replay lookup
+    existing_res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-existing-01",
+        attempt_id="att-01-task-01",
+        attempt=1,
+        loaded_policy=policy,
+    )
+    assert existing_res.status == "RESERVED"
+    replay_before_bytes = ledger_path.read_bytes()
+    replay_before_state = ledger.load(loaded_policy=policy)
+    for bad_att in bad_attempts:
+        with pytest.raises(RepairBudgetError, match="positive integer >= 1"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-existing-01",
+                attempt_id="att-01-task-01",
+                attempt=bad_att,  # type: ignore[arg-type]
+                loaded_policy=policy,
+            )
+        assert ledger_path.read_bytes() == replay_before_bytes
+        after_state = ledger.load(loaded_policy=policy)
+        assert after_state.milestone_consumed == replay_before_state.milestone_consumed
+        assert (
+            after_state.registered_roots["task-01"].consumed
+            == replay_before_state.registered_roots["task-01"].consumed
+        )
+
+
+def test_ledger_lock_recovers_after_abrupt_process_exit_while_blocking_live_holder(
+    tmp_path: Path,
+) -> None:
+    from aipc.controller.repair_budget import _acquire_ledger_lock
+
+    ledger_path = tmp_path / "budget.json"
+    queue_path = tmp_path / "queue.json"
+    policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=policy, registered_roots=["task-01", "task-02"])
+
+    queue = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=(_make_contract("task-01"), _make_contract("task-02")),
+    )
+
+    res_outer = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-orphan-outer",
+        attempt_id="att-01-task-01",
+        loaded_policy=policy,
+    )
+    inv_decision = ledger.reserve_worker_invocation(
+        loaded_policy=policy,
+        event_id="ev-inner-non-outer",
+        task_id="task-02",
+        outer_attempt=1,
+        inner_pass_index=1,
+        candidate_sha="a" * 40,
+    )
+    assert inv_decision.reservation is not None
+
+    # (a) Child acquires _acquire_ledger_lock and exits abruptly via os._exit(1)
+    child_crash_code = (
+        "import os, pathlib, sys\n"
+        "from aipc.controller.repair_budget import _acquire_ledger_lock\n"
+        "p = pathlib.Path(sys.argv[1])\n"
+        "ctx = _acquire_ledger_lock(p)\n"
+        "ctx.__enter__()\n"
+        "print('READY', flush=True)\n"
+        "os._exit(1)\n"
+    )
+    proc_a = subprocess.Popen(
+        [sys.executable, "-c", child_crash_code, str(ledger_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc_a.stdout is not None
+        assert proc_a.stdout.readline().strip() == "READY"
+        assert proc_a.wait(timeout=5) == 1
+    finally:
+        if proc_a.poll() is None:
+            proc_a.kill()
+            proc_a.wait(timeout=5)
+
+    with _acquire_ledger_lock(ledger_path, timeout_seconds=1.0):
+        pass
+
+    outcome_1 = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome_1.status == "RECONCILIATION_REQUIRED"
+    assert outcome_1.released_reservation_ids == (res_outer.reservation_id,)
+    assert "task-02" in outcome_1.escalated_task_ids
+    assert ledger.load(loaded_policy=policy).reservations[res_outer.reservation_id].status == (
+        "RELEASED"
+    )
+    assert queue.load().reconciliation_required is True
+
+    outcome_2 = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome_2.status == "RECONCILIATION_REQUIRED"
+    assert outcome_2.released_reservation_ids == ()
+
+    # (b) Live child holding _acquire_ledger_lock blocks parent until clean release
+    release_ts_path = tmp_path / "child_release_ts.txt"
+    child_timed_hold_code = (
+        "import pathlib, sys, time\n"
+        "from aipc.controller.repair_budget import _acquire_ledger_lock\n"
+        "p = pathlib.Path(sys.argv[1])\n"
+        "ts_file = pathlib.Path(sys.argv[2])\n"
+        "with _acquire_ledger_lock(p):\n"
+        "    print('READY', flush=True)\n"
+        "    time.sleep(0.35)\n"
+        "    ts_file.write_text(f'{time.monotonic():.9f}', encoding='utf-8')\n"
+    )
+    proc_b = subprocess.Popen(
+        [sys.executable, "-c", child_timed_hold_code, str(ledger_path), str(release_ts_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc_b.stdout is not None
+        assert proc_b.stdout.readline().strip() == "READY"
+        with _acquire_ledger_lock(ledger_path, timeout_seconds=5.0):
+            parent_acquired_ts = time.monotonic()
+        assert proc_b.wait(timeout=5) == 0
+    finally:
+        if proc_b.poll() is None:
+            proc_b.kill()
+            proc_b.wait(timeout=5)
+
+    child_release_ts = float(release_ts_path.read_text(encoding="utf-8").strip())
+    assert parent_acquired_ts >= child_release_ts
+
+    # (c) Live child holding OS-kernel lock on lock_file causes parent timeout, then clean acquire
+    lock_file = ledger_path.resolve().parent / f".{ledger_path.resolve().name}.lock"
+    child_os_lock_code = (
+        "import pathlib, sys\n"
+        "lock_path = pathlib.Path(sys.argv[1])\n"
+        "lock_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "fh = open(lock_path, 'a+b')\n"
+        "try:\n"
+        "    if sys.platform == 'win32':\n"
+        "        import msvcrt\n"
+        "        fh.seek(0)\n"
+        "        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)\n"
+        "    else:\n"
+        "        import fcntl\n"
+        "        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "    print('READY', flush=True)\n"
+        "    sys.stdin.read()\n"
+        "finally:\n"
+        "    try:\n"
+        "        if sys.platform == 'win32':\n"
+        "            import msvcrt\n"
+        "            fh.seek(0)\n"
+        "            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)\n"
+        "        else:\n"
+        "            import fcntl\n"
+        "            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)\n"
+        "    finally:\n"
+        "        fh.close()\n"
+    )
+    proc_c = subprocess.Popen(
+        [sys.executable, "-c", child_os_lock_code, str(lock_file)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc_c.stdout is not None
+        assert proc_c.stdin is not None
+        assert proc_c.stdout.readline().strip() == "READY"
+        with pytest.raises(RepairBudgetError, match="Timed out"):
+            with _acquire_ledger_lock(ledger_path, timeout_seconds=0.2):
+                pass
+        proc_c.stdin.close()
+        assert proc_c.wait(timeout=5) == 0
+    finally:
+        if proc_c.poll() is None:
+            proc_c.kill()
+            proc_c.wait(timeout=5)
+
+    with _acquire_ledger_lock(ledger_path, timeout_seconds=1.0):
+        pass
+
+
+def test_reconcile_isolated_identity_conflicts_persist_exact_reasons_and_preserve_ledger(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+
+    def _setup_case(
+        case_name: str,
+    ) -> tuple[Path, Path, PersistentTaskQueue, DurableRepairBudgetLedger]:
+        case_dir = tmp_path / case_name
+        case_dir.mkdir(parents=True, exist_ok=True)
+        q_path = case_dir / "queue.json"
+        l_path = case_dir / "budget.json"
+        ldg = DurableRepairBudgetLedger(l_path, clock=_fixed_now)
+        ldg.initialize(loaded_policy=loaded_policy, registered_roots=["task-01", "task-02"])
+        q = PersistentTaskQueue(q_path, clock=_fixed_now)
+        q.initialize(
+            project_id="proj-d01",
+            milestone_id="phase-24",
+            contracts=(_make_contract("task-01"), _make_contract("task-02")),
+        )
+        # Complete task-02 first so its unrelated RESERVED entry is not treated as an orphan
+        ldg.reserve_attempt_budget(
+            task_id="task-02",
+            operation_id=f"op-t2-done-{case_name}",
+            attempt_id="att-01-task-02",
+            loaded_policy=loaded_policy,
+        )
+        q.begin_dispatch(
+            "task-02",
+            worker_id="w-02",
+            provider="mock",
+            operation_id=f"op-t2-done-{case_name}",
+        )
+        ldg.finalize_attempt_budget(
+            operation_id=f"op-t2-done-{case_name}",
+            attempt_id="att-01-task-02",
+            loaded_policy=loaded_policy,
+        )
+        q.record_attempt_outcome(
+            "task-02",
+            candidate_sha="a" * 40,
+            checkpoint_id="cp-02",
+            evidence_root="evidence/02",
+            review_id="rev-02",
+            review_verdict="PASS",
+            gate_verdict="PASS",
+        )
+        ldg.reserve_attempt_budget(
+            task_id="task-02",
+            operation_id=f"op-t2-unrelated-{case_name}",
+            attempt_id="att-02-task-02",
+            attempt=2,
+            loaded_policy=loaded_policy,
+        )
+        return q_path, l_path, q, ldg
+
+    # (a) RUNNING task with missing operation_id
+    q_path_a, l_path_a, q_a, ldg_a = _setup_case("case_missing_op")
+    snap_a = q_a.load()
+    t1_a = snap_a.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": None,
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-01-task-01",
+                    operation_id=None,
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    q_a._replace_task(snap_a, t1_a)
+    expected_a = "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' is missing operation_id"
+
+    # (b) RUNNING task with mismatched operation_id
+    q_path_b, l_path_b, q_b, ldg_b = _setup_case("case_mismatched_op")
+    ldg_b.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-b-ledger",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    ldg_b.finalize_attempt_budget(
+        operation_id="op-b-ledger",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    snap_b = q_b.load()
+    t1_b = snap_b.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-b-mismatched",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-01-task-01",
+                    operation_id="op-b-mismatched",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    q_b._replace_task(snap_b, t1_b)
+    expected_b = (
+        "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' operation_id "
+        "'op-b-mismatched' is missing or mismatched in budget ledger"
+    )
+
+    # (c) Duplicate CONSUMED ledger entries for the same operation_id
+    q_path_c, l_path_c, q_c, ldg_c = _setup_case("case_dup_consumed")
+    r_c = ldg_c.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-c-dup",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    c_c = ldg_c.finalize_attempt_budget(
+        operation_id="op-c-dup",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    st_c = ldg_c.load(loaded_policy=loaded_policy)
+    c_c_dup = c_c.model_copy(update={"reservation_id": f"{r_c.reservation_id}-dup"})
+    new_res_c = dict(st_c.reservations)
+    new_res_c[c_c_dup.reservation_id] = c_c_dup
+    write_json_atomic(
+        ldg_c.path,
+        _with_digest(st_c.model_copy(update={"reservations": new_res_c})).model_dump(mode="json"),
+    )
+    snap_c = q_c.load()
+    t1_c = snap_c.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-01-task-01",
+            "operation_id": "op-c-dup",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-01-task-01",
+                    operation_id="op-c-dup",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    q_c._replace_task(snap_c, t1_c)
+    expected_c = (
+        "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' has ambiguous "
+        "multiple ledger entries for operation_id 'op-c-dup'"
+    )
+
+    # (d) RUNNING task with mismatched non-empty attempt_id
+    q_path_d, l_path_d, q_d, ldg_d = _setup_case("case_mismatched_att")
+    ldg_d.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-d-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    ldg_d.finalize_attempt_budget(
+        operation_id="op-d-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    snap_d = q_d.load()
+    t1_d = snap_d.tasks[0].model_copy(
+        update={
+            "status": QueuedTaskStatus.RUNNING,
+            "current_attempt": 1,
+            "active_attempt_id": "att-99-wrong",
+            "operation_id": "op-d-01",
+            "attempts": (
+                TaskAttemptLedger(
+                    attempt=1,
+                    attempt_id="att-99-wrong",
+                    operation_id="op-d-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    dispatch_stage="DISPATCHED",
+                    started_at=_fixed_now(),
+                ),
+            ),
+        }
+    )
+    q_d._replace_task(snap_d, t1_d)
+    expected_d = (
+        "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' attempt_id "
+        "'att-99-wrong' mismatches ledger 'att-01-task-01'"
+    )
+
+    for q_path, l_path, q, ldg, expected_reason in (
+        (q_path_a, l_path_a, q_a, ldg_a, expected_a),
+        (q_path_b, l_path_b, q_b, ldg_b, expected_b),
+        (q_path_c, l_path_c, q_c, ldg_c, expected_c),
+        (q_path_d, l_path_d, q_d, ldg_d, expected_d),
+    ):
+        before_state = ldg.load(loaded_policy=loaded_policy)
+        before_reservations = dict(before_state.reservations)
+        before_ms_consumed = before_state.milestone_consumed
+        before_roots = dict(before_state.registered_roots)
+
+        outcome = reconcile_queue_and_budget_consistency(q, ldg)
+        assert outcome.status == "RECONCILIATION_REQUIRED"
+        assert "task-01" in outcome.escalated_task_ids
+        assert expected_reason in outcome.reasons
+
+        reloaded_q = PersistentTaskQueue(q_path, clock=_fixed_now)
+        reloaded_ldg = DurableRepairBudgetLedger(l_path, clock=_fixed_now)
+        reloaded_snap = reloaded_q.load()
+        t1 = next(t for t in reloaded_snap.tasks if t.contract.task_id == "task-01")
+        assert t1.status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+        assert t1.reconciliation_required is True
+        assert t1.reconciliation_reason == expected_reason
+        assert t1.blocker_reason == expected_reason
+        assert reloaded_snap.reconciliation_required is True
+        assert expected_reason in reloaded_snap.reconciliation_reasons
+        with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
+            reloaded_q.begin_dispatch("task-01", worker_id="w-x", provider="mock")
+
+        after_state = reloaded_ldg.load(loaded_policy=loaded_policy)
+        assert dict(after_state.reservations) == before_reservations
+        assert after_state.milestone_consumed == before_ms_consumed
+        assert dict(after_state.registered_roots) == before_roots

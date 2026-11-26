@@ -714,7 +714,7 @@ def _check_git_hygiene(workspace_root: Path) -> list[str]:
             violations.append(".gitignore must be a regular non-symlink file")
         else:
             try:
-                ign_text = gitignore.read_text(encoding="utf-8")
+                ign_text = gitignore.read_bytes().decode("utf-8")
             except (OSError, UnicodeError) as exc:
                 violations.append(f"Cannot read .gitignore: {exc}")
             else:
