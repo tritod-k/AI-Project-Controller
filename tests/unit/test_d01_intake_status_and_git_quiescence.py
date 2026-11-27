@@ -1431,8 +1431,7 @@ def test_git_quiescence_rejects_negated_bracket_overlap_across_case_modes(tmp_pa
             capture_output=True,
             text=True,
         )
-        if ignorecase_val == "false":
-            assert check_proc.returncode == 1
+        assert check_proc.returncode == 1
 
         report = verify_workspace_git_quiescence(ws)
         assert report.passed is False

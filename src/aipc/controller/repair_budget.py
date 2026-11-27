@@ -66,6 +66,29 @@ class RepairBudgetError(StateError):
     """Fail-closed error for missing, tampered, drifted, or unauthorized repair budget state."""
 
 
+_REPAIR_ROUTES: tuple[str, ...] = ("REVIEW_COORDINATOR", "VERIFICATION_FAILURE")
+_ATTEMPT_BUDGET_ROUTES: tuple[str, ...] = (
+    "REVIEW_COORDINATOR",
+    "VERIFICATION_FAILURE",
+    "INNER_SELF_CORRECTION",
+    "INITIAL_WORKER_DISPATCH",
+)
+
+
+def _require_non_blank_str(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise RepairBudgetError(f"{field_name} must be a non-blank string")
+    return value.strip()
+
+
+def _require_int_min(value: object, field_name: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        if minimum == 1:
+            raise RepairBudgetError(f"{field_name} must be a positive integer >= 1")
+        raise RepairBudgetError(f"{field_name} must be an integer >= {minimum}")
+    return value
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -1289,13 +1312,21 @@ class DurableRepairBudgetLedger:
         grant_approval_id: str | None = None,
     ) -> BudgetReservationDecision:
         """Atomically check and reserve one code-repair slot, idempotent on exact replay."""
-        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
-            raise RepairBudgetError("attempt must be a positive integer >= 1")
-        clean_grant_id: str | None = None
-        if grant_approval_id is not None:
-            if not isinstance(grant_approval_id, str) or not grant_approval_id.strip():
-                raise RepairBudgetError("grant_approval_id must be a non-blank string")
-            clean_grant_id = grant_approval_id.strip()
+        _require_non_blank_str(event_id, "event_id")
+        _require_non_blank_str(task_id, "task_id")
+        _require_int_min(attempt, "attempt", 1)
+        _require_non_blank_str(candidate_sha, "candidate_sha")
+        _require_non_blank_str(review_id, "review_id")
+        clean_route = _require_non_blank_str(route, "route")
+        if clean_route not in _REPAIR_ROUTES:
+            raise RepairBudgetError(f"route must be one of {_REPAIR_ROUTES}, got {route!r}")
+        if explicit_root_task is not None:
+            _require_non_blank_str(explicit_root_task, "explicit_root_task")
+        clean_grant_id: str | None = (
+            _require_non_blank_str(grant_approval_id, "grant_approval_id")
+            if grant_approval_id is not None
+            else None
+        )
         norm_paths = _normalize_target_paths(target_paths)
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
@@ -1707,10 +1738,13 @@ class DurableRepairBudgetLedger:
         target_paths: Sequence[str] | None = None,
     ) -> BudgetReservationDecision:
         """Atomically reserve one worker invocation slot (initial pass or inner correction)."""
-        if outer_attempt < 1:
-            raise RepairBudgetError("outer_attempt must be >= 1")
-        if inner_pass_index < 0:
-            raise RepairBudgetError("inner_pass_index must be >= 0")
+        _require_non_blank_str(event_id, "event_id")
+        _require_non_blank_str(task_id, "task_id")
+        _require_int_min(outer_attempt, "outer_attempt", 1)
+        _require_int_min(inner_pass_index, "inner_pass_index", 0)
+        _require_non_blank_str(candidate_sha, "candidate_sha")
+        if explicit_root_task is not None:
+            _require_non_blank_str(explicit_root_task, "explicit_root_task")
         norm_paths = _normalize_target_paths(target_paths)
         bucket: Literal["INITIAL_INVOCATION", "INNER_CORRECTION"] = (
             "INITIAL_INVOCATION" if inner_pass_index == 0 else "INNER_CORRECTION"
@@ -1941,17 +1975,26 @@ class DurableRepairBudgetLedger:
         trust_context: PolicyTrustContext | None = None,
     ) -> BudgetReservationRecord:
         """Mark an in-flight worker invocation reservation as INTERRUPTED, retaining its charge."""
+        clean_res_id = _require_non_blank_str(reservation_id, "reservation_id")
+        clean_att_id = _require_non_blank_str(attempt_id, "attempt_id")
+        clean_worker_id = _require_non_blank_str(worker_id, "worker_id")
+        clean_provider = _require_non_blank_str(provider, "provider")
+        clean_claim_id: str | None = (
+            _require_non_blank_str(dispatch_claim_id, "dispatch_claim_id")
+            if dispatch_claim_id is not None
+            else None
+        )
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
-            res = state.reservations.get(reservation_id)
+            res = state.reservations.get(clean_res_id)
             if res is None:
                 raise RepairBudgetError(
-                    f"Unknown or missing worker invocation reservation '{reservation_id}'"
+                    f"Unknown or missing worker invocation reservation '{clean_res_id}'"
                 )
             if (
-                dispatch_claim_id is not None
+                clean_claim_id is not None
                 and res.dispatch_claim_id is not None
-                and dispatch_claim_id != res.dispatch_claim_id
+                and clean_claim_id != res.dispatch_claim_id
             ):
                 raise RepairBudgetError(
                     "dispatch_claim_id mismatch for worker invocation interruption"
@@ -1960,21 +2003,21 @@ class DurableRepairBudgetLedger:
                 return res
             if res.status == "CONSUMED":
                 raise RepairBudgetError(
-                    f"Worker invocation reservation '{reservation_id}' already CONSUMED; "
+                    f"Worker invocation reservation '{clean_res_id}' already CONSUMED; "
                     "cannot mark INTERRUPTED"
                 )
             now = self._clock()
             interrupted = res.model_copy(
                 update={
                     "status": "INTERRUPTED",
-                    "consumed_attempt_id": attempt_id,
-                    "consumed_worker_id": worker_id,
-                    "consumed_provider": provider,
+                    "consumed_attempt_id": clean_att_id,
+                    "consumed_worker_id": clean_worker_id,
+                    "consumed_provider": clean_provider,
                     "consumed_at": now,
                 }
             )
             new_reservations = dict(state.reservations)
-            new_reservations[reservation_id] = interrupted
+            new_reservations[clean_res_id] = interrupted
             updated = _with_digest(
                 state.model_copy(update={"reservations": new_reservations, "updated_at": now})
             )
@@ -1993,45 +2036,54 @@ class DurableRepairBudgetLedger:
         trust_context: PolicyTrustContext | None = None,
     ) -> BudgetReservationRecord:
         """Mark a worker invocation reservation as CONSUMED, idempotent for same attempt_id."""
+        clean_res_id = _require_non_blank_str(reservation_id, "reservation_id")
+        clean_att_id = _require_non_blank_str(attempt_id, "attempt_id")
+        clean_worker_id = _require_non_blank_str(worker_id, "worker_id")
+        clean_provider = _require_non_blank_str(provider, "provider")
+        clean_claim_id: str | None = (
+            _require_non_blank_str(dispatch_claim_id, "dispatch_claim_id")
+            if dispatch_claim_id is not None
+            else None
+        )
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)
-            res = state.reservations.get(reservation_id)
+            res = state.reservations.get(clean_res_id)
             if res is None:
                 raise RepairBudgetError(
-                    f"Unknown or missing worker invocation reservation '{reservation_id}'"
+                    f"Unknown or missing worker invocation reservation '{clean_res_id}'"
                 )
             if (
-                dispatch_claim_id is not None
+                clean_claim_id is not None
                 and res.dispatch_claim_id is not None
-                and dispatch_claim_id != res.dispatch_claim_id
+                and clean_claim_id != res.dispatch_claim_id
             ):
                 raise RepairBudgetError(
                     "dispatch_claim_id mismatch for worker invocation consumption"
                 )
             if res.status == "INTERRUPTED":
                 raise RepairBudgetError(
-                    f"Worker invocation reservation '{reservation_id}' is INTERRUPTED and "
+                    f"Worker invocation reservation '{clean_res_id}' is INTERRUPTED and "
                     "cannot be consumed"
                 )
             if res.status == "CONSUMED":
-                if res.consumed_attempt_id == attempt_id:
+                if res.consumed_attempt_id == clean_att_id:
                     return res
                 raise RepairBudgetError(
-                    f"Worker invocation reservation '{reservation_id}' already consumed by "
-                    f"'{res.consumed_attempt_id}'; conflicting attempt '{attempt_id}' rejected"
+                    f"Worker invocation reservation '{clean_res_id}' already consumed by "
+                    f"'{res.consumed_attempt_id}'; conflicting attempt '{clean_att_id}' rejected"
                 )
             now = self._clock()
             consumed = res.model_copy(
                 update={
                     "status": "CONSUMED",
-                    "consumed_attempt_id": attempt_id,
-                    "consumed_worker_id": worker_id,
-                    "consumed_provider": provider,
+                    "consumed_attempt_id": clean_att_id,
+                    "consumed_worker_id": clean_worker_id,
+                    "consumed_provider": clean_provider,
                     "consumed_at": now,
                 }
             )
             new_reservations = dict(state.reservations)
-            new_reservations[reservation_id] = consumed
+            new_reservations[clean_res_id] = consumed
             updated = _with_digest(
                 state.model_copy(update={"reservations": new_reservations, "updated_at": now})
             )
@@ -2060,27 +2112,26 @@ class DurableRepairBudgetLedger:
         grant_approval_id: str | None = None,
     ) -> BudgetReservationRecord:
         """Reserve an operation-correlated attempt budget slot (RESERVED)."""
-        clean_op = operation_id.strip() if isinstance(operation_id, str) else ""
-        clean_att = attempt_id.strip() if isinstance(attempt_id, str) else ""
-        if not clean_op:
-            raise RepairBudgetError("reserve_attempt_budget requires a non-blank operation_id")
-        if not clean_att:
-            raise RepairBudgetError("reserve_attempt_budget requires a non-blank attempt_id")
-        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
-            raise RepairBudgetError("attempt must be a positive integer >= 1")
-        clean_grant_id: str | None = None
-        if grant_approval_id is not None:
-            if not isinstance(grant_approval_id, str) or not grant_approval_id.strip():
-                raise RepairBudgetError("grant_approval_id must be a non-blank string")
-            clean_grant_id = grant_approval_id.strip()
+        _require_non_blank_str(task_id, "task_id")
+        clean_op = _require_non_blank_str(operation_id, "operation_id")
+        clean_att = _require_non_blank_str(attempt_id, "attempt_id")
+        _require_int_min(attempt, "attempt", 1)
+        _require_non_blank_str(candidate_sha, "candidate_sha")
+        clean_route = _require_non_blank_str(route, "route")
+        if clean_route not in _ATTEMPT_BUDGET_ROUTES:
+            raise RepairBudgetError(f"route must be one of {_ATTEMPT_BUDGET_ROUTES}, got {route!r}")
+        if explicit_root_task is not None:
+            _require_non_blank_str(explicit_root_task, "explicit_root_task")
+        clean_grant_id: str | None = (
+            _require_non_blank_str(grant_approval_id, "grant_approval_id")
+            if grant_approval_id is not None
+            else None
+        )
         norm_paths = _normalize_target_paths(target_paths)
         event_id = f"op-{clean_op}"
-        if review_id is not None:
-            if not isinstance(review_id, str) or not review_id.strip():
-                raise RepairBudgetError("review_id must be a non-blank string")
-            effective_review_id = review_id.strip()
-        else:
-            effective_review_id = event_id
+        effective_review_id = (
+            _require_non_blank_str(review_id, "review_id") if review_id is not None else event_id
+        )
 
         with _acquire_ledger_lock(self._path):
             state = self.load(loaded_policy=loaded_policy, trust_context=trust_context)

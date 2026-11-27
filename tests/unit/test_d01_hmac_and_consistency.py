@@ -587,14 +587,20 @@ def test_reconcile_preserves_reserved_and_escalates_interrupted_task(tmp_path: P
     assert outcome.released_reservation_ids == ()
     assert outcome.escalated_task_ids == ("task-01",)
 
-    state = ledger.load()
+    reloaded_q_wp = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    reloaded_ldg_wp = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    state = reloaded_ldg_wp.load()
     assert state.milestone_consumed == 1
     assert state.registered_roots["task-01"].consumed == 1
     assert state.reservations[res.reservation_id].status == "RESERVED"
 
-    snap = queue.load()
+    snap = reloaded_q_wp.load()
+    assert snap.reconciliation_required is True
+    assert res.reservation_id in snap.unresolved_reservation_ids
     assert snap.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
     assert snap.tasks[0].reconciliation_required is True
+    assert snap.tasks[0].reconciliation_reason is not None
+    assert snap.tasks[0].blocker_reason is not None
     assert snap.tasks[0].reconciliation_reason is not None
     assert snap.tasks[0].blocker_reason is not None
 
@@ -633,14 +639,20 @@ def test_reconcile_preserves_reserved_and_escalates_waiting_provider_task(tmp_pa
     assert outcome.released_reservation_ids == ()
     assert outcome.escalated_task_ids == ("task-01",)
 
-    state = ledger.load()
+    reloaded_q_wp = PersistentTaskQueue(queue_path, clock=_fixed_now)
+    reloaded_ldg_wp = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    state = reloaded_ldg_wp.load()
     assert state.milestone_consumed == 1
     assert state.registered_roots["task-01"].consumed == 1
     assert state.reservations[res.reservation_id].status == "RESERVED"
 
-    snap = queue.load()
+    snap = reloaded_q_wp.load()
+    assert snap.reconciliation_required is True
+    assert res.reservation_id in snap.unresolved_reservation_ids
     assert snap.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
     assert snap.tasks[0].reconciliation_required is True
+    assert snap.tasks[0].reconciliation_reason is not None
+    assert snap.tasks[0].blocker_reason is not None
 
 
 def test_reconcile_running_requires_exact_non_empty_attempt_id_and_operation_id(
@@ -5466,11 +5478,21 @@ def test_reconcile_escalation_covers_missing_mismatched_op_duplicate_consumed_an
     queue_a._replace_task(snap_a, t1_a)
     out_a = reconcile_queue_and_budget_consistency(queue_a, ledger_a)
     assert out_a.status == "RECONCILIATION_REQUIRED"
-    assert queue_a.load().reconciliation_required is True
-    assert ledger_a.load().reservations[res_a2.reservation_id].status == "RESERVED"
-    assert ledger_a.load().milestone_consumed == 2
+    reloaded_q_a = PersistentTaskQueue(case_a / "queue.json", clock=_fixed_now)
+    reloaded_ldg_a = DurableRepairBudgetLedger(case_a / "budget.json", clock=_fixed_now)
+    snap_reloaded_a = reloaded_q_a.load()
+    ldg_reloaded_a = reloaded_ldg_a.load(loaded_policy=loaded_policy)
+    assert snap_reloaded_a.reconciliation_required is True
+    assert snap_reloaded_a.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+    assert snap_reloaded_a.tasks[0].reconciliation_required is True
+    assert snap_reloaded_a.tasks[0].reconciliation_reason is not None
+    assert snap_reloaded_a.tasks[0].blocker_reason is not None
+    assert ldg_reloaded_a.reservations[res_a2.reservation_id].status == "RESERVED"
+    assert ldg_reloaded_a.milestone_consumed == 2
+    assert ldg_reloaded_a.registered_roots["task-01"].consumed == 1
+    assert ldg_reloaded_a.registered_roots["task-02"].consumed == 1
     with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
-        queue_a.begin_dispatch("task-01", worker_id="w-x", provider="mock")
+        reloaded_q_a.begin_dispatch("task-01", worker_id="w-x", provider="mock")
 
     # (b) Duplicate CONSUMED ledger reservations matching the same operation_id
     case_b = tmp_path / "case_b"
@@ -5596,11 +5618,21 @@ def test_reconcile_escalation_covers_missing_mismatched_op_duplicate_consumed_an
     queue_c._replace_task(snap_c, t1_c)
     out_c = reconcile_queue_and_budget_consistency(queue_c, ledger_c)
     assert out_c.status == "RECONCILIATION_REQUIRED"
-    assert queue_c.load().reconciliation_required is True
-    assert ledger_c.load().reservations[res_c2.reservation_id].status == "RESERVED"
-    assert ledger_c.load().milestone_consumed == 2
+    reloaded_q_c = PersistentTaskQueue(case_c / "queue.json", clock=_fixed_now)
+    reloaded_ldg_c = DurableRepairBudgetLedger(case_c / "budget.json", clock=_fixed_now)
+    snap_reloaded_c = reloaded_q_c.load()
+    ldg_reloaded_c = reloaded_ldg_c.load(loaded_policy=loaded_policy)
+    assert snap_reloaded_c.reconciliation_required is True
+    assert snap_reloaded_c.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+    assert snap_reloaded_c.tasks[0].reconciliation_required is True
+    assert snap_reloaded_c.tasks[0].reconciliation_reason is not None
+    assert snap_reloaded_c.tasks[0].blocker_reason is not None
+    assert ldg_reloaded_c.reservations[res_c2.reservation_id].status == "RESERVED"
+    assert ldg_reloaded_c.milestone_consumed == 2
+    assert ldg_reloaded_c.registered_roots["task-01"].consumed == 1
+    assert ldg_reloaded_c.registered_roots["task-02"].consumed == 1
     with pytest.raises(ControllerError, match="RECONCILIATION_REQUIRED"):
-        queue_c.begin_dispatch("task-01", worker_id="w-x", provider="mock")
+        reloaded_q_c.begin_dispatch("task-01", worker_id="w-x", provider="mock")
 
 
 def test_reserve_attempt_budget_rejects_malformed_attempt_before_replay_without_mutation(
@@ -6060,8 +6092,17 @@ def test_reconcile_isolated_identity_conflicts_persist_exact_reasons_and_preserv
             reloaded_q.begin_dispatch("task-01", worker_id="w-x", provider="mock")
 
         after_state = reloaded_ldg.load(loaded_policy=loaded_policy)
+        assert after_state == before_state
         assert dict(after_state.reservations) == before_reservations
         assert after_state.milestone_consumed == before_ms_consumed
+        assert (
+            after_state.milestone_worker_invocations_consumed
+            == before_state.milestone_worker_invocations_consumed
+        )
+        assert (
+            after_state.global_worker_invocations_consumed
+            == before_state.global_worker_invocations_consumed
+        )
         assert dict(after_state.registered_roots) == before_roots
 
 
@@ -6363,6 +6404,212 @@ def test_ledger_blank_string_arguments_rejected_individually_on_valid_ledger_wit
             )
         _assert_unmutated(reserved_bytes, 1)
 
+    for blank in ("", "   "):
+        with pytest.raises(RepairBudgetError, match="event_id"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id=blank,
+                task_id="task-01",
+                attempt=1,
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="candidate_sha"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-blank-check",
+                task_id="task-01",
+                attempt=1,
+                candidate_sha=blank,
+                review_id="rev-01",
+                route="REVIEW_COORDINATOR",
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="review_id"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-blank-check",
+                task_id="task-01",
+                attempt=1,
+                candidate_sha="b" * 40,
+                review_id=blank,
+                route="REVIEW_COORDINATOR",
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="route"):
+            ledger.reserve_repair(
+                loaded_policy=loaded_policy,
+                event_id="ev-blank-check",
+                task_id="task-01",
+                attempt=1,
+                candidate_sha="b" * 40,
+                review_id="rev-01",
+                route=blank,  # type: ignore[arg-type]
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="candidate_sha"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-blank-01",
+                attempt_id="att-01-task-01",
+                candidate_sha=blank,
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="route"):
+            ledger.reserve_attempt_budget(
+                task_id="task-01",
+                operation_id="op-blank-01",
+                attempt_id="att-01-task-01",
+                route=blank,  # type: ignore[arg-type]
+                loaded_policy=loaded_policy,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="event_id"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id=blank,
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="task_id"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-blank",
+                task_id=blank,
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="candidate_sha"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-blank",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha=blank,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+        with pytest.raises(RepairBudgetError, match="explicit_root_task"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-blank",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+                explicit_root_task=blank,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+    for bad_outer in (True, False, 0, -1, "1", None):
+        with pytest.raises(RepairBudgetError, match="outer_attempt"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-bad-outer",
+                task_id="task-01",
+                outer_attempt=bad_outer,  # type: ignore[arg-type]
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+    for bad_inner in (True, False, -1, "0", None):
+        with pytest.raises(RepairBudgetError, match="inner_pass_index"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-bad-inner",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=bad_inner,  # type: ignore[arg-type]
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(reserved_bytes, 1)
+
+    inv_dec = ledger.reserve_worker_invocation(
+        loaded_policy=loaded_policy,
+        event_id="ev-inv-valid-peer",
+        task_id="task-01",
+        outer_attempt=1,
+        inner_pass_index=0,
+        candidate_sha="b" * 40,
+    )
+    assert inv_dec.reservation is not None
+    inv_res_id = inv_dec.reservation.reservation_id
+    inv_bytes = ledger_path.read_bytes()
+
+    for blank in ("", "   "):
+        for method in (
+            ledger.mark_worker_invocation_interrupted,
+            ledger.consume_worker_invocation,
+        ):
+            with pytest.raises(RepairBudgetError, match="reservation_id"):
+                method(
+                    reservation_id=blank,
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 1)
+
+            with pytest.raises(RepairBudgetError, match="attempt_id"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id=blank,
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 1)
+
+            with pytest.raises(RepairBudgetError, match="worker_id"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id="att-01-task-01",
+                    worker_id=blank,
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 1)
+
+            with pytest.raises(RepairBudgetError, match="provider"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider=blank,
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 1)
+
+            with pytest.raises(RepairBudgetError, match="dispatch_claim_id"):
+                method(
+                    reservation_id=inv_res_id,
+                    dispatch_claim_id=blank,
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 1)
+
 
 def test_reconcile_preserves_already_unresolved_outer_repair_reservation_idempotently(
     tmp_path: Path,
@@ -6412,20 +6659,26 @@ def test_reconcile_preserves_already_unresolved_outer_repair_reservation_idempot
         )
     )
 
+    q_bytes_before = q_path.read_bytes()
+    l_bytes_before = l_path.read_bytes()
+    tick_before = tick[0]
+    updated_at_before = queue.load().updated_at
+
     first = reconcile_queue_and_budget_consistency(queue, ledger)
     assert first.status == "RECONCILIATION_REQUIRED"
     assert first.released_reservation_ids == ()
-
-    q_bytes_after_first = q_path.read_bytes()
-    l_bytes_after_first = l_path.read_bytes()
-    updated_at_after_first = queue.load().updated_at
+    assert q_path.read_bytes() == q_bytes_before
+    assert l_path.read_bytes() == l_bytes_before
+    assert tick[0] == tick_before
+    assert queue.load().updated_at == updated_at_before
 
     second = reconcile_queue_and_budget_consistency(queue, ledger)
     assert second.status == "RECONCILIATION_REQUIRED"
     assert second.released_reservation_ids == ()
-    assert q_path.read_bytes() == q_bytes_after_first
-    assert l_path.read_bytes() == l_bytes_after_first
-    assert queue.load().updated_at == updated_at_after_first
+    assert q_path.read_bytes() == q_bytes_before
+    assert l_path.read_bytes() == l_bytes_before
+    assert tick[0] == tick_before
+    assert queue.load().updated_at == updated_at_before
 
     reloaded_ledger = ledger.load(loaded_policy=loaded_policy)
     assert reloaded_ledger.reservations[rec.reservation_id].status == "RESERVED"
@@ -6553,7 +6806,7 @@ def test_reconcile_task_vs_attempt_record_identity_mismatches_and_full_ledger_pa
         "'att-01-task-01' mismatches attempt record 'att-99-wrong'"
     )
 
-    # Case 3: task.attempts[-1].reservation_id != matching[0].reservation_id
+    # Case 3: REAL disk-persisted task.attempts[-1].reservation_id != matching[0].reservation_id
     q_path_3, l_path_3, q_3, ldg_3, _ = _setup_two_task_case("res_mismatch")
     res_3 = ldg_3.reserve_attempt_budget(
         task_id="task-01",
@@ -6578,6 +6831,7 @@ def test_reconcile_task_vs_attempt_record_identity_mismatches_and_full_ledger_pa
                     attempt=1,
                     attempt_id="att-01-task-01",
                     operation_id="op-task-03",
+                    reservation_id="res-wrong-99",
                     worker_id="w-01",
                     provider="mock",
                     dispatch_stage="DISPATCHED",
@@ -6587,48 +6841,19 @@ def test_reconcile_task_vs_attempt_record_identity_mismatches_and_full_ledger_pa
         }
     )
     q_3._replace_task(snap_3, t1_3)
+    assert q_3.load().tasks[0].attempts[0].reservation_id == "res-wrong-99"
     expected_3 = (
         "RECONCILIATION_REQUIRED: IN_PROGRESS task 'task-01' attempt "
         f"reservation_id 'res-wrong-99' mismatches ledger '{res_3.reservation_id}'"
     )
 
-    class _AttemptResProxyQueue:
-        def __init__(self, inner: PersistentTaskQueue) -> None:
-            self._inner = inner
-            self._path = inner._path
-            self._clock = inner._clock
-
-        def load(self) -> TaskQueueSnapshot:
-            loaded = self._inner.load()
-            patched_tasks = []
-            for item in loaded.tasks:
-                if item.contract.task_id == "task-01" and item.attempts:
-                    att_dict = item.attempts[-1].model_dump()
-                    att_ns = SimpleNamespace(**att_dict, reservation_id="res-wrong-99")
-                    item = item.model_copy(update={"attempts": (att_ns,)})
-                patched_tasks.append(item)
-            return loaded.model_copy(update={"tasks": tuple(patched_tasks)})
-
-        def _save(self, snap_obj: TaskQueueSnapshot) -> None:
-            clean_tasks = []
-            for item in snap_obj.tasks:
-                if item.contract.task_id == "task-01" and item.attempts:
-                    att_obj = item.attempts[-1]
-                    if not isinstance(att_obj, TaskAttemptLedger):
-                        data = {k: v for k, v in vars(att_obj).items() if k != "reservation_id"}
-                        item = item.model_copy(
-                            update={"attempts": (TaskAttemptLedger.model_validate(data),)}
-                        )
-                clean_tasks.append(item)
-            self._inner._save(snap_obj.model_copy(update={"tasks": tuple(clean_tasks)}))
-
     for q_path, l_path, q_obj, ldg_obj, expected_reason in (
         (q_path_1, l_path_1, q_1, ldg_1, expected_1),
         (q_path_2, l_path_2, q_2, ldg_2, expected_2),
-        (q_path_3, l_path_3, _AttemptResProxyQueue(q_3), ldg_3, expected_3),
+        (q_path_3, l_path_3, q_3, ldg_3, expected_3),
     ):
         before_state = ldg_obj.load(loaded_policy=loaded_policy)
-        outcome = reconcile_queue_and_budget_consistency(q_obj, ldg_obj)  # type: ignore[arg-type]
+        outcome = reconcile_queue_and_budget_consistency(q_obj, ldg_obj)
         assert outcome.status == "RECONCILIATION_REQUIRED"
         assert "task-01" in outcome.escalated_task_ids
         assert expected_reason in outcome.reasons
@@ -6645,6 +6870,7 @@ def test_reconcile_task_vs_attempt_record_identity_mismatches_and_full_ledger_pa
         assert expected_reason in reloaded_snap.reconciliation_reasons
 
         after_state = reloaded_ldg.load(loaded_policy=loaded_policy)
+        assert after_state == before_state
         assert dict(after_state.reservations) == dict(before_state.reservations)
         assert after_state.milestone_consumed == before_state.milestone_consumed
         assert (
@@ -6656,3 +6882,131 @@ def test_reconcile_task_vs_attempt_record_identity_mismatches_and_full_ledger_pa
             == before_state.global_worker_invocations_consumed
         )
         assert dict(after_state.registered_roots) == dict(before_state.registered_roots)
+
+
+def test_task_attempt_ledger_legacy_snapshot_without_reservation_id_backward_compat(
+    tmp_path: Path,
+) -> None:
+    q_path = tmp_path / "legacy_queue.json"
+    l_path = tmp_path / "legacy_budget.json"
+    loaded_policy = _make_loaded_policy()
+
+    ledger = DurableRepairBudgetLedger(l_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+    res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-legacy-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+
+    queue = PersistentTaskQueue(q_path, clock=_fixed_now, repair_budget_path=l_path)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=[_make_contract("task-01")],
+    )
+    queue.begin_dispatch(
+        "task-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-legacy-01",
+    )
+    ledger.finalize_attempt_budget(
+        reservation_id=res.reservation_id,
+        operation_id="op-legacy-01",
+        attempt_id="att-01-task-01",
+        worker_id="w-01",
+        provider="mock",
+        loaded_policy=loaded_policy,
+    )
+    persisted = PersistentTaskQueue(q_path, clock=_fixed_now, repair_budget_path=l_path).load()
+    assert persisted.tasks[0].attempts[0].reservation_id == res.reservation_id
+
+    raw_snap = json.loads(q_path.read_text(encoding="utf-8"))
+    raw_snap["tasks"][0]["attempts"][0].pop("reservation_id", None)
+    write_json_atomic(q_path, raw_snap)
+
+    reloaded = PersistentTaskQueue(q_path, clock=_fixed_now, repair_budget_path=l_path).load()
+    assert reloaded.tasks[0].attempts[0].reservation_id is None
+    outcome = reconcile_queue_and_budget_consistency(queue, ledger)
+    assert outcome.status == "CONSISTENT"
+
+
+def test_mark_interrupted_overlapping_reconcile_preserves_blocker_and_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    q_path = tmp_path / "queue.json"
+    l_path = tmp_path / "budget.json"
+    ledger = DurableRepairBudgetLedger(l_path, clock=_fixed_now)
+    ledger.initialize(loaded_policy=loaded_policy, registered_roots=["task-01"])
+    queue = PersistentTaskQueue(q_path, clock=_fixed_now, repair_budget_path=l_path)
+    queue.initialize(
+        project_id="proj-d01",
+        milestone_id="phase-24",
+        contracts=[_make_contract("task-01")],
+    )
+
+    res = ledger.reserve_attempt_budget(
+        task_id="task-01",
+        operation_id="op-overlap-01",
+        attempt_id="att-01-task-01",
+        loaded_policy=loaded_policy,
+    )
+    queue.begin_dispatch(
+        "task-01",
+        worker_id="w-01",
+        provider="mock",
+        operation_id="op-overlap-01",
+    )
+
+    barrier = threading.Barrier(2, timeout=5.0)
+    orig_load = PersistentTaskQueue.load
+    reconcile_entered = threading.Event()
+
+    def _coordinated_load(self: PersistentTaskQueue) -> TaskQueueSnapshot:
+        snap = orig_load(self)
+        if not reconcile_entered.is_set() and snap.tasks[0].status == QueuedTaskStatus.RUNNING:
+            reconcile_entered.set()
+            barrier.wait()
+        return snap
+
+    monkeypatch.setattr(PersistentTaskQueue, "load", _coordinated_load)
+
+    reconcile_outcomes: list[ConsistencyReconciliationResult] = []
+    interrupt_errors: list[Exception] = []
+
+    def _run_reconcile() -> None:
+        reconcile_outcomes.append(reconcile_queue_and_budget_consistency(queue, ledger))
+
+    def _run_interrupt() -> None:
+        barrier.wait()
+        try:
+            queue.mark_interrupted("task-01", reason="stale_worker_exit", quota_exhausted=False)
+        except Exception as exc:
+            interrupt_errors.append(exc)
+
+    t_rec = threading.Thread(target=_run_reconcile)
+    t_int = threading.Thread(target=_run_interrupt)
+    t_rec.start()
+    t_int.start()
+    t_rec.join(timeout=10.0)
+    t_int.join(timeout=10.0)
+
+    assert len(reconcile_outcomes) == 1
+    assert reconcile_outcomes[0].status == "RECONCILIATION_REQUIRED"
+    assert len(interrupt_errors) == 1
+    assert isinstance(interrupt_errors[0], ControllerError)
+    assert "RECONCILIATION_REQUIRED" in str(interrupt_errors[0])
+
+    reloaded_snap = PersistentTaskQueue(q_path, clock=_fixed_now, repair_budget_path=l_path).load()
+    assert reloaded_snap.reconciliation_required is True
+    assert reloaded_snap.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+    assert reloaded_snap.tasks[0].reconciliation_required is True
+    reloaded_ledger = DurableRepairBudgetLedger(l_path, clock=_fixed_now).load(
+        loaded_policy=loaded_policy
+    )
+    assert reloaded_ledger.reservations[res.reservation_id].status == "RESERVED"
+    assert reloaded_ledger.milestone_consumed == 1

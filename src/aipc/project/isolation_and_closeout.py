@@ -609,17 +609,28 @@ def verify_and_restore_closeout_zip(
             seen_explicit_dirs: dict[str, str] = {}
             seen_implicit_dirs: dict[str, str] = {}
             for info in infos:
-                unix_mode = info.external_attr >> 16
-                if stat.S_ISLNK(unix_mode):
+                orig_name = getattr(info, "orig_filename", info.filename)
+                if orig_name != info.filename:
                     raise IsolationPolicyError(
-                        f"Symlink entry rejected in closeout zip: {info.filename!r}"
+                        f"Mutated or NUL-truncated zip entry name rejected: {orig_name!r}"
                     )
-                is_dir_entry = info.is_dir()
-                raw_member = (
-                    info.filename[:-1]
-                    if is_dir_entry and info.filename.endswith("/")
-                    else info.filename
-                )
+                unix_mode = info.external_attr >> 16
+                if unix_mode != 0 and (
+                    stat.S_ISLNK(unix_mode)
+                    or stat.S_ISFIFO(unix_mode)
+                    or stat.S_ISCHR(unix_mode)
+                    or stat.S_ISBLK(unix_mode)
+                    or stat.S_ISSOCK(unix_mode)
+                ):
+                    raise IsolationPolicyError(
+                        f"Special/symlink entry rejected in closeout zip: {orig_name!r}"
+                    )
+                is_dir_entry = orig_name.endswith("/")
+                if info.is_dir() != is_dir_entry:
+                    raise IsolationPolicyError(
+                        f"Inconsistent directory flag for zip entry: {orig_name!r}"
+                    )
+                raw_member = orig_name[:-1] if is_dir_entry else orig_name
                 rel_posix = _validate_zip_entry_name(raw_member)
                 norm_name = rel_posix.as_posix()
                 norm_cf = norm_name.casefold()

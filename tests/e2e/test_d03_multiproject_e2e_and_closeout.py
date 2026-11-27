@@ -1162,3 +1162,51 @@ def test_closeout_restore_rejects_raw_unnormalized_win32_after_valid_member(
         with pytest.raises(IsolationPolicyError):
             verify_and_restore_closeout_zip(bad_zip, restore_dir)
         assert list(restore_dir.rglob("*")) == []
+
+
+def test_closeout_restore_rejects_embedded_nul_filename_and_special_unix_mode_with_zero_writes(
+    tmp_path: Path,
+) -> None:
+    # (a) Central-directory / header filename with embedded NUL byte after 'valid/ok.txt'
+    nul_zip = tmp_path / "embedded_nul_closeout.zip"
+    with zipfile.ZipFile(nul_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("valid/ok.txt", b"ok\n")
+        zf.writestr("later_X_evil.txt", b"bad\n")
+
+    raw_zip_bytes = nul_zip.read_bytes()
+    patched_bytes = raw_zip_bytes.replace(b"later_X_evil.txt", b"later_\x00_evil.txt")
+    assert patched_bytes != raw_zip_bytes
+    nul_zip.write_bytes(patched_bytes)
+
+    nul_sha = hashlib.sha256(patched_bytes).hexdigest()
+    Path(f"{nul_zip}.sha256").write_text(
+        f"{nul_sha}  {nul_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    restore_nul_dir = tmp_path / "restore_embedded_nul"
+    with pytest.raises(IsolationPolicyError, match="NUL-truncated"):
+        verify_and_restore_closeout_zip(nul_zip, restore_nul_dir)
+    assert list(restore_nul_dir.rglob("*")) == []
+
+    # (b) Special Unix file mode (FIFO) after 'valid/ok.txt'
+    fifo_zip = tmp_path / "fifo_closeout.zip"
+    with zipfile.ZipFile(fifo_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("valid/ok.txt", b"ok\n")
+        fifo_info = zipfile.ZipInfo("audit/pipe_entry")
+        fifo_info.create_system = 3
+        fifo_info.external_attr = (stat.S_IFIFO | 0o600) << 16
+        zf.writestr(fifo_info, b"")
+
+    fifo_sha = hashlib.sha256(fifo_zip.read_bytes()).hexdigest()
+    Path(f"{fifo_zip}.sha256").write_text(
+        f"{fifo_sha}  {fifo_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    restore_fifo_dir = tmp_path / "restore_fifo"
+    with pytest.raises(IsolationPolicyError, match="Special/symlink"):
+        verify_and_restore_closeout_zip(fifo_zip, restore_fifo_dir)
+    assert list(restore_fifo_dir.rglob("*")) == []

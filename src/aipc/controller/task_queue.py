@@ -810,6 +810,7 @@ class TaskAttemptLedger(CanonicalRecord):
     attempt: StrictInt = Field(ge=1)
     attempt_id: Identifier
     operation_id: NonEmptyStr | None = None
+    reservation_id: NonEmptyStr | None = None
     worker_id: Identifier
     provider: Identifier
     dispatch_stage: Literal[
@@ -1673,6 +1674,7 @@ class PersistentTaskQueue:
             )
 
             clean_op_id: str | None = None
+            op_reservation_id: str | None = None
             if requires_op_reservation:
                 if eff_ledger_path is None or not eff_ledger_path.is_file():
                     if budget_ledger_path is not None:
@@ -1722,6 +1724,7 @@ class PersistentTaskQueue:
                         f"Cannot dispatch task '{task_id}' for operation_id '{clean_op_id}': "
                         "budget reservation is missing or not in RESERVED state"
                     )
+                op_reservation_id = res.reservation_id
             if target.status == QueuedTaskStatus.REPAIR_REQUIRED and is_verified_legacy_c567:
                 scope_label = (
                     "Milestone C.7"
@@ -1797,10 +1800,16 @@ class PersistentTaskQueue:
                         f"{scope_label} repair budget enforcement rejected dispatch: {exc}"
                     ) from exc
 
+            clean_res_id = (
+                repair_reservation_id.strip()
+                if isinstance(repair_reservation_id, str) and repair_reservation_id.strip()
+                else op_reservation_id
+            )
             ledger = TaskAttemptLedger(
                 attempt=next_attempt_num,
                 attempt_id=attempt_id,
                 operation_id=clean_op_id,
+                reservation_id=clean_res_id,
                 worker_id=worker_id,
                 provider=provider,
                 dispatch_stage="DISPATCHED",
@@ -1833,42 +1842,55 @@ class PersistentTaskQueue:
         quota_exhausted: bool = False,
     ) -> QueuedTaskRecord:
         """Record an interrupted dispatch or provider quota pause."""
-        snap = self.load()
-        target = self._get_task(snap, task_id)
-        if target.status != QueuedTaskStatus.RUNNING or not target.attempts:
-            raise ControllerError(f"task '{task_id}' is not currently RUNNING")
+        with _acquire_queue_ledger_lock(self, self._repair_budget_path):
+            snap = self.load()
+            if snap.reconciliation_required or snap.unresolved_reservation_ids:
+                raise ControllerError(
+                    "RECONCILIATION_REQUIRED: cannot mark task interrupted while "
+                    "queue-level reconciliation blocker is active"
+                )
+            target = self._get_task(snap, task_id)
+            if (
+                target.status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+                or target.reconciliation_required
+            ):
+                raise ControllerError(
+                    f"RECONCILIATION_REQUIRED: task '{task_id}' has active reconciliation blocker"
+                )
+            if target.status != QueuedTaskStatus.RUNNING or not target.attempts:
+                raise ControllerError(f"task '{task_id}' is not currently RUNNING")
 
-        last_att = target.attempts[-1]
-        if quota_exhausted:
-            # Quota exhaustion preserves retry budget by rolling back the uncompleted attempt
-            prior_attempts = target.attempts[:-1]
-            updated_target = target.model_copy(
-                update={
-                    "status": QueuedTaskStatus.WAITING_PROVIDER,
-                    "current_attempt": len(prior_attempts),
-                    "active_attempt_id": None,
-                    "attempts": prior_attempts,
-                    "interruption_reason": reason,
-                }
-            )
-        else:
-            updated_att = last_att.model_copy(
-                update={
-                    "dispatch_stage": "INTERRUPTED",
-                    "failure_reason": reason,
-                    "completed_at": self._clock(),
-                }
-            )
-            updated_target = target.model_copy(
-                update={
-                    "status": QueuedTaskStatus.INTERRUPTED,
-                    "active_attempt_id": None,
-                    "attempts": (*target.attempts[:-1], updated_att),
-                    "interruption_reason": reason,
-                }
-            )
-        self._replace_task(snap, updated_target)
-        return updated_target
+            last_att = target.attempts[-1]
+            if quota_exhausted:
+                # Quota exhaustion preserves retry budget by rolling back the uncompleted attempt
+                prior_attempts = target.attempts[:-1]
+                updated_target = target.model_copy(
+                    update={
+                        "status": QueuedTaskStatus.WAITING_PROVIDER,
+                        "current_attempt": len(prior_attempts),
+                        "active_attempt_id": None,
+                        "attempts": prior_attempts,
+                        "interruption_reason": reason,
+                    }
+                )
+            else:
+                updated_att = last_att.model_copy(
+                    update={
+                        "dispatch_stage": "INTERRUPTED",
+                        "failure_reason": reason,
+                        "completed_at": self._clock(),
+                    }
+                )
+                updated_target = target.model_copy(
+                    update={
+                        "status": QueuedTaskStatus.INTERRUPTED,
+                        "active_attempt_id": None,
+                        "attempts": (*target.attempts[:-1], updated_att),
+                        "interruption_reason": reason,
+                    }
+                )
+            self._replace_task(snap, updated_target)
+            return updated_target
 
     def resume_after_recovery(
         self,
@@ -1876,54 +1898,55 @@ class PersistentTaskQueue:
         decision: RecoveryDecision,
     ) -> QueuedTaskRecord:
         """Resume an INTERRUPTED or WAITING_PROVIDER task only when Recovery authorizes it."""
-        snap = self.load()
-        target = self._get_task(snap, task_id)
-        if target.status not in (
-            QueuedTaskStatus.INTERRUPTED,
-            QueuedTaskStatus.WAITING_PROVIDER,
-        ):
-            raise ControllerError(
-                f"task '{task_id}' is not in a recoverable state (status={target.status})"
-            )
+        with _acquire_queue_ledger_lock(self, self._repair_budget_path):
+            snap = self.load()
+            target = self._get_task(snap, task_id)
+            if target.status not in (
+                QueuedTaskStatus.INTERRUPTED,
+                QueuedTaskStatus.WAITING_PROVIDER,
+            ):
+                raise ControllerError(
+                    f"task '{task_id}' is not in a recoverable state (status={target.status})"
+                )
 
-        reason_text = "; ".join(decision.reasons)
-        if not decision.safe_to_automate or decision.action in (
-            RecoveryAction.WAITING_HUMAN,
-            RecoveryAction.RECOVERY_BLOCKED,
-        ):
+            reason_text = "; ".join(decision.reasons)
+            if not decision.safe_to_automate or decision.action in (
+                RecoveryAction.WAITING_HUMAN,
+                RecoveryAction.RECOVERY_BLOCKED,
+            ):
+                updated = target.model_copy(
+                    update={
+                        "status": QueuedTaskStatus.WAITING_HUMAN,
+                        "blocker_reason": f"Recovery requires human inspection: {reason_text}",
+                    }
+                )
+                self._replace_task(snap, updated)
+                return updated
+
+            if decision.action == RecoveryAction.WAITING_PROVIDER:
+                updated = target.model_copy(
+                    update={
+                        "status": QueuedTaskStatus.WAITING_PROVIDER,
+                        "interruption_reason": reason_text,
+                    }
+                )
+                self._replace_task(snap, updated)
+                return updated
+
+            next_status = (
+                QueuedTaskStatus.REPAIR_REQUIRED
+                if target.current_attempt > 0
+                else QueuedTaskStatus.ELIGIBLE
+            )
             updated = target.model_copy(
                 update={
-                    "status": QueuedTaskStatus.WAITING_HUMAN,
-                    "blocker_reason": f"Recovery requires human inspection: {reason_text}",
+                    "status": next_status,
+                    "interruption_reason": None,
+                    "recovery_cleared_for_attempt": target.current_attempt + 1,
                 }
             )
             self._replace_task(snap, updated)
             return updated
-
-        if decision.action == RecoveryAction.WAITING_PROVIDER:
-            updated = target.model_copy(
-                update={
-                    "status": QueuedTaskStatus.WAITING_PROVIDER,
-                    "interruption_reason": reason_text,
-                }
-            )
-            self._replace_task(snap, updated)
-            return updated
-
-        next_status = (
-            QueuedTaskStatus.REPAIR_REQUIRED
-            if target.current_attempt > 0
-            else QueuedTaskStatus.ELIGIBLE
-        )
-        updated = target.model_copy(
-            update={
-                "status": next_status,
-                "interruption_reason": None,
-                "recovery_cleared_for_attempt": target.current_attempt + 1,
-            }
-        )
-        self._replace_task(snap, updated)
-        return updated
 
     def defer_task(
         self,
@@ -1957,22 +1980,23 @@ class PersistentTaskQueue:
         clean_reason = reason.strip()
         if not clean_reason:
             raise ControllerError("human triage hold requires a non-blank reason")
-        snap = self.load()
-        target = self._get_task(snap, task_id)
-        if target.status != QueuedTaskStatus.REPAIR_REQUIRED:
-            raise ControllerError(
-                f"task '{task_id}' must be REPAIR_REQUIRED to hold for human triage "
-                f"(got {target.status})"
+        with _acquire_queue_ledger_lock(self, self._repair_budget_path):
+            snap = self.load()
+            target = self._get_task(snap, task_id)
+            if target.status != QueuedTaskStatus.REPAIR_REQUIRED:
+                raise ControllerError(
+                    f"task '{task_id}' must be REPAIR_REQUIRED to hold for human triage "
+                    f"(got {target.status})"
+                )
+            updated_target = target.model_copy(
+                update={
+                    "status": QueuedTaskStatus.WAITING_HUMAN,
+                    "active_attempt_id": None,
+                    "blocker_reason": clean_reason,
+                }
             )
-        updated_target = target.model_copy(
-            update={
-                "status": QueuedTaskStatus.WAITING_HUMAN,
-                "active_attempt_id": None,
-                "blocker_reason": clean_reason,
-            }
-        )
-        self._replace_task(snap, updated_target)
-        return updated_target
+            self._replace_task(snap, updated_target)
+            return updated_target
 
     def halt_on_budget_exhaustion(
         self,
@@ -1984,22 +2008,23 @@ class PersistentTaskQueue:
         clean_reason = reason.strip()
         if not clean_reason:
             raise ControllerError("budget exhaustion halt requires a non-blank reason")
-        snap = self.load()
-        target = self._get_task(snap, task_id)
-        if target.status != QueuedTaskStatus.REPAIR_REQUIRED:
-            raise ControllerError(
-                f"task '{task_id}' must be REPAIR_REQUIRED to halt on budget exhaustion "
-                f"(got {target.status})"
+        with _acquire_queue_ledger_lock(self, self._repair_budget_path):
+            snap = self.load()
+            target = self._get_task(snap, task_id)
+            if target.status != QueuedTaskStatus.REPAIR_REQUIRED:
+                raise ControllerError(
+                    f"task '{task_id}' must be REPAIR_REQUIRED to halt on budget exhaustion "
+                    f"(got {target.status})"
+                )
+            updated_target = target.model_copy(
+                update={
+                    "status": QueuedTaskStatus.BLOCKED,
+                    "active_attempt_id": None,
+                    "blocker_reason": clean_reason,
+                }
             )
-        updated_target = target.model_copy(
-            update={
-                "status": QueuedTaskStatus.BLOCKED,
-                "active_attempt_id": None,
-                "blocker_reason": clean_reason,
-            }
-        )
-        self._replace_task(snap, updated_target)
-        return updated_target
+            self._replace_task(snap, updated_target)
+            return updated_target
 
     def resume_after_budget_extension(
         self,
@@ -2015,108 +2040,116 @@ class PersistentTaskQueue:
             raise ControllerError(
                 "Resuming after budget exhaustion requires a non-empty grant_approval_id"
             )
-        snap = self.load()
-        target = self._get_task(snap, task_id)
-        if target.status != QueuedTaskStatus.BLOCKED:
-            raise ControllerError(
-                f"task '{task_id}' must be BLOCKED to resume after budget exhaustion "
-                f"(got {target.status})"
+        with _acquire_queue_ledger_lock(self, self._repair_budget_path):
+            snap = self.load()
+            target = self._get_task(snap, task_id)
+            if target.status != QueuedTaskStatus.BLOCKED:
+                raise ControllerError(
+                    f"task '{task_id}' must be BLOCKED to resume after budget exhaustion "
+                    f"(got {target.status})"
+                )
+            blocker = target.blocker_reason or ""
+            if "HALT_ON_RETRY_EXHAUSTION" not in blocker or "budget" not in blocker.lower():
+                raise ControllerError(
+                    f"task '{task_id}' is BLOCKED for non-budget reason '{blocker}'; "
+                    "budget-extension resume rejected"
+                )
+            if target.current_attempt >= target.contract.max_attempts:
+                raise ControllerError(
+                    f"task '{task_id}' already reached max_attempts "
+                    f"({target.contract.max_attempts})"
+                )
+            if target_paths is not None:
+                if not target_paths:
+                    raise ControllerError("target_paths cannot be empty when specified")
+                in_scope = set(target.contract.in_scope)
+                out_scope = set(target.contract.out_of_scope)
+                for rel_path in target_paths:
+                    norm = PortableRelativePath(rel_path) if rel_path else ""
+                    if norm in out_scope or (in_scope and norm not in in_scope):
+                        raise ControllerError(
+                            f"out-of-scope target path '{rel_path}' rejected for task '{task_id}'"
+                        )
+            self._verify_external_milestone_trust_context(
+                project_id=snap.project_id,
+                milestone_id=snap.milestone_id,
+                phase_id=target.contract.phase_id,
+                in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
+                task_id=target.contract.task_id,
+                override_trust_ctx=None,
             )
-        blocker = target.blocker_reason or ""
-        if "HALT_ON_RETRY_EXHAUSTION" not in blocker or "budget" not in blocker.lower():
-            raise ControllerError(
-                f"task '{task_id}' is BLOCKED for non-budget reason '{blocker}'; "
-                "budget-extension resume rejected"
+            self._verify_milestone_c_authorization(
+                project_id=snap.project_id,
+                milestone_id=snap.milestone_id,
+                contract=target.contract,
+                snapshot_evidence_path=snap.approval_evidence_path,
+                extra_paths=target_paths or (),
             )
-        if target.current_attempt >= target.contract.max_attempts:
-            raise ControllerError(
-                f"task '{task_id}' already reached max_attempts ({target.contract.max_attempts})"
+            if self._repair_budget_path is None:
+                raise ControllerError(
+                    "Budget-extension resume requires a controller-bound budget ledger"
+                )
+            if (
+                budget_ledger_path is not None
+                and Path(budget_ledger_path).resolve() != self._repair_budget_path
+            ):
+                raise ControllerError(
+                    "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
+                )
+            if (
+                self._policy_trust_context is not None
+                and policy_trust_context is not None
+                and policy_trust_context != self._policy_trust_context
+            ):
+                raise ControllerError(
+                    "Mismatched PolicyTrustContext rejected at budget-extension resume"
+                )
+            effective_trust_ctx = (
+                policy_trust_context
+                if policy_trust_context is not None
+                else self._policy_trust_context
             )
-        if target_paths is not None:
-            if not target_paths:
-                raise ControllerError("target_paths cannot be empty when specified")
-            in_scope = set(target.contract.in_scope)
-            out_scope = set(target.contract.out_of_scope)
-            for rel_path in target_paths:
-                norm = PortableRelativePath(rel_path) if rel_path else ""
-                if norm in out_scope or (in_scope and norm not in in_scope):
-                    raise ControllerError(
-                        f"out-of-scope target path '{rel_path}' rejected for task '{task_id}'"
-                    )
-        self._verify_external_milestone_trust_context(
-            project_id=snap.project_id,
-            milestone_id=snap.milestone_id,
-            phase_id=target.contract.phase_id,
-            in_scope_paths=(*target.contract.in_scope, *(target_paths or ())),
-            task_id=target.contract.task_id,
-            override_trust_ctx=None,
-        )
-        self._verify_milestone_c_authorization(
-            project_id=snap.project_id,
-            milestone_id=snap.milestone_id,
-            contract=target.contract,
-            snapshot_evidence_path=snap.approval_evidence_path,
-            extra_paths=target_paths or (),
-        )
-        if self._repair_budget_path is None:
-            raise ControllerError(
-                "Budget-extension resume requires a controller-bound budget ledger"
-            )
-        if (
-            budget_ledger_path is not None
-            and Path(budget_ledger_path).resolve() != self._repair_budget_path
-        ):
-            raise ControllerError(
-                "Alternate budget_ledger_path rejected; queue is bound to controller ledger"
-            )
-        if (
-            self._policy_trust_context is not None
-            and policy_trust_context is not None
-            and policy_trust_context != self._policy_trust_context
-        ):
-            raise ControllerError(
-                "Mismatched PolicyTrustContext rejected at budget-extension resume"
-            )
-        effective_trust_ctx = (
-            policy_trust_context if policy_trust_context is not None else self._policy_trust_context
-        )
-        if effective_trust_ctx is None:
-            raise ControllerError("Budget-extension resume requires controller PolicyTrustContext")
+            if effective_trust_ctx is None:
+                raise ControllerError(
+                    "Budget-extension resume requires controller PolicyTrustContext"
+                )
 
-        from aipc.controller.repair_budget import (
-            DurableRepairBudgetLedger,
-            RepairBudgetError,
-            load_policy_trust_context,
-        )
-
-        try:
-            loaded_policy = load_policy_trust_context(effective_trust_ctx)
-            budget_ledger = DurableRepairBudgetLedger(self._repair_budget_path, clock=self._clock)
-            budget_ledger.verify_resumable_grant(
-                task_id=task_id,
-                grant_approval_id=grant_approval_id.strip(),
-                target_paths=target_paths,
-                contract_in_scope=target.contract.in_scope,
-                loaded_policy=loaded_policy,
-                trust_context=effective_trust_ctx,
-                expected_project_id=snap.project_id,
-                expected_milestone_id=snap.milestone_id,
+            from aipc.controller.repair_budget import (
+                DurableRepairBudgetLedger,
+                RepairBudgetError,
+                load_policy_trust_context,
             )
-        except RepairBudgetError as exc:
-            raise ControllerError(
-                f"Budget-extension resume rejected by repair budget ledger: {exc}"
-            ) from exc
 
-        updated_target = target.model_copy(
-            update={
-                "status": QueuedTaskStatus.REPAIR_REQUIRED,
-                "active_attempt_id": None,
-                "blocker_reason": None,
-                "interruption_reason": None,
-            }
-        )
-        self._replace_task(snap, updated_target)
-        return updated_target
+            try:
+                loaded_policy = load_policy_trust_context(effective_trust_ctx)
+                budget_ledger = DurableRepairBudgetLedger(
+                    self._repair_budget_path, clock=self._clock
+                )
+                budget_ledger.verify_resumable_grant(
+                    task_id=task_id,
+                    grant_approval_id=grant_approval_id.strip(),
+                    target_paths=target_paths,
+                    contract_in_scope=target.contract.in_scope,
+                    loaded_policy=loaded_policy,
+                    trust_context=effective_trust_ctx,
+                    expected_project_id=snap.project_id,
+                    expected_milestone_id=snap.milestone_id,
+                )
+            except RepairBudgetError as exc:
+                raise ControllerError(
+                    f"Budget-extension resume rejected by repair budget ledger: {exc}"
+                ) from exc
+
+            updated_target = target.model_copy(
+                update={
+                    "status": QueuedTaskStatus.REPAIR_REQUIRED,
+                    "active_attempt_id": None,
+                    "blocker_reason": None,
+                    "interruption_reason": None,
+                }
+            )
+            self._replace_task(snap, updated_target)
+            return updated_target
 
     def record_attempt_outcome(
         self,
@@ -2131,55 +2164,56 @@ class PersistentTaskQueue:
         failure_reason: str | None = None,
     ) -> QueuedTaskRecord:
         """Record candidate SHA, evidence, and review/gate verdicts for a running attempt."""
-        snap = self.load()
-        target = self._get_task(snap, task_id)
-        if target.status != QueuedTaskStatus.RUNNING or not target.attempts:
-            raise ControllerError(f"task '{task_id}' is not RUNNING")
+        with _acquire_queue_ledger_lock(self, self._repair_budget_path):
+            snap = self.load()
+            target = self._get_task(snap, task_id)
+            if target.status != QueuedTaskStatus.RUNNING or not target.attempts:
+                raise ControllerError(f"task '{task_id}' is not RUNNING")
 
-        last_att = target.attempts[-1]
-        updated_att = last_att.model_copy(
-            update={
-                "dispatch_stage": "TERMINAL",
-                "candidate_sha": candidate_sha,
-                "checkpoint_id": checkpoint_id,
-                "evidence_root": evidence_root,
-                "review_id": review_id,
-                "review_verdict": review_verdict,
-                "gate_verdict": gate_verdict,
-                "failure_reason": failure_reason,
-                "completed_at": self._clock(),
-            }
-        )
+            last_att = target.attempts[-1]
+            updated_att = last_att.model_copy(
+                update={
+                    "dispatch_stage": "TERMINAL",
+                    "candidate_sha": candidate_sha,
+                    "checkpoint_id": checkpoint_id,
+                    "evidence_root": evidence_root,
+                    "review_id": review_id,
+                    "review_verdict": review_verdict,
+                    "gate_verdict": gate_verdict,
+                    "failure_reason": failure_reason,
+                    "completed_at": self._clock(),
+                }
+            )
 
-        if gate_verdict == "PASS" and review_verdict == "PASS":
-            next_status = QueuedTaskStatus.COMPLETED
-            blocker = None
-        elif gate_verdict == "DEFERRED" or review_verdict == "DEFERRED":
-            next_status = QueuedTaskStatus.DEFERRED
-            blocker = failure_reason or "LIVE_REVIEW_UNVERIFIED"
-        elif gate_verdict in ("REVISE", "REVISE_REQUIRED") and review_verdict == "REVISE":
-            if target.current_attempt < target.contract.max_attempts:
-                next_status = QueuedTaskStatus.REPAIR_REQUIRED
+            if gate_verdict == "PASS" and review_verdict == "PASS":
+                next_status = QueuedTaskStatus.COMPLETED
                 blocker = None
+            elif gate_verdict == "DEFERRED" or review_verdict == "DEFERRED":
+                next_status = QueuedTaskStatus.DEFERRED
+                blocker = failure_reason or "LIVE_REVIEW_UNVERIFIED"
+            elif gate_verdict in ("REVISE", "REVISE_REQUIRED") and review_verdict == "REVISE":
+                if target.current_attempt < target.contract.max_attempts:
+                    next_status = QueuedTaskStatus.REPAIR_REQUIRED
+                    blocker = None
+                else:
+                    next_status = QueuedTaskStatus.BLOCKED
+                    blocker = "RETRY_LIMIT_REACHED"
             else:
                 next_status = QueuedTaskStatus.BLOCKED
-                blocker = "RETRY_LIMIT_REACHED"
-        else:
-            next_status = QueuedTaskStatus.BLOCKED
-            blocker = failure_reason or f"Gate={gate_verdict}, Review={review_verdict}"
+                blocker = failure_reason or f"Gate={gate_verdict}, Review={review_verdict}"
 
-        updated_target = target.model_copy(
-            update={
-                "status": next_status,
-                "active_attempt_id": None,
-                "last_candidate_sha": candidate_sha,
-                "last_evidence_root": evidence_root,
-                "attempts": (*target.attempts[:-1], updated_att),
-                "blocker_reason": blocker,
-            }
-        )
-        self._replace_task(snap, updated_target)
-        return updated_target
+            updated_target = target.model_copy(
+                update={
+                    "status": next_status,
+                    "active_attempt_id": None,
+                    "last_candidate_sha": candidate_sha,
+                    "last_evidence_root": evidence_root,
+                    "attempts": (*target.attempts[:-1], updated_att),
+                    "blocker_reason": blocker,
+                }
+            )
+            self._replace_task(snap, updated_target)
+            return updated_target
 
     def clear_reconciliation_blocker(
         self,
@@ -2383,7 +2417,11 @@ def reconcile_queue_and_budget_consistency(
                             f"for task '{res.task_id}'"
                         )
                     else:
-                        reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
+                        if not (
+                            latest_snap.reconciliation_required
+                            and res_id in latest_snap.unresolved_reservation_ids
+                        ):
+                            reserved_by_task_id.setdefault(res.task_id, []).append(res_id)
                         if res_id not in unresolved_res_ids:
                             unresolved_res_ids.append(res_id)
                         if res.task_id not in escalated_ids:

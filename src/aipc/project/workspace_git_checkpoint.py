@@ -642,10 +642,34 @@ def _path_globs_intersect(
     return dp[0][0]
 
 
+def _contains_negated_bracket_class(pat: str) -> bool:
+    """Return True if pat contains a negated bracket expression ('[!...]' or '[^...]')."""
+    i = 0
+    n = len(pat)
+    while i < n:
+        ch = pat[i]
+        if ch == "\\":
+            i += 2 if i + 1 < n else 1
+        elif ch == "[":
+            scanned = _scan_bracket_expression_end(pat, i)
+            if scanned is None:
+                i += 1
+            else:
+                close_idx, _ = scanned
+                if i + 1 < close_idx and pat[i + 1] in ("!", "^"):
+                    return True
+                i = close_idx + 1
+        else:
+            i += 1
+    return False
+
+
 def _negation_affects_exclusion(neg_pattern: str, required: str) -> bool:
     norm = neg_pattern.strip("/")
     if not norm:
         return False
+    if _contains_negated_bracket_class(norm):
+        return True
     parts = [part for part in norm.split("/") if part]
     if not parts:
         return False
@@ -718,6 +742,67 @@ def _strip_unescaped_trailing_spaces(line: str) -> str:
     return line[:end]
 
 
+_PROTECTED_GITIGNORE_PROBE_PATHS: tuple[str, ...] = (
+    "stable_c/probe.txt",
+    "projects/p1/runtime/worktrees/probe.txt",
+    "projects/p1/runtime/logs/probe.txt",
+    "controller.lock",
+    "secret.key",
+    ".env",
+    ".env.local",
+    "sub/.env",
+)
+
+
+def _run_git_check_ignore_oracle(workspace_root: Path) -> list[str]:
+    """Verify real Git ignores canonical protected probes in both ignorecase modes."""
+    violations: list[str] = []
+    stdin_payload = (
+        b"\x00".join(p.encode("utf-8") for p in _PROTECTED_GITIGNORE_PROBE_PATHS) + b"\x00"
+    )
+    for ignorecase_val in ("false", "true"):
+        try:
+            sanitized_env = build_sanitized_child_env(os.environ)
+            proc = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace_root),
+                    "-c",
+                    f"core.ignorecase={ignorecase_val}",
+                    "check-ignore",
+                    "--no-index",
+                    "-z",
+                    "--stdin",
+                ],
+                input=stdin_payload,
+                capture_output=True,
+                check=False,
+                env=sanitized_env,
+            )
+        except (ChildEnvironmentIsolationError, OSError) as exc:
+            violations.append(
+                f".gitignore real-git check-ignore failed (core.ignorecase={ignorecase_val}): {exc}"
+            )
+            continue
+        if proc.returncode not in (0, 1):
+            violations.append(
+                f".gitignore real-git check-ignore returned {proc.returncode} "
+                f"(core.ignorecase={ignorecase_val})"
+            )
+            continue
+        ignored = {
+            item.decode("utf-8", errors="replace") for item in proc.stdout.split(b"\x00") if item
+        }
+        for probe in _PROTECTED_GITIGNORE_PROBE_PATHS:
+            if probe not in ignored:
+                violations.append(
+                    f".gitignore failed real-git check-ignore (core.ignorecase={ignorecase_val}) "
+                    f"for protected probe: {probe}"
+                )
+    return violations
+
+
 def _check_git_hygiene(workspace_root: Path) -> list[str]:
     violations: list[str] = []
     gitattributes = workspace_root / ".gitattributes"
@@ -785,6 +870,8 @@ def _check_git_hygiene(workspace_root: Path) -> list[str]:
                         )
                     elif not covered:
                         violations.append(f".gitignore missing required exclusion: {req}")
+                if (workspace_root / ".git").exists():
+                    violations.extend(_run_git_check_ignore_oracle(workspace_root))
     return violations
 
 
