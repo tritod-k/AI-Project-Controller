@@ -1745,7 +1745,26 @@ class DurableRepairBudgetLedger:
         _require_non_blank_str(candidate_sha, "candidate_sha")
         if explicit_root_task is not None:
             _require_non_blank_str(explicit_root_task, "explicit_root_task")
-        norm_paths = _normalize_target_paths(target_paths)
+        if target_paths is not None:
+            if isinstance(target_paths, (str, bytes, bytearray)) or not isinstance(
+                target_paths, Sequence
+            ):
+                raise RepairBudgetError("target_paths must be a sequence of non-blank strings")
+            if len(target_paths) == 0:
+                raise RepairBudgetError("target_paths cannot be empty when specified")
+            for raw_target in target_paths:
+                if (
+                    isinstance(raw_target, bool)
+                    or not isinstance(raw_target, str)
+                    or not raw_target.strip()
+                ):
+                    raise RepairBudgetError("target_paths entries must be non-blank strings")
+        try:
+            norm_paths = _normalize_target_paths(target_paths)
+        except RepairBudgetError as exc:
+            if "target_paths" in str(exc):
+                raise
+            raise RepairBudgetError(f"target_paths invalid: {exc}") from exc
         bucket: Literal["INITIAL_INVOCATION", "INNER_CORRECTION"] = (
             "INITIAL_INVOCATION" if inner_pass_index == 0 else "INNER_CORRECTION"
         )

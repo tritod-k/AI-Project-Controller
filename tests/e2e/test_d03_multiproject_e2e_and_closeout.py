@@ -1210,3 +1210,85 @@ def test_closeout_restore_rejects_embedded_nul_filename_and_special_unix_mode_wi
     with pytest.raises(IsolationPolicyError, match="Special/symlink"):
         verify_and_restore_closeout_zip(fifo_zip, restore_fifo_dir)
     assert list(restore_fifo_dir.rglob("*")) == []
+
+
+def test_closeout_restore_rejects_conin_conout_and_leaves_absent_ancestors_untouched(
+    tmp_path: Path,
+) -> None:
+    def _write_zip_with_sidecar(
+        zip_path: Path,
+        entries: list[tuple[str, bytes]],
+        *,
+        tamper_sha: bool = False,
+    ) -> None:
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, payload in entries:
+                zf.writestr(name, payload)
+        zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        if tamper_sha:
+            zip_sha = ("0" if zip_sha[0] != "0" else "1") + zip_sha[1:]
+        Path(f"{zip_path}.sha256").write_text(
+            f"{zip_sha}  {zip_path.name}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    rejected_archives: list[tuple[str, Path]] = []
+
+    tampered_zip = tmp_path / "tampered_sha.zip"
+    _write_zip_with_sidecar(
+        tampered_zip,
+        [("audit/valid.json", b'{"ok": true}\n')],
+        tamper_sha=True,
+    )
+    rejected_archives.append(("tampered_sha", tampered_zip))
+
+    corrupt_zip = tmp_path / "corrupt.zip"
+    corrupt_zip.write_bytes(b"not-a-valid-zip-archive")
+    corrupt_sha = hashlib.sha256(corrupt_zip.read_bytes()).hexdigest()
+    Path(f"{corrupt_zip}.sha256").write_text(
+        f"{corrupt_sha}  {corrupt_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    rejected_archives.append(("corrupt_zip", corrupt_zip))
+
+    bad_member_cases = (
+        ("zip_slip", "../escape.txt"),
+        ("excluded_env", "audit/.env"),
+        ("win32_conin", "CONIN$"),
+        ("win32_conin_txt", "conin$.txt"),
+        ("win32_conout", "CONOUT$"),
+        ("win32_conout_space", "CONOUT$ "),
+        ("win32_sub_conout_log", "sub/conout$.log"),
+    )
+    for label, bad_member in bad_member_cases:
+        zpath = tmp_path / f"{label}.zip"
+        _write_zip_with_sidecar(
+            zpath,
+            [("audit/valid.json", b'{"ok": true}\n'), (bad_member, b"bad\n")],
+        )
+        rejected_archives.append((label, zpath))
+
+    # (a) Absent nested destination and its absent ancestors must remain non-existent on disk
+    for idx, (label, zpath) in enumerate(rejected_archives):
+        absent_ancestor = tmp_path / f"absent_ancestor_{label}_{idx}"
+        nested_dest = absent_ancestor / "nested" / "restore"
+        assert not absent_ancestor.exists()
+        with pytest.raises(IsolationPolicyError):
+            verify_and_restore_closeout_zip(zpath, nested_dest)
+        assert not nested_dest.exists()
+        assert not absent_ancestor.exists()
+
+    # (b) Pre-existing destination directory with a sentinel file must remain untouched
+    existing_dest = tmp_path / "existing_restore_dir"
+    existing_dest.mkdir(parents=True)
+    sentinel = existing_dest / "sentinel.txt"
+    sentinel_bytes = b"keep-me-intact\n"
+    sentinel.write_bytes(sentinel_bytes)
+
+    for _label, zpath in rejected_archives:
+        with pytest.raises(IsolationPolicyError):
+            verify_and_restore_closeout_zip(zpath, existing_dest)
+        assert sentinel.read_bytes() == sentinel_bytes
+        assert [p.name for p in existing_dest.iterdir()] == ["sentinel.txt"]

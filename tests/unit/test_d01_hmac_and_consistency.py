@@ -748,6 +748,82 @@ def test_reconcile_running_requires_exact_non_empty_attempt_id_and_operation_id(
     assert ok_outcome.released_reservation_ids == ()
     assert ok_outcome.escalated_task_ids == ()
 
+    # Two real disk-backed RUNNING + RESERVED mismatch cases (operation_id and attempt_id)
+    for case_name, q_op, q_att in (
+        ("disk_op_mismatch", "op-disk-wrong", "att-01-task-01"),
+        ("disk_att_mismatch", "op-disk-ledger", "att-99-wrong"),
+    ):
+        case_dir = tmp_path / case_name
+        case_dir.mkdir(parents=True, exist_ok=True)
+        d_ledger_path = case_dir / "budget.json"
+        d_queue_path = case_dir / "queue.json"
+        d_ledger = DurableRepairBudgetLedger(d_ledger_path, clock=_fixed_now)
+        d_ledger.initialize(loaded_policy=policy, registered_roots=["task-01"])
+        d_queue = PersistentTaskQueue(
+            d_queue_path,
+            repair_budget_path=d_ledger_path,
+            clock=_fixed_now,
+        )
+        d_queue.initialize(
+            project_id="proj-d01",
+            milestone_id="phase-24",
+            contracts=(_make_contract("task-01"),),
+        )
+        d_res = d_ledger.reserve_attempt_budget(
+            task_id="task-01",
+            operation_id="op-disk-ledger",
+            attempt_id="att-01-task-01",
+            loaded_policy=policy,
+        )
+        d_snap = d_queue.load()
+        running_t1 = d_snap.tasks[0].model_copy(
+            update={
+                "status": QueuedTaskStatus.RUNNING,
+                "current_attempt": 1,
+                "active_attempt_id": q_att,
+                "operation_id": q_op,
+                "attempts": (
+                    TaskAttemptLedger(
+                        attempt=1,
+                        attempt_id=q_att,
+                        operation_id=q_op,
+                        worker_id="w-01",
+                        provider="mock",
+                        dispatch_stage="DISPATCHED",
+                        started_at=_fixed_now(),
+                    ),
+                ),
+            }
+        )
+        d_queue._replace_task(d_snap, running_t1)
+
+        pre_state = d_ledger.load(loaded_policy=policy)
+        pre_ms_consumed = pre_state.milestone_consumed
+        pre_root_consumed = pre_state.registered_roots["task-01"].consumed
+        pre_ms_inv = pre_state.milestone_worker_invocations_consumed
+        pre_global_inv = pre_state.global_worker_invocations_consumed
+
+        d_outcome = reconcile_queue_and_budget_consistency(d_queue, d_ledger)
+        assert d_outcome.status == "RECONCILIATION_REQUIRED"
+
+        reopened_ledger = DurableRepairBudgetLedger(d_ledger_path, clock=_fixed_now).load(
+            loaded_policy=policy
+        )
+        reopened_queue = PersistentTaskQueue(
+            d_queue_path,
+            repair_budget_path=d_ledger_path,
+            clock=_fixed_now,
+        ).load()
+        assert reopened_ledger.reservations[d_res.reservation_id].status == "RESERVED"
+        assert reopened_ledger.milestone_consumed == pre_ms_consumed
+        assert reopened_ledger.registered_roots["task-01"].consumed == pre_root_consumed
+        assert reopened_ledger.milestone_worker_invocations_consumed == pre_ms_inv
+        assert reopened_ledger.global_worker_invocations_consumed == pre_global_inv
+        assert reopened_queue.reconciliation_required is True
+        assert d_res.reservation_id in reopened_queue.unresolved_reservation_ids
+        assert reopened_queue.tasks[0].status == QueuedTaskStatus.RECONCILIATION_REQUIRED
+        assert reopened_queue.tasks[0].reconciliation_required is True
+
 
 def test_load_operator_hmac_key_rejects_symlinked_ancestor_deterministic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1218,6 +1294,19 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
         env=child_env,
     )
     release_ts: list[float] = []
+    baseline_queue_bytes = queue_c_path.read_bytes()
+    baseline_ledger_bytes = ledger_c_path.read_bytes()
+    import aipc.controller.task_queue as tq_mod
+
+    orig_acquire_lock = tq_mod._acquire_queue_ledger_lock
+    parent_contending_event = threading.Event()
+
+    def _wrapped_acquire_lock(*args: object, **kwargs: object) -> object:
+        parent_contending_event.set()
+        return orig_acquire_lock(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(tq_mod, "_acquire_queue_ledger_lock", _wrapped_acquire_lock)
+
     try:
         wait_deadline = time.monotonic() + 15.0
         while not ready_file.is_file():
@@ -1226,7 +1315,9 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
             time.sleep(0.02)
 
         def _signal_release() -> None:
-            time.sleep(0.25)
+            assert parent_contending_event.wait(timeout=10.0)
+            assert queue_c_path.read_bytes() == baseline_queue_bytes
+            assert ledger_c_path.read_bytes() == baseline_ledger_bytes
             release_ts.append(time.monotonic())
             release_file.write_text("RELEASE", encoding="utf-8")
 
@@ -1253,6 +1344,8 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
 
     assert len(release_ts) == 1
     assert parent_done_ts >= release_ts[0]
+    assert dispatched_c.status == QueuedTaskStatus.RUNNING
+    assert ledger_c.load().milestone_consumed == 1
 
     finalized_c = ledger_c.finalize_attempt_budget(
         operation_id="op-proc-01",
@@ -1376,6 +1469,78 @@ def test_begin_dispatch_fails_closed_when_budget_ledger_missing(tmp_path: Path) 
     assert snap_implicit.tasks[0].status == QueuedTaskStatus.ELIGIBLE
     assert snap_implicit.tasks[0].current_attempt == 0
     assert snap_implicit.tasks[0].attempts == ()
+
+    # Authorized Milestone D task on a fresh queue with NO ledger, operation_id=None,
+    # and expected_attempt_id=None must fail closed
+    d_trusted = tmp_path / "d_trusted"
+    d_workspace = tmp_path / "d_workspace"
+    d_trusted.mkdir()
+    d_workspace.mkdir()
+    raw_d_grant = b"Commander K.TRITOD approves Milestone D D01 missing ledger check."
+    d_approval_dig = compute_approval_digest(raw_d_grant)
+    d_record_path = d_trusted / "milestone_d_grant.json"
+    _, d_rec_sha = issue_milestone_authorization_record(
+        raw_grant_bytes=raw_d_grant,
+        record_id="rec-d01-missing-ledger",
+        approval_id="appr-d01-missing-ledger",
+        project_id="proj-d01",
+        milestone_id="milestone-d",
+        commander_id="K.TRITOD",
+        approved_scope=ApprovedMilestoneScope(
+            workstreams=("d01",),
+            allowed_path_prefixes=("src/aipc/controller/",),
+        ),
+        output_path=d_record_path,
+        trusted_external_root=d_trusted,
+        excluded_roots=(d_workspace,),
+        issued_at=_fixed_now(),
+        expires_at=None,
+    )
+    d_trust_ctx = MilestoneAuthorizationTrustContext(
+        record_path=d_record_path,
+        expected_record_sha256=d_rec_sha,
+        expected_approval_digest=d_approval_dig,
+        trusted_external_root=d_trusted,
+        excluded_roots=(d_workspace,),
+        expected_project_id="proj-d01",
+        expected_milestone_id="milestone-d",
+        expected_commander_id="K.TRITOD",
+    )
+    d_contract = ApprovedTaskContract(
+        task_id="task-d01-01",
+        phase_id="d01",
+        milestone_id="milestone-d",
+        title="Milestone D missing ledger task",
+        objective="Ensure Milestone D fails closed when no budget ledger exists.",
+        in_scope=("src/aipc/controller/task_queue.py",),
+        validation_commands=("pytest -q",),
+        approval_id="appr-d01-missing-ledger",
+        approval_evidence_path=str(d_record_path),
+    )
+    d_queue = PersistentTaskQueue(
+        tmp_path / "d_missing_ledger" / "canonical_queue.json",
+        milestone_trust_context=d_trust_ctx,
+        clock=_fixed_now,
+    )
+    d_queue.initialize(
+        project_id="proj-d01",
+        milestone_id="milestone-d",
+        contracts=(d_contract,),
+        approval_id="appr-d01-missing-ledger",
+        approval_evidence_path=d_record_path,
+    )
+    with pytest.raises(ControllerError, match="budget ledger is missing or unavailable"):
+        d_queue.begin_dispatch(
+            "task-d01-01",
+            worker_id="w-d01",
+            provider="mock",
+            operation_id=None,
+            expected_attempt_id=None,
+        )
+    d_snap = d_queue.load()
+    assert d_snap.tasks[0].status == QueuedTaskStatus.ELIGIBLE
+    assert d_snap.tasks[0].current_attempt == 0
+    assert d_snap.tasks[0].attempts == ()
 
 
 def test_begin_dispatch_rejects_unreserved_attempt_despite_historical_consumed_entry(
@@ -2745,6 +2910,82 @@ def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Pa
         assert dispatched.current_attempt == 1
         assert dispatched.operation_id is None
         assert ledger.load().milestone_consumed == 0
+
+        # Persisted ELIGIBLE legacy C.5/C.6/C.7 task with prior attempts cannot use
+        # initial-attempt exemption when a bound ledger is present
+        prior_dir = tmp_path / f"{ms_id.replace('-', '_')}_prior_eligible"
+        prior_appr_path = prior_dir / f"{ms_id.replace('-', '_')}_approval.json"
+        persist_milestone_authorization_evidence(
+            prior_appr_path,
+            MilestoneAuthorizationEvidence(
+                approval_id=appr_id,
+                project_id="proj-d01",
+                milestone_id=ms_id,
+                decision="APPROVED",
+                authorized_by="K.TRITOD",
+                baseline_commit_sha=baseline_sha,
+                authorized_workstreams=(phase_id,),
+            ),
+        )
+        prior_ledger_path = prior_dir / "budget.json"
+        prior_ledger = DurableRepairBudgetLedger(prior_ledger_path, clock=_fixed_now)
+        prior_ledger.initialize(loaded_policy=ms_policy, registered_roots=[task_id])
+        prior_contract = ApprovedTaskContract(
+            task_id=task_id,
+            phase_id=phase_id,
+            milestone_id=ms_id,
+            title=f"Prior-attempt ELIGIBLE {ms_id} task",
+            objective="Verify prior-attempt ELIGIBLE task cannot bypass reservation.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id=appr_id,
+            approval_evidence_path=str(prior_appr_path),
+        )
+        prior_queue = PersistentTaskQueue(
+            prior_dir / "canonical_queue.json",
+            repair_budget_path=prior_ledger_path,
+            milestone_trust_context=ms_trust_ctx,
+            clock=_fixed_now,
+        )
+        prior_queue.initialize(
+            project_id="proj-d01",
+            milestone_id=ms_id,
+            contracts=(prior_contract,),
+            approval_id=appr_id,
+            approval_evidence_path=prior_appr_path,
+        )
+        prior_snap = prior_queue.load()
+        prior_task = prior_snap.tasks[0].model_copy(
+            update={
+                "status": QueuedTaskStatus.ELIGIBLE,
+                "current_attempt": 1,
+                "attempts": (
+                    TaskAttemptLedger(
+                        attempt=1,
+                        attempt_id=f"att-01-{task_id}",
+                        worker_id="w-legacy",
+                        provider="mock",
+                        dispatch_stage="TERMINAL",
+                        started_at=_fixed_now(),
+                        completed_at=_fixed_now(),
+                    ),
+                ),
+            }
+        )
+        prior_queue._replace_task(prior_snap, prior_task)
+        with pytest.raises(
+            ControllerError,
+            match="budget-backed dispatch requires a non-blank operation_id",
+        ):
+            prior_queue.begin_dispatch(
+                task_id,
+                worker_id="w-legacy",
+                provider="mock",
+                operation_id=None,
+            )
+        prior_after = prior_queue.load().tasks[0]
+        assert prior_after.status == QueuedTaskStatus.ELIGIBLE
+        assert prior_after.current_attempt == 1
 
     # Once a C.5 ledger uses D01 operation-correlated tracking, omitted operation_id fails closed
     op_dir = tmp_path / "c5_with_d01_op"
@@ -6932,6 +7173,111 @@ def test_task_attempt_ledger_legacy_snapshot_without_reservation_id_backward_com
     outcome = reconcile_queue_and_budget_consistency(queue, ledger)
     assert outcome.status == "CONSISTENT"
 
+    # Representative legacy persisted queue + budget ledger pairs for C.5, C.6, and C.7
+    for ms_id, phase_id, task_id, appr_id, event_id in (
+        ("milestone-c5", "rg01", "task-rg01-01", "appr-c5-legacy", "evt-c5-legacy-01"),
+        ("milestone-c6", "cisl01", "task-cisl01-01", "appr-c6-legacy", "evt-c6-legacy-01"),
+        ("milestone-c7", "rce01", "task-rce01-01", "appr-c7-legacy", "evt-c7-legacy-01"),
+    ):
+        ms_dir = tmp_path / f"legacy_{ms_id.replace('-', '_')}"
+        ms_dir.mkdir(parents=True, exist_ok=True)
+        ms_q_path = ms_dir / "canonical_queue.json"
+        ms_l_path = ms_dir / "repair_budget_ledger.json"
+        ms_policy = loaded_policy.model_copy(update={"milestone_id": ms_id, "approval_id": appr_id})
+        ms_ledger = DurableRepairBudgetLedger(ms_l_path, clock=_fixed_now)
+        ms_ledger.initialize(loaded_policy=ms_policy, registered_roots=[task_id])
+        ms_res = ms_ledger.reserve_repair(
+            loaded_policy=ms_policy,
+            event_id=event_id,
+            task_id=task_id,
+            attempt=1,
+            candidate_sha="a" * 40,
+            review_id=f"rev-{phase_id}-01",
+            route="REVIEW_COORDINATOR",
+        )
+        assert ms_res.reservation is not None
+        assert ms_res.reservation.operation_id is None
+        assert ms_res.reservation.attempt_id is None
+        ms_ledger.finalize_attempt_budget(
+            reservation_id=ms_res.reservation.reservation_id,
+            worker_id="w-legacy",
+            provider="mock",
+            loaded_policy=ms_policy,
+        )
+
+        approval_evidence_path: str | None = None
+        if ms_id == "milestone-c7":
+            c7_approval_path = ms_dir / "c7_approval.json"
+            persist_milestone_authorization_evidence(
+                c7_approval_path,
+                MilestoneAuthorizationEvidence(
+                    approval_id=appr_id,
+                    project_id="proj-d01",
+                    milestone_id=ms_id,
+                ),
+            )
+            approval_evidence_path = str(c7_approval_path)
+
+        ms_contract = ApprovedTaskContract(
+            task_id=task_id,
+            phase_id=phase_id,
+            milestone_id=ms_id,
+            title=f"Legacy {ms_id} task",
+            objective=f"Verify legacy {ms_id} queue/ledger pair backward compatibility.",
+            in_scope=("src/aipc/controller/task_queue.py",),
+            validation_commands=("pytest -q",),
+            approval_id=appr_id,
+            approval_evidence_path=approval_evidence_path,
+        )
+        ms_snap = TaskQueueSnapshot(
+            project_id="proj-d01",
+            milestone_id=ms_id,
+            approval_id=appr_id,
+            approval_evidence_path=approval_evidence_path,
+            tasks=(
+                QueuedTaskRecord(
+                    contract=ms_contract,
+                    status=QueuedTaskStatus.COMPLETED,
+                    current_attempt=1,
+                    last_candidate_sha="a" * 40,
+                    last_evidence_root=str(ms_dir / "evidence"),
+                    attempts=(
+                        TaskAttemptLedger(
+                            attempt=1,
+                            attempt_id=f"att-01-{task_id}",
+                            worker_id="w-legacy",
+                            provider="mock",
+                            dispatch_stage="TERMINAL",
+                            gate_verdict="PASS",
+                            started_at=_fixed_now(),
+                            completed_at=_fixed_now(),
+                        ),
+                    ),
+                ),
+            ),
+            updated_at=_fixed_now(),
+        )
+        raw_ms_snap = ms_snap.model_dump(mode="json")
+        raw_ms_snap["tasks"][0]["attempts"][0].pop("reservation_id", None)
+        raw_ms_snap["tasks"][0]["attempts"][0].pop("operation_id", None)
+        write_json_atomic(ms_q_path, raw_ms_snap)
+
+        ms_queue = PersistentTaskQueue(ms_q_path, clock=_fixed_now, repair_budget_path=ms_l_path)
+        loaded_ms_snap = ms_queue.load()
+        loaded_ms_ledger = DurableRepairBudgetLedger(ms_l_path, clock=_fixed_now).load(
+            loaded_policy=ms_policy
+        )
+        assert loaded_ms_snap.tasks[0].attempts[0].reservation_id is None
+        assert loaded_ms_snap.tasks[0].attempts[0].operation_id is None
+        assert loaded_ms_ledger.reservations[ms_res.reservation.reservation_id].status == "CONSUMED"
+        assert loaded_ms_ledger.reservations[ms_res.reservation.reservation_id].operation_id is None
+        assert (
+            loaded_ms_ledger.reservations[ms_res.reservation.reservation_id].attempt_id
+            == f"att-01-{task_id}"
+        )
+        ms_outcome = reconcile_queue_and_budget_consistency(ms_queue, ms_ledger)
+        assert ms_outcome.status == "CONSISTENT"
+
 
 def test_mark_interrupted_overlapping_reconcile_preserves_blocker_and_reservation(
     tmp_path: Path,
@@ -7010,3 +7356,231 @@ def test_mark_interrupted_overlapping_reconcile_preserves_blocker_and_reservatio
     )
     assert reloaded_ledger.reservations[res.reservation_id].status == "RESERVED"
     assert reloaded_ledger.milestone_consumed == 1
+
+
+def test_worker_invocation_invalid_args_and_target_paths_rejected_individually_without_mutation(
+    tmp_path: Path,
+) -> None:
+    loaded_policy = _make_loaded_policy()
+    ledger_path = tmp_path / "repair_budget_ledger.json"
+    ledger = DurableRepairBudgetLedger(ledger_path, clock=_fixed_now)
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=["task-01"],
+        trusted_external_root=tmp_path,
+        excluded_roots=(tmp_path / "excluded",),
+    )
+
+    def _assert_unmutated(
+        expected_bytes: bytes,
+        expected_ms_consumed: int,
+        expected_root_consumed: int,
+        expected_inv_ms: int,
+        expected_inv_global: int,
+        expected_inv_root: int,
+        expected_inner: dict[str, int],
+    ) -> None:
+        raw_now = ledger_path.read_bytes()
+        assert raw_now == expected_bytes
+        assert hashlib.sha256(raw_now).hexdigest() == hashlib.sha256(expected_bytes).hexdigest()
+        st = ledger.load(loaded_policy=loaded_policy)
+        assert st.milestone_consumed == expected_ms_consumed
+        assert st.registered_roots["task-01"].consumed == expected_root_consumed
+        assert st.milestone_worker_invocations_consumed == expected_inv_ms
+        assert st.global_worker_invocations_consumed == expected_inv_global
+        assert st.registered_roots["task-01"].worker_invocations_consumed == expected_inv_root
+        assert st.registered_roots["task-01"].inner_corrections_by_attempt == expected_inner
+
+    base_bytes = ledger_path.read_bytes()
+
+    # (1) Malformed target_paths containers and entries
+    bad_containers: tuple[object, ...] = (
+        True,
+        False,
+        123,
+        "src/a.py",
+        b"src/a.py",
+        bytearray(b"src/a.py"),
+        {"src/a.py"},
+        {"a": 1},
+        object(),
+        [],
+        (),
+    )
+    for bad_tp in bad_containers:
+        with pytest.raises(RepairBudgetError, match="target_paths"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-tp-bad-container",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+                target_paths=bad_tp,  # type: ignore[arg-type]
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+    bad_entry_lists: tuple[list[object], ...] = (
+        [True],
+        [False],
+        [None],
+        [123],
+        [""],
+        ["   "],
+        ["../escape"],
+    )
+    for bad_entries in bad_entry_lists:
+        with pytest.raises(RepairBudgetError, match="target_paths"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-tp-bad-entry",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+                target_paths=bad_entries,  # type: ignore[arg-type]
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+    # (2) Invalid/blank/bool/None args on reserve_worker_invocation
+    bad_str_vals: tuple[object, ...] = ("", "   ", True, False, None, 123)
+    for bad in bad_str_vals:
+        with pytest.raises(RepairBudgetError, match="event_id"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id=bad,  # type: ignore[arg-type]
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+        with pytest.raises(RepairBudgetError, match="task_id"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-bad-arg",
+                task_id=bad,  # type: ignore[arg-type]
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+        with pytest.raises(RepairBudgetError, match="candidate_sha"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-bad-arg",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha=bad,  # type: ignore[arg-type]
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+    for bad_opt in ("", "   ", True, False, 123):
+        with pytest.raises(RepairBudgetError, match="explicit_root_task"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-bad-arg",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+                explicit_root_task=bad_opt,  # type: ignore[arg-type]
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+    for bad_outer in (True, False, 0, -1, "1", None, 1.5):
+        with pytest.raises(RepairBudgetError, match="outer_attempt"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-bad-arg",
+                task_id="task-01",
+                outer_attempt=bad_outer,  # type: ignore[arg-type]
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+    for bad_inner in (True, False, -1, "0", None, 1.5):
+        with pytest.raises(RepairBudgetError, match="inner_pass_index"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                event_id="ev-inv-bad-arg",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=bad_inner,  # type: ignore[arg-type]
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+    # Reserve one valid worker invocation to test mark_worker_invocation_interrupted and consume
+    inv_dec = ledger.reserve_worker_invocation(
+        loaded_policy=loaded_policy,
+        event_id="ev-inv-valid-01",
+        task_id="task-01",
+        outer_attempt=1,
+        inner_pass_index=0,
+        candidate_sha="b" * 40,
+    )
+    assert inv_dec.reservation is not None
+    inv_res_id = inv_dec.reservation.reservation_id
+    inv_bytes = ledger_path.read_bytes()
+
+    for method in (
+        ledger.mark_worker_invocation_interrupted,
+        ledger.consume_worker_invocation,
+    ):
+        for bad in bad_str_vals:
+            with pytest.raises(RepairBudgetError, match="reservation_id"):
+                method(
+                    reservation_id=bad,  # type: ignore[arg-type]
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})
+
+            with pytest.raises(RepairBudgetError, match="attempt_id"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id=bad,  # type: ignore[arg-type]
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})
+
+            with pytest.raises(RepairBudgetError, match="worker_id"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id="att-01-task-01",
+                    worker_id=bad,  # type: ignore[arg-type]
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})
+
+            with pytest.raises(RepairBudgetError, match="provider"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider=bad,  # type: ignore[arg-type]
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})
+
+        for bad_opt in ("", "   ", True, False, 123):
+            with pytest.raises(RepairBudgetError, match="dispatch_claim_id"):
+                method(
+                    reservation_id=inv_res_id,
+                    dispatch_claim_id=bad_opt,  # type: ignore[arg-type]
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})

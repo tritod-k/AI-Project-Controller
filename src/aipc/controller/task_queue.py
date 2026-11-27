@@ -1645,6 +1645,8 @@ class PersistentTaskQueue:
                 is_verified_legacy_c567
                 and not uses_d01_op_tracking
                 and target.status == QueuedTaskStatus.ELIGIBLE
+                and target.current_attempt == 0
+                and not target.attempts
                 and operation_id is None
                 and expected_attempt_id is None
                 and (
@@ -1663,7 +1665,8 @@ class PersistentTaskQueue:
                 and expected_attempt_id is None
             )
             requires_op_reservation = (
-                operation_id is not None
+                is_d_milestone
+                or operation_id is not None
                 or expected_attempt_id is not None
                 or uses_d01_op_tracking
                 or (

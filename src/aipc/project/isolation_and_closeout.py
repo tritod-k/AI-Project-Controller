@@ -525,6 +525,8 @@ def export_release_closeout_zip(
 _WINDOWS_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
     {
         "CON",
+        "CONIN$",
+        "CONOUT$",
         "PRN",
         "AUX",
         "NUL",
@@ -596,15 +598,18 @@ def verify_and_restore_closeout_zip(
             )
 
     target_lex = _validate_clean_path(restore_target_dir, label="restore_target_dir")
-    _assert_not_symlink_lstat(target_lex, label="restore_target_dir")
-    target_lex.mkdir(parents=True, exist_ok=True)
-    target_resolved = target_lex.resolve()
+    target_st = _assert_not_symlink_lstat(target_lex, label="restore_target_dir")
+    if target_st is not None and not stat.S_ISDIR(target_st.st_mode):
+        raise IsolationPolicyError(
+            f"restore_target_dir exists and is not a directory: {target_lex}"
+        )
+    target_resolved = target_lex.resolve(strict=False)
 
     restored_files: list[str] = []
     try:
         with zipfile.ZipFile(zip_resolved, mode="r") as zf:
             infos = zf.infolist()
-            validated_entries: list[tuple[zipfile.ZipInfo, Path, str]] = []
+            validated_entries: list[tuple[zipfile.ZipInfo, tuple[str, ...], str]] = []
             seen_files: dict[str, str] = {}
             seen_explicit_dirs: dict[str, str] = {}
             seen_implicit_dirs: dict[str, str] = {}
@@ -683,9 +688,14 @@ def verify_and_restore_closeout_zip(
                     raise IsolationPolicyError(
                         f"Zip entry escapes restore_target_dir: {info.filename!r}"
                     )
-                validated_entries.append((info, dest_path, norm_name))
+                validated_entries.append((info, rel_posix.parts, norm_name))
 
-            for info, dest_path, rel_str in validated_entries:
+            target_lex.mkdir(parents=True, exist_ok=True)
+            _assert_not_symlink_lstat(target_lex, label="restore_target_dir")
+            target_resolved = target_lex.resolve()
+
+            for info, rel_parts, rel_str in validated_entries:
+                dest_path = target_resolved.joinpath(*rel_parts)
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 _assert_not_symlink_lstat(dest_path.parent, label="restore_parent_dir")
                 _assert_not_symlink_lstat(dest_path, label="restore_dest_file")
