@@ -24,7 +24,9 @@ from aipc.controller.milestone_authorization import (
     load_and_verify_milestone_authorization,
 )
 from aipc.controller.planner_engine import HumanGoalSpec
+from aipc.controller.repair_budget import DurableRepairBudgetLedger
 from aipc.project.models import AcceptanceCriterion
+from aipc.review.governance_policy import LoadedReviewGovernancePolicy, ReviewGovernancePolicy
 from aipc.review.trusted_acceptance_harness import (
     UNAUTHORIZED_MILESTONE_D_BLOCKED,
     TrustedHarnessManifest,
@@ -152,7 +154,32 @@ def test_milestone_d_workstreams_allowed_with_valid_external_trust_context(
         phase_id=workstream,
         approval_evidence_path=str(trust_ctx.record_path),
     )
-    queue = PersistentTaskQueue(tmp_path / "queue.json", milestone_trust_context=trust_ctx)
+    loaded_policy = LoadedReviewGovernancePolicy(
+        policy=ReviewGovernancePolicy(
+            policy_version="1.0",
+            policy_id="policy-d-bootstrap-01",
+            owner="K.TRITOD",
+        ),
+        policy_path=tmp_path / "policy.yaml",
+        policy_sha256=DIGEST_1,
+        approval_path=trust_ctx.record_path,
+        approval_id="ktritod-d-20261120",
+        approval_evidence_digest=DIGEST_1,
+        authorized_by="K.TRITOD",
+        project_id="proj-d",
+        milestone_id="milestone-d",
+    )
+    ledger_path = tmp_path / "repair_budget_ledger.json"
+    ledger = DurableRepairBudgetLedger(ledger_path)
+    ledger.initialize(
+        loaded_policy=loaded_policy,
+        registered_roots=[contract.task_id],
+    )
+    queue = PersistentTaskQueue(
+        tmp_path / "queue.json",
+        repair_budget_path=ledger_path,
+        milestone_trust_context=trust_ctx,
+    )
     snap = queue.initialize(
         project_id="proj-d",
         milestone_id="milestone-d",
@@ -160,10 +187,12 @@ def test_milestone_d_workstreams_allowed_with_valid_external_trust_context(
         approval_id="ktritod-d-20261120",
     )
     assert snap.milestone_id == "milestone-d"
-    dispatched = queue.begin_dispatch(
+    _, dispatched = queue.reserve_and_begin_dispatch(
         contract.task_id,
+        ledger=ledger,
         worker_id="worker-1",
         provider="gemini",
+        operation_id=f"op-{workstream}-01",
     )
     assert dispatched.status == QueuedTaskStatus.RUNNING
 
