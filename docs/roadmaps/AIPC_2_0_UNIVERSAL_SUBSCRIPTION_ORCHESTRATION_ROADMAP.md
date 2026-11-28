@@ -2,7 +2,7 @@
 
 # AIPC 2.0 Universal Subscription Orchestration Roadmap
 
-**Milestone D Status** AWAITING_REVIEW. Cycle 25 of 25 (bounded G-01..G-10 closure) verified at `d56cb140051d8a0299ddcecf611ee994dabf0b8f`. The Cycle #26 review and exact-SHA CI bind to `frozenSHA_d_r26`. Ratified posture remains supervised and experimental.
+**Milestone D Status** AWAITING_REVIEW. Cycle 26 of 26 (bounded H-01..H-03 closure + frozen-SHA evidence pipeline) verified at `8cf9c1cc0938de6ac3839e8b1fa5dd0ca0e80d05`. The Cycle #27 review and exact-SHA CI bind to `frozenSHA_d_r27`. Ratified posture remains supervised and experimental.
 
 ---
 
