@@ -446,7 +446,7 @@ def test_http_server_multi_project_routes_and_read_only_405(tmp_path: Path) -> N
             assert data_ver["projects"][0]["evidence_items"][0]["state"] == "PRESENT_VERIFIED"
 
         # Non-GET/HEAD requests strictly return HTTP 405
-        for method in ("POST", "PUT", "DELETE", "PATCH"):
+        for method in ("POST", "PUT", "DELETE", "PATCH", "MOVE", "COPY", "MKCOL", "PROPPATCH"):
             for route in ("/multi-project", "/api/multi-project"):
                 req = urllib.request.Request(f"{srv.base_url}{route}", data=b"{}", method=method)
                 try:
@@ -454,11 +454,13 @@ def test_http_server_multi_project_routes_and_read_only_405(tmp_path: Path) -> N
                     raise AssertionError(f"Expected 405 for {method} {route}")
                 except urllib.error.HTTPError as exc:
                     assert exc.code == 405
+                    assert "strictly read-only" in json.load(exc)["error"]
 
         # HEAD is allowed
         head_req = urllib.request.Request(f"{srv.base_url}/api/multi-project", method="HEAD")
         with urllib.request.urlopen(head_req) as resp:
             assert resp.status == 200
+            assert resp.read() == b""
 
     # Default constructor without projects_root preserves 404 on /multi-project
     default_app = DashboardApplication(service)

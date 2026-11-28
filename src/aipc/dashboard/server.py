@@ -5,7 +5,7 @@ import json
 import re
 import threading
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Self
 
@@ -272,6 +272,12 @@ def _make_handler(app: DashboardApplication):
     """Create a stdlib request handler dispatching all methods to the application."""
 
     class _Handler(http.server.BaseHTTPRequestHandler):
+        def __getattr__(self, name: str) -> Callable[[], None]:
+            # BaseHTTPRequestHandler looks up do_<method> after parsing the request.
+            if name.startswith("do_"):
+                return self._dispatch
+            raise AttributeError(name)
+
         def _dispatch(self, *, send_body: bool = True) -> None:
             resp = app.handle_request(self.command, self.path)
             self.send_response(resp.status_code)
