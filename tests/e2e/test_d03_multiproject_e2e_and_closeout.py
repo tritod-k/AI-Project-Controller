@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import importlib
 import json
 import os
-import pkgutil
 import stat
 import subprocess
 import types
@@ -19,7 +17,6 @@ from typing import Any
 import pytest
 import yaml
 
-import aipc
 from aipc.controller.errors import ControllerError
 from aipc.controller.milestone_authorization import (
     MilestoneAuthorizationError,
@@ -57,6 +54,7 @@ from aipc.project.scaffolding import (
     render_current_status_md,
     snapshot_approved_plan,
 )
+from aipc.project.workspace_git_checkpoint import verify_workspace_git_quiescence
 from aipc.review.governance_policy import (
     PolicyTrustContext,
     default_review_governance_policy,
@@ -170,19 +168,6 @@ def _git_run(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
         check=True,
         timeout=30,
     )
-
-
-def _find_verify_workspace_git_quiescence() -> Any | None:
-    """Locate verify_workspace_git_quiescence from aipc package if exported."""
-    for mod_info in pkgutil.walk_packages(aipc.__path__, prefix="aipc."):
-        try:
-            mod = importlib.import_module(mod_info.name)
-        except Exception:
-            continue
-        fn = getattr(mod, "verify_workspace_git_quiescence", None)
-        if callable(fn):
-            return fn
-    return None
 
 
 def test_a_two_project_interleaved_e2e_and_readonly_dashboard(tmp_path: Path) -> None:
@@ -933,18 +918,10 @@ def test_f_clean_git_checkout_restore_lf_and_quiescence(tmp_path: Path) -> None:
     _git_run(repo, ["add", "."])
     _git_run(repo, ["commit", "-m", "Add canonical receipts with LF"])
 
-    quiescence_fn = _find_verify_workspace_git_quiescence()
-    if quiescence_fn is not None:
-        q_res = quiescence_fn(repo)
-        assert (
-            q_res is True
-            or getattr(q_res, "passed", None) is True
-            or getattr(q_res, "quiescent", None) is True
-            or getattr(q_res, "status", None) == "PASS"
-        )
-    else:
-        status_proc = _git_run(repo, ["status", "--porcelain=v1"])
-        assert status_proc.stdout.strip() == ""
+    q_res = verify_workspace_git_quiescence(repo)
+    assert q_res.passed and q_res.status == "PASS", q_res.violations
+    assert q_res.violations == ()
+    assert q_res.is_git_repo
 
     cloned = tmp_path / "cloned_repo"
     _git_run(tmp_path, ["clone", str(repo), str(cloned)])

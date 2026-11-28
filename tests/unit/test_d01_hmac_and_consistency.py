@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1300,15 +1302,8 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
     baseline_ledger_bytes = ledger_c_path.read_bytes()
     import aipc.controller.task_queue as tq_mod
 
-    orig_acquire_lock = tq_mod._acquire_queue_ledger_lock
-    parent_contending_event = threading.Event()
     dispatch_completed_event = threading.Event()
-
-    def _wrapped_acquire_lock(*args: object, **kwargs: object) -> object:
-        parent_contending_event.set()
-        return orig_acquire_lock(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(tq_mod, "_acquire_queue_ledger_lock", _wrapped_acquire_lock)
+    win_contention = threading.Event()
 
     try:
         wait_deadline = time.monotonic() + 15.0
@@ -1317,47 +1312,79 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
             assert time.monotonic() < wait_deadline, "timed out waiting for child lock"
             time.sleep(0.02)
 
-        conflict_observed: list[bool] = []
-        conflict_ts: list[float] = []
         lock_file_c = tq_mod._resolve_queue_ledger_lock_path(queue_c, ledger_c)
         assert lock_file_c is not None
+        lock_stat = lock_file_c.stat()
+        conflict_ts: list[float] = []
+
+        if sys.platform == "win32":
+            import msvcrt
+
+            original_locking = msvcrt.locking
+
+            def _observe_dispatch_lock(fd: int, mode: int, nbytes: int) -> None:
+                try:
+                    original_locking(fd, mode, nbytes)
+                except OSError as exc:
+                    if (
+                        mode == msvcrt.LK_NBLCK
+                        and exc.errno == errno.EACCES
+                        and os.path.samestat(os.fstat(fd), lock_stat)
+                    ):
+                        win_contention.set()
+                    raise
+
+            monkeypatch.setattr(msvcrt, "locking", _observe_dispatch_lock)
 
         def _signal_release() -> None:
-            assert parent_contending_event.wait(timeout=10.0)
-            assert not dispatch_completed_event.is_set()
-            with open(lock_file_c, "a+b") as probe_fh:
-                with pytest.raises((OSError, BlockingIOError)):
-                    if sys.platform == "win32":
-                        import msvcrt
+            try:
+                if sys.platform == "win32":
+                    assert win_contention.wait(10.0), "dispatch never hit the Windows lock"
+                else:
+                    # The kernel reports an actual blocked flock waiter as a "->" row.
+                    deadline = time.monotonic() + 10.0
+                    while True:
+                        for line in Path("/proc/locks").read_text(encoding="ascii").splitlines():
+                            fields = line.split()
+                            if fields[1:5] != ["->", "FLOCK", "ADVISORY", "WRITE"]:
+                                continue
+                            if int(fields[5]) != os.getpid():
+                                continue
+                            major, minor, inode = fields[6].split(":")
+                            if (
+                                os.makedev(int(major, 16), int(minor, 16)) == lock_stat.st_dev
+                                and int(inode) == lock_stat.st_ino
+                            ):
+                                break
+                        else:
+                            assert child_proc.poll() is None, "child exited before contention"
+                            assert not dispatch_completed_event.is_set()
+                            assert time.monotonic() < deadline, "dispatch never blocked in flock"
+                            time.sleep(0.02)
+                            continue
+                        break
 
-                        probe_fh.seek(0)
-                        msvcrt.locking(probe_fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    else:
-                        import fcntl
+                assert child_proc.poll() is None, "child exited before lock release"
+                assert not dispatch_completed_event.is_set()
+                conflict_ts.append(time.monotonic())
+                assert queue_c_path.read_bytes() == baseline_queue_bytes
+                assert ledger_c_path.read_bytes() == baseline_ledger_bytes
+            finally:
+                release_ts.append(time.monotonic())
+                release_file.write_text("RELEASE", encoding="utf-8")
 
-                        fcntl.flock(probe_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            assert not dispatch_completed_event.is_set()
-            conflict_observed.append(True)
-            assert queue_c_path.read_bytes() == baseline_queue_bytes
-            assert ledger_c_path.read_bytes() == baseline_ledger_bytes
-            conflict_ts.append(time.monotonic())
-            release_ts.append(time.monotonic())
-            release_file.write_text("RELEASE", encoding="utf-8")
-
-        releaser = threading.Thread(target=_signal_release, name="child-lock-releaser")
-        releaser.start()
-
-        res_c, dispatched_c = queue_c.reserve_and_begin_dispatch(
-            "task-01",
-            ledger=ledger_c,
-            worker_id="w-01",
-            provider="mock",
-            operation_id="op-proc-01",
-        )
-        dispatch_completed_event.set()
-        parent_done_ts = time.monotonic()
-        releaser.join(timeout=10.0)
-        assert not releaser.is_alive()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            releaser = executor.submit(_signal_release)
+            res_c, dispatched_c = queue_c.reserve_and_begin_dispatch(
+                "task-01",
+                ledger=ledger_c,
+                worker_id="w-01",
+                provider="mock",
+                operation_id="op-proc-01",
+            )
+            dispatch_completed_event.set()
+            parent_done_ts = time.monotonic()
+            releaser.result(timeout=15.0)
         assert child_proc.wait(timeout=15.0) == 0
     finally:
         if not release_file.is_file():
@@ -1366,7 +1393,6 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
             child_proc.terminate()
             child_proc.wait(timeout=5.0)
 
-    assert conflict_observed == [True]
     assert child_proc.returncode == 0
     assert len(conflict_ts) == 1
     assert len(release_ts) == 1
@@ -2814,7 +2840,11 @@ def test_begin_dispatch_rejects_nonlegacy_spoofing_with_legacy_looking_identifie
         assert spoof_snap.tasks[0].current_attempt == 0
 
 
-def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Path) -> None:
+@pytest.mark.parametrize("milestone_id", ("milestone-c5", "milestone-c6", "milestone-c7"))
+def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(
+    tmp_path: Path,
+    milestone_id: str,
+) -> None:
     trusted_dir = tmp_path / "trusted"
     workspace_dir = tmp_path / "workspace"
     trusted_dir.mkdir()
@@ -2882,6 +2912,8 @@ def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Pa
     )
 
     for ms_id, phase_id, task_id, baseline_sha, appr_id, ms_trust_ctx in cases:
+        if ms_id != milestone_id:
+            continue
         case_dir = tmp_path / ms_id.replace("-", "_")
         approval_path = case_dir / f"{ms_id.replace('-', '_')}_approval.json"
         persist_milestone_authorization_evidence(
@@ -3097,6 +3129,9 @@ def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Pa
                 )
             assert no_ldg_q_path.read_bytes() == raw_q_before
 
+    if milestone_id != "milestone-c5":
+        return
+
     # Once a C.5 ledger uses D01 operation-correlated tracking, omitted operation_id fails closed
     op_dir = tmp_path / "c5_with_d01_op"
     op_approval_path = op_dir / "c5_approval.json"
@@ -3275,8 +3310,10 @@ def _build_c567_policy_trust_context(
     )
 
 
+@pytest.mark.parametrize("milestone_id", ("milestone-c5", "milestone-c6", "milestone-c7"))
 def test_begin_dispatch_legacy_c567_repair_rejects_omitted_or_blank_op_id_when_d01_tracking_active(
     tmp_path: Path,
+    milestone_id: str,
 ) -> None:
     trusted_dir = tmp_path / "trusted_ms_d"
     workspace_dir = tmp_path / "workspace_ms_d"
@@ -3347,6 +3384,8 @@ def test_begin_dispatch_legacy_c567_repair_rejects_omitted_or_blank_op_id_when_d
     )
 
     for ms_id, phase_id, task_id, other_task_id, baseline_sha, appr_id, ms_trust_ctx in cases:
+        if ms_id != milestone_id:
+            continue
         ms_tag = ms_id.replace("-", "_")
 
         # 0. Pure legacy C.5/C.6/C.7 REPAIR_REQUIRED dispatch (uses_d01_op_tracking == False)
@@ -7302,12 +7341,21 @@ def test_task_attempt_ledger_legacy_snapshot_without_reservation_id_backward_com
     outcome = reconcile_queue_and_budget_consistency(queue, ledger)
     assert outcome.status == "CONSISTENT"
 
+
+@pytest.mark.parametrize("milestone_id", ("milestone-c5", "milestone-c6", "milestone-c7"))
+def test_legacy_milestone_snapshot_without_reservation_id_reconciles(
+    tmp_path: Path,
+    milestone_id: str,
+) -> None:
+    loaded_policy = _make_loaded_policy()
     # Representative legacy persisted queue + budget ledger pairs for C.5, C.6, and C.7
     for ms_id, phase_id, task_id, appr_id, event_id in (
         ("milestone-c5", "rg01", "task-rg01-01", "appr-c5-legacy", "evt-c5-legacy-01"),
         ("milestone-c6", "cisl01", "task-cisl01-01", "appr-c6-legacy", "evt-c6-legacy-01"),
         ("milestone-c7", "rce01", "task-rce01-01", "appr-c7-legacy", "evt-c7-legacy-01"),
     ):
+        if ms_id != milestone_id:
+            continue
         ms_dir = tmp_path / f"legacy_{ms_id.replace('-', '_')}"
         ms_dir.mkdir(parents=True, exist_ok=True)
         ms_q_path = ms_dir / "canonical_queue.json"
