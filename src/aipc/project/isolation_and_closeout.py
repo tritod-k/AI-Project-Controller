@@ -23,6 +23,7 @@ import re
 import stat
 import tempfile
 import zipfile
+import zlib
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, NamedTuple
@@ -606,10 +607,12 @@ def verify_and_restore_closeout_zip(
     target_resolved = target_lex.resolve(strict=False)
 
     restored_files: list[str] = []
+    max_total_uncompressed_bytes = 64 * 1024 * 1024
+    total_uncompressed_bytes = 0
     try:
         with zipfile.ZipFile(zip_resolved, mode="r") as zf:
             infos = zf.infolist()
-            validated_entries: list[tuple[zipfile.ZipInfo, tuple[str, ...], str]] = []
+            validated_entries: list[tuple[tuple[str, ...], str, bytes]] = []
             seen_files: dict[str, str] = {}
             seen_explicit_dirs: dict[str, str] = {}
             seen_implicit_dirs: dict[str, str] = {}
@@ -688,21 +691,40 @@ def verify_and_restore_closeout_zip(
                     raise IsolationPolicyError(
                         f"Zip entry escapes restore_target_dir: {info.filename!r}"
                     )
-                validated_entries.append((info, rel_posix.parts, norm_name))
+                if (
+                    info.file_size < 0
+                    or info.file_size > max_total_uncompressed_bytes
+                    or total_uncompressed_bytes + info.file_size > max_total_uncompressed_bytes
+                ):
+                    raise IsolationPolicyError(
+                        "Closeout zip exceeds maximum uncompressed size limit"
+                    )
+                payload_buf = bytearray()
+                with zf.open(info, "r") as member_stream:
+                    while True:
+                        chunk = member_stream.read(65536)
+                        if not chunk:
+                            break
+                        total_uncompressed_bytes += len(chunk)
+                        if total_uncompressed_bytes > max_total_uncompressed_bytes:
+                            raise IsolationPolicyError(
+                                "Closeout zip exceeds maximum uncompressed size limit"
+                            )
+                        payload_buf.extend(chunk)
+                validated_entries.append((rel_posix.parts, norm_name, bytes(payload_buf)))
 
             target_lex.mkdir(parents=True, exist_ok=True)
             _assert_not_symlink_lstat(target_lex, label="restore_target_dir")
             target_resolved = target_lex.resolve()
 
-            for info, rel_parts, rel_str in validated_entries:
+            for rel_parts, rel_str, data in validated_entries:
                 dest_path = target_resolved.joinpath(*rel_parts)
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 _assert_not_symlink_lstat(dest_path.parent, label="restore_parent_dir")
                 _assert_not_symlink_lstat(dest_path, label="restore_dest_file")
-                data = zf.read(info.filename)
                 dest_path.write_bytes(data)
                 restored_files.append(rel_str)
-    except zipfile.BadZipFile as exc:
+    except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
         raise IsolationPolicyError(f"Corrupt closeout zip {zip_resolved}: {exc}") from exc
 
     return CloseoutRestoreReceipt(

@@ -1292,3 +1292,65 @@ def test_closeout_restore_rejects_conin_conout_and_leaves_absent_ancestors_untou
             verify_and_restore_closeout_zip(zpath, existing_dest)
         assert sentinel.read_bytes() == sentinel_bytes
         assert [p.name for p in existing_dest.iterdir()] == ["sentinel.txt"]
+
+
+def test_closeout_restore_rejects_corrupt_member_payload_before_creating_target(
+    tmp_path: Path,
+) -> None:
+    corrupt_member_zip = tmp_path / "corrupt_member_payload.zip"
+    orig_payload = b"PAYLOAD_TO_CORRUPT_1234567890\n"
+    mutated_payload = b"CORRUPTED_PAYLOAD__1234567890\n"
+    assert len(orig_payload) == len(mutated_payload)
+
+    with zipfile.ZipFile(corrupt_member_zip, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("audit/valid.json", b'{"ok": true}\n')
+        zf.writestr("audit/corrupt.txt", orig_payload)
+
+    raw_bytes = corrupt_member_zip.read_bytes()
+    patched_bytes = raw_bytes.replace(orig_payload, mutated_payload)
+    assert patched_bytes != raw_bytes
+    corrupt_member_zip.write_bytes(patched_bytes)
+
+    zip_sha = hashlib.sha256(patched_bytes).hexdigest()
+    Path(f"{corrupt_member_zip}.sha256").write_text(
+        f"{zip_sha}  {corrupt_member_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    absent_ancestor = tmp_path / "absent_corrupt_ancestor"
+    nested_dest = absent_ancestor / "nested" / "restore"
+    assert not absent_ancestor.exists()
+    with pytest.raises(IsolationPolicyError, match="Corrupt closeout zip"):
+        verify_and_restore_closeout_zip(corrupt_member_zip, nested_dest)
+    assert not nested_dest.exists()
+    assert not absent_ancestor.exists()
+
+    existing_dest = tmp_path / "existing_corrupt_restore_dir"
+    existing_dest.mkdir(parents=True)
+    sentinel = existing_dest / "sentinel.txt"
+    sentinel_bytes = b"keep-me-intact\n"
+    sentinel.write_bytes(sentinel_bytes)
+
+    with pytest.raises(IsolationPolicyError, match="Corrupt closeout zip"):
+        verify_and_restore_closeout_zip(corrupt_member_zip, existing_dest)
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert [p.name for p in existing_dest.iterdir()] == ["sentinel.txt"]
+
+    valid_zip = tmp_path / "valid_closeout.zip"
+    with zipfile.ZipFile(valid_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("audit/valid.json", b'{"ok": true}\n')
+        zf.writestr("audit/second.txt", b"clean payload\n")
+    valid_sha = hashlib.sha256(valid_zip.read_bytes()).hexdigest()
+    Path(f"{valid_zip}.sha256").write_text(
+        f"{valid_sha}  {valid_zip.name}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    clean_dest = tmp_path / "clean_restore" / "nested"
+    receipt = verify_and_restore_closeout_zip(valid_zip, clean_dest, expected_sha256=valid_sha)
+    assert receipt.restored_file_count == 2
+    assert receipt.restored_files == ("audit/second.txt", "audit/valid.json")
+    assert (clean_dest / "audit" / "valid.json").read_bytes() == b'{"ok": true}\n'
+    assert (clean_dest / "audit" / "second.txt").read_bytes() == b"clean payload\n"

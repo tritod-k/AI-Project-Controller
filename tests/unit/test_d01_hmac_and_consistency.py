@@ -1255,6 +1255,8 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
                 "        deadline = time.monotonic() + 15.0",
                 "        while not release_path.is_file() and time.monotonic() < deadline:",
                 "            time.sleep(0.02)",
+                "        if not release_path.is_file():",
+                "            sys.exit(99)",
                 "elif mode == 'reconcile':",
                 "    res_id = sys.argv[4]",
                 "    outcome = reconcile_queue_and_budget_consistency(queue, ledger)",
@@ -1314,8 +1316,24 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
             assert time.monotonic() < wait_deadline, "timed out waiting for child lock"
             time.sleep(0.02)
 
+        conflict_observed: list[bool] = []
+        lock_file_c = tq_mod._resolve_queue_ledger_lock_path(queue_c, ledger_c)
+        assert lock_file_c is not None
+
         def _signal_release() -> None:
             assert parent_contending_event.wait(timeout=10.0)
+            with open(lock_file_c, "a+b") as probe_fh:
+                with pytest.raises((OSError, BlockingIOError)):
+                    if sys.platform == "win32":
+                        import msvcrt
+
+                        probe_fh.seek(0)
+                        msvcrt.locking(probe_fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(probe_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            conflict_observed.append(True)
             assert queue_c_path.read_bytes() == baseline_queue_bytes
             assert ledger_c_path.read_bytes() == baseline_ledger_bytes
             release_ts.append(time.monotonic())
@@ -1342,6 +1360,8 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
             child_proc.terminate()
             child_proc.wait(timeout=5.0)
 
+    assert conflict_observed == [True]
+    assert child_proc.returncode == 0
     assert len(release_ts) == 1
     assert parent_done_ts >= release_ts[0]
     assert dispatched_c.status == QueuedTaskStatus.RUNNING
@@ -7515,6 +7535,20 @@ def test_worker_invocation_invalid_args_and_target_paths_rejected_individually_w
             )
         _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
 
+    bad_trust_contexts: tuple[object, ...] = ("bad-ctx", 123, True, object())
+    for bad_ctx in bad_trust_contexts:
+        with pytest.raises(RepairBudgetError, match="trust_context"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=loaded_policy,
+                trust_context=bad_ctx,  # type: ignore[arg-type]
+                event_id="ev-inv-bad-ctx",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
     # Reserve one valid worker invocation to test mark_worker_invocation_interrupted and consume
     inv_dec = ledger.reserve_worker_invocation(
         loaded_policy=loaded_policy,
@@ -7582,5 +7616,17 @@ def test_worker_invocation_invalid_args_and_target_paths_rejected_individually_w
                     worker_id="w-01",
                     provider="mock",
                     loaded_policy=loaded_policy,
+                )
+            _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})
+
+        for bad_ctx in bad_trust_contexts:
+            with pytest.raises(RepairBudgetError, match="trust_context"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=loaded_policy,
+                    trust_context=bad_ctx,  # type: ignore[arg-type]
                 )
             _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})

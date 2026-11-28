@@ -1738,6 +1738,11 @@ class DurableRepairBudgetLedger:
         target_paths: Sequence[str] | None = None,
     ) -> BudgetReservationDecision:
         """Atomically reserve one worker invocation slot (initial pass or inner correction)."""
+        if trust_context is not None:
+            from aipc.review.governance_policy import PolicyTrustContext
+
+            if not isinstance(trust_context, PolicyTrustContext):
+                raise RepairBudgetError("trust_context must be a PolicyTrustContext")
         _require_non_blank_str(event_id, "event_id")
         _require_non_blank_str(task_id, "task_id")
         _require_int_min(outer_attempt, "outer_attempt", 1)
@@ -1994,6 +1999,11 @@ class DurableRepairBudgetLedger:
         trust_context: PolicyTrustContext | None = None,
     ) -> BudgetReservationRecord:
         """Mark an in-flight worker invocation reservation as INTERRUPTED, retaining its charge."""
+        if trust_context is not None:
+            from aipc.review.governance_policy import PolicyTrustContext
+
+            if not isinstance(trust_context, PolicyTrustContext):
+                raise RepairBudgetError("trust_context must be a PolicyTrustContext")
         clean_res_id = _require_non_blank_str(reservation_id, "reservation_id")
         clean_att_id = _require_non_blank_str(attempt_id, "attempt_id")
         clean_worker_id = _require_non_blank_str(worker_id, "worker_id")
@@ -2055,6 +2065,11 @@ class DurableRepairBudgetLedger:
         trust_context: PolicyTrustContext | None = None,
     ) -> BudgetReservationRecord:
         """Mark a worker invocation reservation as CONSUMED, idempotent for same attempt_id."""
+        if trust_context is not None:
+            from aipc.review.governance_policy import PolicyTrustContext
+
+            if not isinstance(trust_context, PolicyTrustContext):
+                raise RepairBudgetError("trust_context must be a PolicyTrustContext")
         clean_res_id = _require_non_blank_str(reservation_id, "reservation_id")
         clean_att_id = _require_non_blank_str(attempt_id, "attempt_id")
         clean_worker_id = _require_non_blank_str(worker_id, "worker_id")
