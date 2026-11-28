@@ -2,7 +2,7 @@
 
 # AIPC 2.0 Universal Subscription Orchestration Roadmap
 
-**Milestone D Status** AWAITING_REVIEW. Cycle 27 of 27 (bounded Grant d31 A/B/C closure + frozen-SHA evidence pipeline) verified at `8abae7cf123e7625d90dfb218b2ea7b6f051bec2`. The Cycle #28 review and exact-SHA CI bind to `frozenSHA_d_r28`. Ratified posture remains supervised and experimental.
+**Milestone D Status** AWAITING_REVIEW. Cycle 28 of 28 (bounded Grant d32 NUL target_paths + closeout ancestor exclusion + bounded evidence-only recovery authority) verified at `8b2dc0ffadeb3d8ff198dbfe8b06ee7c42a93adf`. The Cycle #29 review and exact-SHA CI bind to `frozenSHA_d_r29`. Ratified posture remains supervised and experimental.
 
 ---
 

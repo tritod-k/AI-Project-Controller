@@ -1,3 +1,31 @@
+## AIPC 2.0 Milestone D -- Cycle #29 verification checkpoint
+
+Status AWAITING_REVIEW. Phase Gate PENDING. Tier-2 remediation cycle 28 under grant d32 (bounded NUL target_paths & closeout ancestor exclusion + bounded evidence-only recovery authority, with 34 preserved PASS 1.0 locks).
+
+Candidate branch `gemini/aipc-2.0-milestone-d` and tested source `8b2dc0ffadeb3d8ff198dbfe8b06ee7c42a93adf`. The preceding frozen checkpoint is `525ad922535ebcd46f907f7ca5b3cbc249951563`.
+Stable Controller `6671f87c8068f0ff8c937ce1ecab1d2b91ddcbf6`. This documentation checkpoint is the input to frozen-SHA targeted receipts, exact-SHA CI, and Codex review cycle 29.
+
+Gemini subscription Worker `d01_b_recovery28` implemented bounded fixes for Item A (reject embedded NUL in target_paths in reserve_worker_invocation), Item B (apply closeout exclusions to every path component including implicit ancestors in _is_excluded_closeout_entry + intermediate plans ancestor lstat check in _collect_closeout_files + D03 regression tests), and Case C dispatch-wait lock-conflict timing proof, with 0 diff bytes in task_queue.py and all 34 preserved PASS 1.0 locks.
+All 34 preserved full-file and AST-slice `PASS 1.0` review locks and `.env.example` match their source baselines. Module proof SHA-256 `bcdb512ed8b9b072882f7d19d16f4285576c3ebb531fd6326b7b8b53c93f1f5e`.
+
+## Verification receipts
+
+- `r29_d01_pytest_receipt.json` (326e576c89e15df9acc3d0708f9cc94a466bd1f3de93394511e08de710c821c2). Windows 91 passed, 0 skipped, 0 failed. Linux Docker 91 passed, 0 skipped, 0 failed.
+- `r29_d02_pytest_receipt.json` (810d6eae0e99a5eb0e110414895bdd2550ceb7dd7ddc2300d80a34b62a432eaf). Windows 21 passed, 0 skipped, 0 failed. Linux Docker 21 passed, 0 skipped, 0 failed.
+- `r29_d03_pytest_receipt.json` (5291a0a26532b6e13c3bc29b458d29ed4ee7785cf490877237617ea83570036d). Windows 23 passed, 0 skipped, 0 failed. Linux Docker 23 passed, 0 skipped, 0 failed.
+- `r29_c567_compat_pytest_receipt.json` (e2c47fd0d3d3ce1a2ded4b223a0fe0fdd313a88f3401f68483304700a450cd8a). Windows 39 passed, 0 skipped, 0 failed. Linux Docker 39 passed, 0 skipped, 0 failed.
+- `r29_linux_docker_suite_receipt.json` (657bc4ac2f528864f7020755fdb06210f558fb54d808eb42e58151382d84e1fe). 135 passed, 0 skipped, 0 failed.
+- `r29_c03_isolated_receipt.json` (3c847f4c99a0416fbdd8e798b1e68fa06ff8d6d9afd1b7890537d688aef4088d). 1 passed, 0 skipped, 0 failed.
+- `r29_full_windows_pytest_receipt.json` (c23afc4b37f3d8e6465b6ac268198d5b764a5efdd53b0455d52fa99ce2d6652d). 1686 passed, 1 skipped, 0 failed.
+- `r29_static_and_wheel_receipt.json` (16609e2c3f3c65bbcdc68fdd6481a4a80cb197fd17c0a31158a0eda584da34e8). Ruff lint, Ruff format, Git whitespace checks, and wheel build passed.
+- `r29_runtime_c_untouched_receipt.json` (a03db27780442e48f530405b139cad5bd13b4d682bd5a231e2906ada39cdde84). Verified retained archive baseline for 107441 files.
+- `r29_commander_grant_hmac_verification_receipt.json` (9189328772b80cb8d896fef2676cf8bbd00f2415ee4cfd71f38bdb15e0dceb41). 29 of 29 grant signatures plus d29 addendum and sidecars verified.
+- `r29_cumulative_budget_accounting_receipt.json` (703a29d39b8ca68c7bcea2bf2c3a74221075b00f2255893d918cc16a0c40f4df). Zero budget resets. Worker d01_b_recovery28 closed Grant d32 items A & B with 0 diff bytes in task_queue.py, workspace_git_checkpoint.py, scaffolding.py, milestone_authorization.py, and all 34 preserved PASS 1.0 locks.
+
+Next action is frozen-SHA targeted pytest receipts, exact-SHA CI, historical-regression preflight qualification, and independent Codex review cycle 29 (9 Wave 1 jobs + Wave 2).
+
+---
+
 ## AIPC 2.0 Milestone D -- Cycle #28 verification checkpoint
 
 Status AWAITING_REVIEW. Phase Gate PENDING. Tier-2 remediation cycle 27 under grant d31 (bounded A/B/C contract closure + evidence-only closure for job-a1b1b2a, job-a1b1b2b, and job-a1b2d, with 28 preserved PASS 1.0 locks).
