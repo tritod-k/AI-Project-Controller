@@ -672,6 +672,40 @@ def verify_and_restore_closeout_zip(
                             f"Case-colliding directory path rejected in closeout zip: {norm_name!r}"
                         )
                     seen_explicit_dirs[norm_cf] = norm_name
+                    if _is_excluded_closeout_entry(rel_posix.parts, rel_posix.name):
+                        raise IsolationPolicyError(
+                            f"Excluded/sensitive entry rejected in closeout zip: {info.filename!r}"
+                        )
+                    dest_path = target_resolved.joinpath(*rel_posix.parts)
+                    if not dest_path.resolve(strict=False).is_relative_to(target_resolved):
+                        raise IsolationPolicyError(
+                            f"Zip entry escapes restore_target_dir: {info.filename!r}"
+                        )
+                    if (
+                        info.file_size < 0
+                        or info.file_size > max_total_uncompressed_bytes
+                        or total_uncompressed_bytes + info.file_size > max_total_uncompressed_bytes
+                    ):
+                        raise IsolationPolicyError(
+                            "Closeout zip exceeds maximum uncompressed size limit"
+                        )
+                    dir_payload_bytes = 0
+                    with zf.open(info, "r") as member_stream:
+                        while True:
+                            chunk = member_stream.read(65536)
+                            if not chunk:
+                                break
+                            dir_payload_bytes += len(chunk)
+                            total_uncompressed_bytes += len(chunk)
+                            if total_uncompressed_bytes > max_total_uncompressed_bytes:
+                                raise IsolationPolicyError(
+                                    "Closeout zip exceeds maximum uncompressed size limit"
+                                )
+                    if dir_payload_bytes > 0:
+                        raise IsolationPolicyError(
+                            "Non-empty payload rejected for directory entry in closeout zip: "
+                            f"{orig_name!r}"
+                        )
                     continue
                 if norm_cf in seen_files:
                     raise IsolationPolicyError(

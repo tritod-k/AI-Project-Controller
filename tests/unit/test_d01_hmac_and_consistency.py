@@ -3007,6 +3007,89 @@ def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Pa
         assert prior_after.status == QueuedTaskStatus.ELIGIBLE
         assert prior_after.current_attempt == 1
 
+        # Also reject ELIGIBLE legacy C.5/C.6/C.7 prior-attempt tasks with NO ledger at all
+        attempt_rec = TaskAttemptLedger(
+            attempt=1,
+            attempt_id=f"att-01-{task_id}",
+            worker_id="w-legacy",
+            provider="mock",
+            dispatch_stage="TERMINAL",
+            started_at=_fixed_now(),
+            completed_at=_fixed_now(),
+        )
+        for case_idx, (cur_att, hist_attempts, expected_match) in enumerate(
+            (
+                (1, (attempt_rec,), "budget ledger is missing or unavailable"),
+                (1, (), "current_attempt must equal the number of recorded attempts"),
+                (
+                    0,
+                    (attempt_rec,),
+                    "current_attempt must equal the number of recorded attempts",
+                ),
+            )
+        ):
+            no_ldg_dir = tmp_path / f"{ms_id.replace('-', '_')}_no_ledger_{case_idx}"
+            no_ldg_appr = no_ldg_dir / f"{ms_id.replace('-', '_')}_approval.json"
+            persist_milestone_authorization_evidence(
+                no_ldg_appr,
+                MilestoneAuthorizationEvidence(
+                    approval_id=appr_id,
+                    project_id="proj-d01",
+                    milestone_id=ms_id,
+                    decision="APPROVED",
+                    authorized_by="K.TRITOD",
+                    baseline_commit_sha=baseline_sha,
+                    authorized_workstreams=(phase_id,),
+                ),
+            )
+            no_ldg_contract = ApprovedTaskContract(
+                task_id=task_id,
+                phase_id=phase_id,
+                milestone_id=ms_id,
+                title=f"No-ledger prior {ms_id} task {case_idx}",
+                objective="Verify missing-ledger prior-attempt ELIGIBLE task fails closed.",
+                in_scope=("src/aipc/controller/task_queue.py",),
+                validation_commands=("pytest -q",),
+                approval_id=appr_id,
+                approval_evidence_path=str(no_ldg_appr),
+            )
+            no_ldg_q_path = no_ldg_dir / "canonical_queue.json"
+            no_ldg_queue = PersistentTaskQueue(
+                no_ldg_q_path,
+                repair_budget_path=None,
+                milestone_trust_context=ms_trust_ctx,
+                clock=_fixed_now,
+            )
+            no_ldg_queue.initialize(
+                project_id="proj-d01",
+                milestone_id=ms_id,
+                contracts=(no_ldg_contract,),
+                approval_id=appr_id,
+                approval_evidence_path=no_ldg_appr,
+            )
+            nl_snap = no_ldg_queue.load()
+            nl_task = nl_snap.tasks[0].model_copy(
+                update={
+                    "status": QueuedTaskStatus.ELIGIBLE,
+                    "current_attempt": cur_att,
+                    "attempts": hist_attempts,
+                }
+            )
+            no_ldg_queue._replace_task(nl_snap, nl_task)
+            raw_q_before = no_ldg_q_path.read_bytes()
+            with pytest.raises(
+                ControllerError,
+                match=expected_match,
+            ):
+                no_ldg_queue.begin_dispatch(
+                    task_id,
+                    worker_id="w-legacy",
+                    provider="mock",
+                    operation_id=None,
+                    expected_attempt_id=None,
+                )
+            assert no_ldg_q_path.read_bytes() == raw_q_before
+
     # Once a C.5 ledger uses D01 operation-correlated tracking, omitted operation_id fails closed
     op_dir = tmp_path / "c5_with_d01_op"
     op_approval_path = op_dir / "c5_approval.json"
@@ -3086,6 +3169,25 @@ def test_begin_dispatch_verified_c5_c6_c7_legacy_initial_exemptions(tmp_path: Pa
     assert t2_after.status == QueuedTaskStatus.ELIGIBLE
     assert t2_after.current_attempt == 0
     assert t2_after.attempts == ()
+
+    # Conflicting or blank repair_reservation_id with valid operation_id fails closed without write
+    op_q_path = op_dir / "canonical_queue.json"
+    q_bytes_before = op_q_path.read_bytes()
+    l_bytes_before = op_ledger_path.read_bytes()
+    for bad_repair_res_id in ("res-conflicting-99", "   "):
+        with pytest.raises(
+            ControllerError,
+            match="conflicts with operation reservation",
+        ):
+            op_queue.begin_dispatch(
+                "task-rg01-01",
+                worker_id="w-c5",
+                provider="mock",
+                operation_id="op-c5-tracked-01",
+                repair_reservation_id=bad_repair_res_id,
+            )
+        assert op_q_path.read_bytes() == q_bytes_before
+        assert op_ledger_path.read_bytes() == l_bytes_before
 
 
 def _build_c567_policy_trust_context(
@@ -7535,13 +7637,42 @@ def test_worker_invocation_invalid_args_and_target_paths_rejected_individually_w
             )
         _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
 
-    bad_trust_contexts: tuple[object, ...] = ("bad-ctx", 123, True, object())
+    bad_trust_contexts: tuple[object, ...] = (
+        "",
+        "   ",
+        "bad-ctx",
+        123,
+        True,
+        False,
+        object(),
+    )
     for bad_ctx in bad_trust_contexts:
         with pytest.raises(RepairBudgetError, match="trust_context"):
             ledger.reserve_worker_invocation(
                 loaded_policy=loaded_policy,
                 trust_context=bad_ctx,  # type: ignore[arg-type]
                 event_id="ev-inv-bad-ctx",
+                task_id="task-01",
+                outer_attempt=1,
+                inner_pass_index=0,
+                candidate_sha="b" * 40,
+            )
+        _assert_unmutated(base_bytes, 0, 0, 0, 0, 0, {})
+
+    bad_loaded_policies: tuple[object, ...] = (
+        "",
+        "   ",
+        True,
+        False,
+        123,
+        object(),
+        {"policy_sha256": "x"},
+    )
+    for bad_pol in bad_loaded_policies:
+        with pytest.raises(RepairBudgetError, match="loaded_policy"):
+            ledger.reserve_worker_invocation(
+                loaded_policy=bad_pol,  # type: ignore[arg-type]
+                event_id="ev-inv-bad-pol",
                 task_id="task-01",
                 outer_attempt=1,
                 inner_pass_index=0,
@@ -7628,5 +7759,16 @@ def test_worker_invocation_invalid_args_and_target_paths_rejected_individually_w
                     provider="mock",
                     loaded_policy=loaded_policy,
                     trust_context=bad_ctx,  # type: ignore[arg-type]
+                )
+            _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})
+
+        for bad_pol in bad_loaded_policies:
+            with pytest.raises(RepairBudgetError, match="loaded_policy"):
+                method(
+                    reservation_id=inv_res_id,
+                    attempt_id="att-01-task-01",
+                    worker_id="w-01",
+                    provider="mock",
+                    loaded_policy=bad_pol,  # type: ignore[arg-type]
                 )
             _assert_unmutated(inv_bytes, 0, 0, 1, 1, 1, {"1": 0})

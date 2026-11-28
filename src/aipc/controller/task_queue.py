@@ -1664,11 +1664,17 @@ class PersistentTaskQueue:
                 and operation_id is None
                 and expected_attempt_id is None
             )
+            is_legacy_c567_prior_eligible = (
+                is_verified_legacy_c567
+                and target.status == QueuedTaskStatus.ELIGIBLE
+                and (target.current_attempt > 0 or bool(target.attempts))
+            )
             requires_op_reservation = (
                 is_d_milestone
                 or operation_id is not None
                 or expected_attempt_id is not None
                 or uses_d01_op_tracking
+                or is_legacy_c567_prior_eligible
                 or (
                     eff_ledger_path is not None
                     and not is_legacy_c567_initial
@@ -1728,6 +1734,16 @@ class PersistentTaskQueue:
                         "budget reservation is missing or not in RESERVED state"
                     )
                 op_reservation_id = res.reservation_id
+            if op_reservation_id is not None and repair_reservation_id is not None:
+                if (
+                    not isinstance(repair_reservation_id, str)
+                    or not repair_reservation_id.strip()
+                    or repair_reservation_id.strip() != op_reservation_id
+                ):
+                    raise ControllerError(
+                        f"Cannot dispatch task '{task_id}': repair_reservation_id "
+                        f"conflicts with operation reservation '{op_reservation_id}'"
+                    )
             if target.status == QueuedTaskStatus.REPAIR_REQUIRED and is_verified_legacy_c567:
                 scope_label = (
                     "Milestone C.7"

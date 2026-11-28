@@ -1354,3 +1354,93 @@ def test_closeout_restore_rejects_corrupt_member_payload_before_creating_target(
     assert receipt.restored_files == ("audit/second.txt", "audit/valid.json")
     assert (clean_dest / "audit" / "valid.json").read_bytes() == b'{"ok": true}\n'
     assert (clean_dest / "audit" / "second.txt").read_bytes() == b"clean payload\n"
+
+
+def test_closeout_restore_rejects_corrupt_explicit_directory_member_before_creating_target(
+    tmp_path: Path,
+) -> None:
+    def _write_sidecar(zip_path: Path) -> str:
+        zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        Path(f"{zip_path}.sha256").write_text(
+            f"{zip_sha}  {zip_path.name}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        return zip_sha
+
+    # (a) Explicit directory member ('audit/') with corrupted CRC on empty directory entry
+    bad_crc_dir_zip = tmp_path / "bad_crc_dir.zip"
+    with zipfile.ZipFile(bad_crc_dir_zip, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("audit/", b"")
+        zf.writestr("audit/valid.json", b'{"ok": true}\n')
+    raw_crc_bytes = bytearray(bad_crc_dir_zip.read_bytes())
+    lh_idx = raw_crc_bytes.index(b"PK\x03\x04")
+    cd_idx = raw_crc_bytes.index(b"PK\x01\x02")
+    raw_crc_bytes[lh_idx + 14 : lh_idx + 18] = b"\x01\x02\x03\x04"
+    raw_crc_bytes[cd_idx + 16 : cd_idx + 20] = b"\x01\x02\x03\x04"
+    bad_crc_dir_zip.write_bytes(bytes(raw_crc_bytes))
+    _write_sidecar(bad_crc_dir_zip)
+
+    # (b) Explicit directory member ('audit/') with corrupted stored payload bytes
+    bad_payload_dir_zip = tmp_path / "bad_payload_dir.zip"
+    orig_dir_payload = b"DIR_PAYLOAD_TO_CORRUPT_12345\n"
+    mutated_dir_payload = b"CORRUPTED_DIR_PAYLOAD__12345\n"
+    with zipfile.ZipFile(bad_payload_dir_zip, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("audit/", orig_dir_payload)
+        zf.writestr("audit/valid.json", b'{"ok": true}\n')
+    raw_dir_bytes = bad_payload_dir_zip.read_bytes()
+    patched_dir_bytes = raw_dir_bytes.replace(orig_dir_payload, mutated_dir_payload)
+    assert patched_dir_bytes != raw_dir_bytes
+    bad_payload_dir_zip.write_bytes(patched_dir_bytes)
+    _write_sidecar(bad_payload_dir_zip)
+
+    # (c) Explicit directory member ('audit/') with non-empty valid-CRC payload bytes
+    nonempty_dir_zip = tmp_path / "nonempty_dir.zip"
+    with zipfile.ZipFile(nonempty_dir_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("audit/", b"non-empty-dir-payload\n")
+        zf.writestr("audit/valid.json", b'{"ok": true}\n')
+    _write_sidecar(nonempty_dir_zip)
+
+    for idx, (zpath, msg_pattern) in enumerate(
+        (
+            (bad_crc_dir_zip, "Corrupt closeout zip"),
+            (bad_payload_dir_zip, "Corrupt closeout zip"),
+            (nonempty_dir_zip, "Non-empty payload rejected for directory entry"),
+        )
+    ):
+        absent_ancestor = tmp_path / f"absent_dir_ancestor_{idx}"
+        nested_dest = absent_ancestor / "nested" / "restore"
+        assert not absent_ancestor.exists()
+        with pytest.raises(IsolationPolicyError, match=msg_pattern):
+            verify_and_restore_closeout_zip(zpath, nested_dest)
+        assert not nested_dest.exists()
+        assert not absent_ancestor.exists()
+
+        existing_dest = tmp_path / f"existing_dir_restore_{idx}"
+        existing_dest.mkdir(parents=True)
+        sentinel = existing_dest / "sentinel.txt"
+        sentinel_bytes = b"keep-me-intact\n"
+        sentinel.write_bytes(sentinel_bytes)
+        with pytest.raises(IsolationPolicyError, match=msg_pattern):
+            verify_and_restore_closeout_zip(zpath, existing_dest)
+        assert sentinel.read_bytes() == sentinel_bytes
+        assert [p.name for p in existing_dest.iterdir()] == ["sentinel.txt"]
+
+    # Valid archive with explicit empty directory entry ('audit/') + regular files restores cleanly
+    valid_dir_zip = tmp_path / "valid_with_empty_dir.zip"
+    with zipfile.ZipFile(valid_dir_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("audit/", b"")
+        zf.writestr("audit/valid.json", b'{"ok": true}\n')
+        zf.writestr("audit/second.txt", b"clean payload\n")
+    valid_dir_sha = _write_sidecar(valid_dir_zip)
+
+    clean_dest = tmp_path / "clean_dir_restore" / "nested"
+    receipt = verify_and_restore_closeout_zip(
+        valid_dir_zip,
+        clean_dest,
+        expected_sha256=valid_dir_sha,
+    )
+    assert receipt.restored_file_count == 2
+    assert receipt.restored_files == ("audit/second.txt", "audit/valid.json")
+    assert (clean_dest / "audit" / "valid.json").read_bytes() == b'{"ok": true}\n'
+    assert (clean_dest / "audit" / "second.txt").read_bytes() == b"clean payload\n"

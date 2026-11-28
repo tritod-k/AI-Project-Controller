@@ -1738,6 +1738,11 @@ class DurableRepairBudgetLedger:
         target_paths: Sequence[str] | None = None,
     ) -> BudgetReservationDecision:
         """Atomically reserve one worker invocation slot (initial pass or inner correction)."""
+        if loaded_policy is not None:
+            from aipc.review.governance_policy import LoadedReviewGovernancePolicy
+
+            if not isinstance(loaded_policy, LoadedReviewGovernancePolicy):
+                raise RepairBudgetError("loaded_policy must be a LoadedReviewGovernancePolicy")
         if trust_context is not None:
             from aipc.review.governance_policy import PolicyTrustContext
 
@@ -1999,6 +2004,11 @@ class DurableRepairBudgetLedger:
         trust_context: PolicyTrustContext | None = None,
     ) -> BudgetReservationRecord:
         """Mark an in-flight worker invocation reservation as INTERRUPTED, retaining its charge."""
+        if loaded_policy is not None:
+            from aipc.review.governance_policy import LoadedReviewGovernancePolicy
+
+            if not isinstance(loaded_policy, LoadedReviewGovernancePolicy):
+                raise RepairBudgetError("loaded_policy must be a LoadedReviewGovernancePolicy")
         if trust_context is not None:
             from aipc.review.governance_policy import PolicyTrustContext
 
@@ -2065,6 +2075,11 @@ class DurableRepairBudgetLedger:
         trust_context: PolicyTrustContext | None = None,
     ) -> BudgetReservationRecord:
         """Mark a worker invocation reservation as CONSUMED, idempotent for same attempt_id."""
+        if loaded_policy is not None:
+            from aipc.review.governance_policy import LoadedReviewGovernancePolicy
+
+            if not isinstance(loaded_policy, LoadedReviewGovernancePolicy):
+                raise RepairBudgetError("loaded_policy must be a LoadedReviewGovernancePolicy")
         if trust_context is not None:
             from aipc.review.governance_policy import PolicyTrustContext
 
