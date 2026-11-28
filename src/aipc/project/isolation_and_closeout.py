@@ -352,11 +352,16 @@ def build_minimal_docker_verify_argv(
 
 
 def _is_excluded_closeout_entry(rel_parts: tuple[str, ...], name: str) -> bool:
-    lower_parts = tuple(p.lower() for p in rel_parts)
-    if any(p in {"worktrees", "logs"} for p in lower_parts):
-        return True
-    low = name.lower()
-    return low.endswith((".lock", ".key")) or low == ".env" or low.startswith(".env.")
+    for part in (*rel_parts, name):
+        low = part.lower()
+        if (
+            low in {"worktrees", "logs"}
+            or low.endswith((".lock", ".key"))
+            or low == ".env"
+            or low.startswith(".env.")
+        ):
+            return True
+    return False
 
 
 def _collect_closeout_files(
@@ -372,7 +377,11 @@ def _collect_closeout_files(
     if include_state:
         selected_roots.append(runtime_root / "state")
     if include_approved_plans:
-        selected_roots.append(runtime_root / "plans" / "approved")
+        plans_dir = runtime_root / "plans"
+        st_plans = _assert_not_symlink_lstat(plans_dir, label="closeout_plans_parent")
+        if st_plans is not None and not stat.S_ISDIR(st_plans.st_mode):
+            raise IsolationPolicyError(f"Expected directory in runtime_root: {plans_dir}")
+        selected_roots.append(plans_dir / "approved")
 
     collected: list[tuple[str, Path]] = []
     for root_dir in selected_roots:

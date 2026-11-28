@@ -1302,6 +1302,7 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
 
     orig_acquire_lock = tq_mod._acquire_queue_ledger_lock
     parent_contending_event = threading.Event()
+    dispatch_completed_event = threading.Event()
 
     def _wrapped_acquire_lock(*args: object, **kwargs: object) -> object:
         parent_contending_event.set()
@@ -1317,11 +1318,13 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
             time.sleep(0.02)
 
         conflict_observed: list[bool] = []
+        conflict_ts: list[float] = []
         lock_file_c = tq_mod._resolve_queue_ledger_lock_path(queue_c, ledger_c)
         assert lock_file_c is not None
 
         def _signal_release() -> None:
             assert parent_contending_event.wait(timeout=10.0)
+            assert not dispatch_completed_event.is_set()
             with open(lock_file_c, "a+b") as probe_fh:
                 with pytest.raises((OSError, BlockingIOError)):
                     if sys.platform == "win32":
@@ -1333,9 +1336,11 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
                         import fcntl
 
                         fcntl.flock(probe_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert not dispatch_completed_event.is_set()
             conflict_observed.append(True)
             assert queue_c_path.read_bytes() == baseline_queue_bytes
             assert ledger_c_path.read_bytes() == baseline_ledger_bytes
+            conflict_ts.append(time.monotonic())
             release_ts.append(time.monotonic())
             release_file.write_text("RELEASE", encoding="utf-8")
 
@@ -1349,6 +1354,7 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
             provider="mock",
             operation_id="op-proc-01",
         )
+        dispatch_completed_event.set()
         parent_done_ts = time.monotonic()
         releaser.join(timeout=10.0)
         assert not releaser.is_alive()
@@ -1362,8 +1368,9 @@ def test_interleaved_reconcile_between_reserve_and_dispatch_blocks_released_rese
 
     assert conflict_observed == [True]
     assert child_proc.returncode == 0
+    assert len(conflict_ts) == 1
     assert len(release_ts) == 1
-    assert parent_done_ts >= release_ts[0]
+    assert parent_done_ts >= release_ts[0] >= conflict_ts[0]
     assert dispatched_c.status == QueuedTaskStatus.RUNNING
     assert ledger_c.load().milestone_consumed == 1
 
@@ -7550,6 +7557,8 @@ def test_worker_invocation_invalid_args_and_target_paths_rejected_individually_w
         [""],
         ["   "],
         ["../escape"],
+        ["src/a\x00.py"],
+        ["\x00"],
     )
     for bad_entries in bad_entry_lists:
         with pytest.raises(RepairBudgetError, match="target_paths"):

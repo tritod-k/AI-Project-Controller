@@ -1444,3 +1444,144 @@ def test_closeout_restore_rejects_corrupt_explicit_directory_member_before_creat
     assert receipt.restored_files == ("audit/second.txt", "audit/valid.json")
     assert (clean_dest / "audit" / "valid.json").read_bytes() == b'{"ok": true}\n'
     assert (clean_dest / "audit" / "second.txt").read_bytes() == b"clean payload\n"
+
+
+def test_closeout_restore_rejects_excluded_implicit_ancestors_and_dirs_and_payload_limits(
+    tmp_path: Path,
+) -> None:
+    def _write_zip_with_sidecar(zip_path: Path, entries: list[tuple[str, bytes]]) -> str:
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, payload in entries:
+                zf.writestr(name, payload)
+        zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        Path(f"{zip_path}.sha256").write_text(
+            f"{zip_sha}  {zip_path.name}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        return zip_sha
+
+    rejected_cases: list[tuple[str, Path]] = []
+
+    # (a) Excluded implicit ancestors
+    implicit_ancestor_members = (
+        ("env_ancestor", ".env/a.txt"),
+        ("env_prod_ancestor", "audit/.env.prod/a.json"),
+        ("key_ancestor", "audit/secret.key/a.json"),
+        ("lock_ancestor", "audit/state.lock/a.json"),
+        ("logs_ancestor", "logs/a.txt"),
+        ("worktrees_ancestor", "worktrees/a.txt"),
+    )
+    for label, member in implicit_ancestor_members:
+        zpath = tmp_path / f"excl_{label}.zip"
+        _write_zip_with_sidecar(
+            zpath,
+            [("audit/valid.json", b'{"ok": true}\n'), (member, b"excluded\n")],
+        )
+        rejected_cases.append((label, zpath))
+
+    # (b) Excluded explicit directories
+    explicit_dir_members = (
+        ("dir_env", ".env/"),
+        ("dir_key", "audit/secret.key/"),
+        ("dir_logs", "logs/"),
+    )
+    for label, dir_member in explicit_dir_members:
+        zpath = tmp_path / f"excl_{label}.zip"
+        _write_zip_with_sidecar(
+            zpath,
+            [("audit/valid.json", b'{"ok": true}\n'), (dir_member, b"")],
+        )
+        rejected_cases.append((label, zpath))
+
+    # (c) Member payload limit (> 64 MiB single deflated zero-filled member)
+    oversize_member_zip = tmp_path / "oversize_member.zip"
+    huge_65m = b"\x00" * (65 * 1024 * 1024)
+    _write_zip_with_sidecar(
+        oversize_member_zip,
+        [("audit/valid.json", b'{"ok": true}\n'), ("audit/huge.bin", huge_65m)],
+    )
+    rejected_cases.append(("oversize_member", oversize_member_zip))
+
+    # (c) Aggregate payload limit (two deflated 33 MiB zero-filled members = 66 MiB > 64 MiB)
+    oversize_agg_zip = tmp_path / "oversize_aggregate.zip"
+    chunk_33m = b"\x00" * (33 * 1024 * 1024)
+    _write_zip_with_sidecar(
+        oversize_agg_zip,
+        [("audit/part1.bin", chunk_33m), ("audit/part2.bin", chunk_33m)],
+    )
+    rejected_cases.append(("oversize_aggregate", oversize_agg_zip))
+
+    for idx, (label, zpath) in enumerate(rejected_cases):
+        absent_ancestor = tmp_path / f"absent_excl_{label}_{idx}"
+        nested_dest = absent_ancestor / "nested" / "restore"
+        assert not absent_ancestor.exists()
+        with pytest.raises(IsolationPolicyError):
+            verify_and_restore_closeout_zip(zpath, nested_dest)
+        assert not nested_dest.exists()
+        assert not absent_ancestor.exists()
+
+        existing_dest = tmp_path / f"existing_excl_{label}_{idx}"
+        existing_dest.mkdir(parents=True)
+        sentinel = existing_dest / "sentinel.txt"
+        sentinel_bytes = b"keep-me-intact\n"
+        sentinel.write_bytes(sentinel_bytes)
+        with pytest.raises(IsolationPolicyError):
+            verify_and_restore_closeout_zip(zpath, existing_dest)
+        assert sentinel.read_bytes() == sentinel_bytes
+        assert [p.name for p in existing_dest.iterdir()] == ["sentinel.txt"]
+
+    # (d) Valid nested archive restores cleanly
+    valid_nested_zip = tmp_path / "valid_nested.zip"
+    valid_sha = _write_zip_with_sidecar(
+        valid_nested_zip,
+        [
+            ("audit/", b""),
+            ("audit/nested/", b""),
+            ("audit/nested/deep/receipt.json", b'{"nested": true}\n'),
+        ],
+    )
+    clean_dest = tmp_path / "clean_nested_restore" / "target"
+    receipt = verify_and_restore_closeout_zip(
+        valid_nested_zip,
+        clean_dest,
+        expected_sha256=valid_sha,
+    )
+    assert receipt.restored_file_count == 1
+    assert receipt.restored_files == ("audit/nested/deep/receipt.json",)
+    assert (clean_dest / "audit" / "nested" / "deep" / "receipt.json").read_bytes() == (
+        b'{"nested": true}\n'
+    )
+
+
+def test_collect_closeout_files_rejects_symlink_intermediate_plans_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rt = tmp_path / "project" / "runtime"
+    (rt / "audit").mkdir(parents=True)
+    (rt / "audit" / "r1.json").write_text('{"ok": true}\n', encoding="utf-8")
+    plans_dir = rt / "plans"
+    (plans_dir / "approved").mkdir(parents=True)
+    (plans_dir / "approved" / "MASTER_PLAN.md").write_text("# Plan\n", encoding="utf-8")
+
+    orig_lstat = os.lstat
+    plans_path_str = os.path.normcase(os.path.abspath(plans_dir.resolve()))
+
+    def _fake_lstat(path: Path | str, *args: Any, **kwargs: Any) -> Any:
+        p_str = os.path.normcase(os.path.abspath(path))
+        if p_str == plans_path_str:
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFLNK | 0o777,
+                st_size=0,
+                st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+                st_reparse_tag=0xA0000003,
+            )
+        return orig_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", _fake_lstat)
+
+    out_zip = tmp_path / "out" / "closeout.zip"
+    with pytest.raises(IsolationPolicyError, match="closeout_plans_parent"):
+        export_release_closeout_zip(rt, out_zip, include_approved_plans=True)
+    assert not out_zip.exists()

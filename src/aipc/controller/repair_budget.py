@@ -1769,6 +1769,8 @@ class DurableRepairBudgetLedger:
                     or not raw_target.strip()
                 ):
                     raise RepairBudgetError("target_paths entries must be non-blank strings")
+                if "\x00" in raw_target:
+                    raise RepairBudgetError("target_paths entries cannot contain NUL characters")
         try:
             norm_paths = _normalize_target_paths(target_paths)
         except RepairBudgetError as exc:
